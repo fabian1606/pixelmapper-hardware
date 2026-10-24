@@ -1,0 +1,29 @@
+{
+  "$schema": "../schema.json",
+  "protocol": "artnet",
+  "packet": "ArtRdm",
+  "vectors": [
+    {
+      "name": "device_info_ack_pa2",
+      "description": "Node -> controller: ArtRdm from Port-Address 2 carrying the GET_RESPONSE ACK for DEVICE_INFO from tube 7FF0:00000001 to 7FF0:80123456 (TN 5); FifoAvail 3, FifoMax 4",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtRdm packet definition p.92-93; RDM frame per protocol/rdm-digest.md section 1 (ANSI E1.20), DEVICE_INFO layout as RDM_GET_DEVICE_INFO.json",
+      "hex": "4172742d4e6574000083000e010000000000000304000002012b7ff0801234567ff00000000105000000002100601301000001010100000500000c0104000100000005a7",
+      "valid": true,
+      "fields": {
+        "op_code": 33536,
+        "prot_ver": 14,
+        "rdm_ver": 1,
+        "fifo_avail": 3,
+        "fifo_max": 4,
+        "net": 0,
+        "command": 0,
+        "address": 2,
+        "port_address": 2,
+        "rdm_packet": "012b7ff0801234567ff00000000105000000002100601301000001010100000500000c0104000100000005a7",
+        "rdm_message_length": 43,
+        "rdm_checksum": 1447
+      },
+      "notes": "RdmPacket = E1.20 frame without start code 0xCC (44 bytes). Message Length 43 = 24 + PDL 19 and the checksum (sum of all bytes incl. 0xCC, mod 2^16) still count the omitted start code."
+    }
+  ]
+}
