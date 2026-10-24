@@ -1,0 +1,18 @@
+menu "Pixelmapper port engine (pm_port)"
+
+    config PM_PORT_ISR_CACHE_SAFE
+        bool "Keep DMX/RDM timing running while the flash cache is disabled"
+        default y
+        select GPTIMER_ISR_CACHE_SAFE if !SPI_FLASH_AUTO_SUSPEND
+        select GPTIMER_CTRL_FUNC_IN_IRAM
+        help
+            Places the port ISRs (UART + timer) and the line state machine in IRAM and allocates the interrupts
+            with ESP_INTR_FLAG_IRAM, so breaks and RDM turnarounds keep their timing during flash writes
+            (OTA, NVS). Costs a few KB of IRAM.
+
+    config PM_PORT_TASK_PRIORITY
+        int "Priority of the port engine task (core 1)"
+        default 22
+        range 1 24
+
+endmenu

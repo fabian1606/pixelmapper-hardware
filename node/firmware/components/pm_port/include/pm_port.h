@@ -30,6 +30,9 @@ typedef enum {
     PM_PORT_MODE_OFF = 0,
     PM_PORT_MODE_OUTPUT,       /**< DMX out + RDM controller (if rdm_enabled) */
     PM_PORT_MODE_INPUT,        /**< DMX in */
+    PM_PORT_MODE_PIXEL,        /**< placeholder: fast pixel protocol for LED matrices (later; one port, several
+                                    universes, UART up to 5 Mbit/s - see MEASURE.md). pm_port_configure()
+                                    returns ESP_ERR_NOT_SUPPORTED for now */
 } pm_port_mode_t;
 
 /** Line configuration of one port (derived from pm_port_settings_t by main/pm_config). */
@@ -42,6 +45,9 @@ typedef struct {
     uint16_t mab_us;
     uint8_t rate_hz;
     bool continuous;            /**< false = delta style: send on change + slow refresh */
+    uint16_t mbs_us;            /**< extra mark between slots (inter-slot time), 0 = back to back (default).
+                                     Experimental: realised with the UART tx_idle_num in 4-us steps, see
+                                     MEASURE.md M5. 0..1000 */
 } pm_port_cfg_t;
 
 /** Events from core 1 to core 0 (pm_port_event_receive). */
@@ -74,6 +80,8 @@ typedef struct {
     uint16_t tod_count;
     bool discovery_running;
     bool input_signal;
+    uint32_t rx_errors;         /**< framing/parity/overflow events on the line */
+    uint32_t events_dropped;    /**< events lost because the core-0 queue was full (whole engine) */
 } pm_port_stats_t;
 
 /** Configure UARTs/pins from the board table, create the event queue. Does not start the task. */
