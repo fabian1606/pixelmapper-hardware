@@ -63,6 +63,8 @@ extern "C" {
 #define PM_PORT_RDM_GAP_US 176u                /**< after response / broadcast / DMX frame before the next packet */
 #define PM_PORT_RDM_EXPECT_RESP_SLOTS 64u      /**< response size assumed for scheduling (not a limit) */
 #define PM_PORT_DUB_MAX_BYTES 32u              /**< 7 preamble + separator + 16 EUID/ECS, with slack */
+#define PM_PORT_RX_LATENCY_US 100u             /**< byte on the wire -> rx_bytes() (UART RX FIFO threshold 1 +
+                                                    ISR); added to RDM receive deadlines */
 
 #define PM_PORT_DMX_FLOOR_HZ 30u               /**< DMX rate never drops below this for RDM (docs/plan.md) */
 #define PM_PORT_RDM_STARVE_FRAMES 4u           /**< ...except: an RDM transaction is forced after this many frames */
@@ -101,7 +103,7 @@ typedef struct {
 pm_port_sched_t pm_port_sched_decide(const pm_port_sched_in_t *in, uint32_t *wake_us);
 
 /** Expected line time of an RDM transaction (break + MAB + request + response window/backoff). */
-uint32_t pm_port_rdm_estimate_us(const pm_rdm_txn_t *t, uint16_t break_us, uint16_t mab_us);
+uint32_t pm_port_rdm_estimate_us(const pm_rdm_txn_t *t, uint16_t break_us, uint16_t mab_us, uint16_t mbs_us);
 
 /* ------------------------------------------------------------------------------------------------ line FSM */
 
@@ -128,7 +130,10 @@ typedef struct {
     void (*set_de)(void *ctx, bool on);          /**< RS-485 driver enable (+ /RE) */
     void (*set_break)(void *ctx, bool on);       /**< hold TX low (break) */
     void (*tx_start)(void *ctx, const uint8_t *data, uint16_t len); /**< send bytes; tx_done() at the end */
-    void (*rx_flush)(void *ctx);                 /**< drop everything in the RX FIFO, clear error flags */
+    /** Drop everything in the RX FIFO, clear error flags. per_byte = deliver every byte at once (RDM response
+     *  window, low latency); false = bulk delivery (DMX input). */
+    void (*rx_start)(void *ctx, bool per_byte);
+    void (*tx_abort)(void *ctx);                 /**< stop sending: flush TX FIFO, no tx_done() will follow */
     /** Frame to send now (start code + slots, len 1..513); the buffer must stay valid until tx_done. */
     uint16_t (*dmx_frame)(void *ctx, const uint8_t **frame);
     bool (*dmx_fresh)(void *ctx);                /**< new data published since the last dmx_frame() */
@@ -141,6 +146,7 @@ typedef struct {
     uint16_t mab_us;
     uint8_t rate_hz;
     bool continuous;
+    uint16_t mbs_us;                /**< mark between slots realised by the platform (only used for timeouts) */
 } pm_port_line_timing_t;
 
 typedef struct {
@@ -184,6 +190,7 @@ typedef struct {
     uint16_t in_len;
     bool in_sync;                   /**< a break was seen; bytes belong to a frame */
     uint32_t last_in_us;
+    bool in_seen;                   /**< a valid input frame arrived since configure */
 
     pm_port_line_stats_t stats;
 } pm_port_line_t;

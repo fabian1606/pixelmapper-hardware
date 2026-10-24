@@ -57,7 +57,8 @@ typedef enum {
     PM_PORT_EV_INPUT_FRAME,     /**< input port: new/changed frame available (pm_port_input_read) */
     PM_PORT_EV_INPUT_SIGNAL,    /**< input signal appeared/lost (value = 1/0) */
     PM_PORT_EV_BOOT_CATCH,      /**< BOOT_CATCH state changed (value = pm_boot_catch_state_t) */
-    PM_PORT_EV_ERROR,           /**< UART/driver problem (value = esp_err_t) */
+    PM_PORT_EV_ERROR,           /**< UART/driver problem (value = esp_err_t). value = ESP_ERR_NO_MEM with `token`
+                                     set: an accepted pm_port_rdm_submit() request was dropped (queue race) */
 } pm_port_event_type_t;
 
 typedef struct {

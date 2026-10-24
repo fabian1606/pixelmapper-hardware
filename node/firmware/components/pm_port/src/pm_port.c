@@ -23,6 +23,7 @@
 #include "esp_attr.h"
 #include "esp_intr_alloc.h"
 #include "esp_log.h"
+#include "esp_rom_sys.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -39,7 +40,8 @@ static const char *TAG = "pm_port";
 
 #define EVENT_QUEUE_LEN 32
 #define CMD_QUEUE_LEN 24
-#define UART_RX_FULL_THR 64
+#define UART_RX_FULL_THR_BULK 16  /* DMX input: one interrupt per 0.7 ms */
+#define UART_RX_FULL_THR_RDM 1    /* RDM response window: every byte at once (DUB/inter-slot timing) */
 #define UART_TX_EMPTY_THR 32
 #define UART_RX_TOUT_BITS 11        /* deliver the last bytes one character time after the line went idle */
 #define INPUT_LOST_US 1000000u      /* E1.11: no frame for 1 s = no signal */
@@ -225,7 +227,7 @@ static IRAM_ATTR void op_set_break(void *ctx, bool on)
 
 static IRAM_ATTR void tx_feed(port_t *p)
 {
-    uint32_t space = UART_LL_FIFO_DEF_LEN - uart_ll_get_txfifo_len(p->hw);
+    uint32_t space = uart_ll_get_txfifo_len(p->hw); /* P4 LL: returns the FREE space */
     uint32_t n = (uint32_t)(p->tx_len - p->tx_pos);
     if (n > space) n = space;
     if (n) {
@@ -234,6 +236,7 @@ static IRAM_ATTR void tx_feed(port_t *p)
     }
     if (p->tx_pos >= p->tx_len) {
         uart_ll_disable_intr_mask(p->hw, UART_INTR_TXFIFO_EMPTY);
+        uart_ll_clr_intsts_mask(p->hw, UART_INTR_TX_DONE); /* a mid-frame underrun may have set it */
         uart_ll_ena_intr_mask(p->hw, UART_INTR_TX_DONE);
     } else {
         uart_ll_clr_intsts_mask(p->hw, UART_INTR_TXFIFO_EMPTY);
@@ -252,10 +255,21 @@ static IRAM_ATTR void op_tx_start(void *ctx, const uint8_t *data, uint16_t len)
     tx_feed(p);
 }
 
-static IRAM_ATTR void op_rx_flush(void *ctx)
+static IRAM_ATTR void op_tx_abort(void *ctx)
+{
+    port_t *p = ctx;
+    p->tx_data = NULL;
+    if (!p->hw_ok) return;
+    uart_ll_disable_intr_mask(p->hw, UART_INTR_TXFIFO_EMPTY | UART_INTR_TX_DONE);
+    uart_ll_txfifo_rst(p->hw);
+    uart_ll_clr_intsts_mask(p->hw, UART_INTR_TXFIFO_EMPTY | UART_INTR_TX_DONE);
+}
+
+static IRAM_ATTR void op_rx_start(void *ctx, bool per_byte)
 {
     port_t *p = ctx;
     if (!p->hw_ok) return;
+    uart_ll_set_rxfifo_full_thr(p->hw, per_byte ? UART_RX_FULL_THR_RDM : UART_RX_FULL_THR_BULK);
     uart_ll_rxfifo_rst(p->hw);
     uart_ll_clr_intsts_mask(p->hw, UART_INTR_RXFIFO_FULL | UART_INTR_RXFIFO_TOUT | UART_INTR_BRK_DET |
                                        UART_INTR_FRAM_ERR | UART_INTR_PARITY_ERR | UART_INTR_RXFIFO_OVF);
@@ -308,6 +322,8 @@ static IRAM_ATTR void uart_isr(void *arg)
     uint32_t now = now_us();
     uint32_t st = uart_ll_get_intsts_mask(p->hw);
     uart_ll_clr_intsts_mask(p->hw, st);
+    /* the break itself is a character with a framing error: not an error of the data */
+    if (st & UART_INTR_BRK_DET) st &= ~(uint32_t)(UART_INTR_FRAM_ERR | UART_INTR_PARITY_ERR);
 
     if (st & RX_INTS) {
         /* bytes before a break belong to the previous packet: deliver them first */
@@ -326,6 +342,9 @@ static IRAM_ATTR void uart_isr(void *arg)
     }
     if ((st & UART_INTR_TXFIFO_EMPTY) && p->tx_data) tx_feed(p);
     if (st & UART_INTR_TX_DONE) {
+        /* TX_DONE may come while the last stop bit is still shifting out (IDF's RS-485 path checks the same);
+         * dropping DE then would cut the checksum. Wait for the transmitter FSM, at most ~1.5 characters. */
+        for (int i = 0; i < 64 && !uart_ll_is_tx_idle(p->hw); i++) esp_rom_delay_us(1);
         uart_ll_disable_intr_mask(p->hw, UART_INTR_TX_DONE);
         p->tx_data = NULL;
         pm_port_line_tx_done(&p->line, now);
@@ -406,7 +425,7 @@ static esp_err_t uart_hw_init(port_t *p)
     p->hw = hw;
     uart_ll_set_mode(hw, UART_MODE_UART);
     uart_ll_discard_error_data(hw, true); /* break NUL and collision bytes never reach the FIFO */
-    uart_ll_set_rxfifo_full_thr(hw, UART_RX_FULL_THR);
+    uart_ll_set_rxfifo_full_thr(hw, UART_RX_FULL_THR_BULK);
     uart_ll_set_txfifo_empty_thr(hw, UART_TX_EMPTY_THR);
     uart_ll_set_rx_tout(hw, UART_RX_TOUT_BITS);
     uart_ll_set_tx_idle_num(hw, 0);
@@ -456,7 +475,8 @@ static pm_port_line_mode_t line_mode(pm_port_mode_t m)
 static pm_port_line_timing_t line_timing(const pm_port_cfg_t *c)
 {
     pm_port_line_timing_t t = {.break_us = c->break_us, .mab_us = c->mab_us, .rate_hz = c->rate_hz,
-                               .continuous = c->continuous};
+                               .continuous = c->continuous, .mbs_us = c->mbs_us > MBS_MAX_US ? MBS_MAX_US
+                                                                                             : c->mbs_us};
     if (t.break_us == 0) t.break_us = PM_PORT_BREAK_DEFAULT_US;
     if (t.mab_us == 0) t.mab_us = PM_PORT_MAB_DEFAULT_US;
     if (t.rate_hz == 0) t.rate_hz = PM_PORT_RATE_DEFAULT_HZ;
@@ -476,14 +496,14 @@ static void apply_cfg(port_t *p, const pm_port_cfg_t *c, uint32_t ms)
     } else {
         pm_port_line_set_timing(&p->line, &t);
     }
-    if (p->hw_ok) {
-        uint16_t mbs = c->mbs_us > MBS_MAX_US ? MBS_MAX_US : c->mbs_us;
-        uart_ll_set_tx_idle_num(p->hw, (mbs + 3u) / 4u); /* bit times at 4 us */
-    }
+    if (p->hw_ok) uart_ll_set_tx_idle_num(p->hw, (t.mbs_us + 3u) / 4u); /* bit times at 4 us */
+    pm_rdm_rx_t rx;
+    bool aborted = pm_port_line_rdm_take(&p->line, &rx); /* transaction aborted by a mode change */
     rearm();
     portEXIT_CRITICAL(&s_lock);
 
-    /* the result of an aborted transaction is collected by service_port() */
+    /* hand the aborted result to the controller before it is reset */
+    if (aborted) pm_rdm_ctrl_done(&p->ctrl, ms, &rx);
     if (mode_changed || rdm_on != rdm_was) {
         pm_rdm_ctrl_set_enabled(&p->ctrl, false, ms); /* flushes the TOD */
         if (rdm_on) pm_rdm_ctrl_set_enabled(&p->ctrl, true, ms); /* full discovery */
@@ -506,12 +526,19 @@ static void handle_cmd(const cmd_t *c, uint32_t ms)
     case CMD_CONFIGURE:
         apply_cfg(p, &c->cfg, ms);
         break;
-    case CMD_RDM:
+    case CMD_RDM: {
+        pm_err_t e = pm_rdm_ctrl_submit(&p->ctrl, &c->req);
+        /* refresh the free count before releasing the pending slot: queue_free() never over-reports */
+        atomic_store(&p->rdm_ctrl_free, pm_rdm_ctrl_queue_free(&p->ctrl));
         atomic_fetch_sub(&p->rdm_pending, 1);
-        if (pm_rdm_ctrl_submit(&p->ctrl, &c->req) != PM_OK) {
+        if (e != PM_OK) {
             ESP_LOGW(TAG, "port %u: RDM queue full, request dropped", c->port + 1u);
+            pm_port_event_t ev = {.type = PM_PORT_EV_ERROR, .port = c->port, .token = c->req.token,
+                                  .value = ESP_ERR_NO_MEM};
+            emit(&ev);
         }
         break;
+    }
     case CMD_TOD_CONTROL:
         switch (c->arg) {
         case PM_ATC_FLUSH: pm_rdm_ctrl_flush(&p->ctrl, ms); break;
@@ -567,10 +594,10 @@ static void service_port(port_t *p, uint32_t ms)
     if (p->cfg.mode == PM_PORT_MODE_INPUT) {
         portENTER_CRITICAL(&s_lock);
         uint32_t last = p->line.last_in_us;
-        uint32_t frames = p->line.stats.frames_in;
+        bool seen = p->line.in_seen;
         uint32_t now = now_us();
         portEXIT_CRITICAL(&s_lock);
-        bool sig = frames > 0 && (now - last) < INPUT_LOST_US;
+        bool sig = seen && (now - last) < INPUT_LOST_US;
         if (sig != p->signal) {
             p->signal = sig;
             pm_port_event_t ev = {.type = PM_PORT_EV_INPUT_SIGNAL, .port = p->idx, .value = sig ? 1 : 0};
@@ -669,7 +696,8 @@ esp_err_t pm_port_init(const pm_board_t *board, const pm_uid_t *node_uid)
             .set_de = op_set_de,
             .set_break = op_set_break,
             .tx_start = op_tx_start,
-            .rx_flush = op_rx_flush,
+            .rx_start = op_rx_start,
+            .tx_abort = op_tx_abort,
             .dmx_frame = op_dmx_frame,
             .dmx_fresh = op_dmx_fresh,
             .rdm_done = op_rdm_done,

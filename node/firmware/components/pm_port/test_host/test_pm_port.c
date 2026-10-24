@@ -136,7 +136,8 @@ static void op_tx_start(void *ctx, const uint8_t *data, uint16_t len)
     }
 }
 
-static void op_rx_flush(void *ctx) { (void)ctx; }
+static void op_rx_start(void *ctx, bool per_byte) { (void)ctx; (void)per_byte; }
+static void op_tx_abort(void *ctx) { (void)ctx; S.tx_busy = false; }
 
 static uint16_t op_dmx_frame(void *ctx, const uint8_t **frame)
 {
@@ -162,7 +163,8 @@ static const pm_port_line_ops_t OPS = {
     .set_de = op_set_de,
     .set_break = op_set_break,
     .tx_start = op_tx_start,
-    .rx_flush = op_rx_flush,
+    .rx_start = op_rx_start,
+    .tx_abort = op_tx_abort,
     .dmx_frame = op_dmx_frame,
     .dmx_fresh = op_dmx_fresh,
     .rdm_done = op_rdm_done,
@@ -374,7 +376,7 @@ static void test_rdm_timeout_and_broadcast(void)
     int tx = find(EV_TX, 26, from);
     int done = find(EV_TXDONE, -1, (unsigned)tx);
     int rd = find(EV_RDMDONE, -1, (unsigned)tx);
-    CHECK_EQ(S.log[rd].t - S.log[done].t, 2800);
+    CHECK_EQ(S.log[rd].t - S.log[done].t, 2800 + PM_PORT_RX_LATENCY_US);
     pm_rdm_rx_t rx;
     CHECK(pm_port_line_rdm_take(&S.line, &rx));
     CHECK_EQ(rx.status, PM_RDM_RX_TIMEOUT);
@@ -472,7 +474,7 @@ static void test_dub(void)
     tx = find(EV_TX, 38, from);
     done = find(EV_TXDONE, -1, (unsigned)tx);
     int rd = find(EV_RDMDONE, -1, (unsigned)tx);
-    CHECK_EQ(S.log[rd].t - S.log[done].t, 2900);
+    CHECK_EQ(S.log[rd].t - S.log[done].t, 2900 + PM_PORT_RX_LATENCY_US);
     nb = find(EV_BRK, 1, (unsigned)rd);
     CHECK(S.log[nb].t - S.log[done].t >= 5800);
 }
@@ -575,6 +577,20 @@ static void test_input(void)
     CHECK_EQ(S.log[c].val, 10);
     CHECK_EQ(S.in_len, 10);
     CHECK_EQ(S.in_frame[9], 9);
+    CHECK(S.line.in_seen);
+
+    /* a framing error inside a frame drops that frame (slots would be shifted) */
+    unsigned before = S.line.stats.frames_in;
+    t = S.now + 100;
+    rx_push_packet(t, true, f, 20);
+    rx_push(t + 192 + 5 * 44, RX_ERR, 0);
+    rx_push(t + 192 + 21 * 44 + 100, RX_BREAK, 0);
+    rx_push_packet(t + 192 + 21 * 44 + 56, false, f, 0);
+    sim_run(t + 5000);
+    CHECK_EQ(S.line.stats.frames_in, before);
+    /* reconfigure resets the "seen" state */
+    sim_configure(PM_PORT_LINE_MODE_INPUT, 176, 16, 40, true);
+    CHECK(!S.line.in_seen);
 }
 
 static void test_tbuf(void)
@@ -654,7 +670,8 @@ static void test_sched(void)
     CHECK_EQ(pm_port_sched_decide(&in, &wake), PM_PORT_SCHED_RDM);
 
     pm_rdm_txn_t t = make_txn(PM_RDM_TXN_DUB, 38);
-    CHECK_EQ(pm_port_rdm_estimate_us(&t, 176, 16), 176 + 16 + 38 * 44 + 5800);
+    CHECK_EQ(pm_port_rdm_estimate_us(&t, 176, 16, 0), 176 + 16 + 38 * 44 + 5800);
+    CHECK_EQ(pm_port_rdm_estimate_us(&t, 176, 16, 4), 176 + 16 + 38 * 48 + 5800);
 }
 
 static void test_board_rev_code(void)

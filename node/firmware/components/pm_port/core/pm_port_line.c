@@ -37,9 +37,10 @@ PM_PORT_IRAM pm_port_sched_t pm_port_sched_decide(const pm_port_sched_in_t *in, 
     return PM_PORT_SCHED_WAIT;
 }
 
-PM_PORT_IRAM uint32_t pm_port_rdm_estimate_us(const pm_rdm_txn_t *t, uint16_t break_us, uint16_t mab_us)
+PM_PORT_IRAM uint32_t pm_port_rdm_estimate_us(const pm_rdm_txn_t *t, uint16_t break_us, uint16_t mab_us,
+                                              uint16_t mbs_us)
 {
-    uint32_t us = (uint32_t)break_us + mab_us + (uint32_t)t->len * PM_PORT_US_PER_SLOT;
+    uint32_t us = (uint32_t)break_us + mab_us + (uint32_t)t->len * (PM_PORT_US_PER_SLOT + mbs_us);
     switch (t->kind) {
     case PM_RDM_TXN_BROADCAST:
         us += PM_PORT_RDM_GAP_US;
@@ -112,7 +113,9 @@ static PM_PORT_IRAM void schedule(pm_port_line_t *l, uint32_t now)
         .continuous = l->timing.continuous,
         .dmx_fresh = l->timing.continuous ? true : l->ops.dmx_fresh(l->ops.ctx),
         .rdm_pending = rdm_pending,
-        .rdm_est_us = rdm_pending ? pm_port_rdm_estimate_us(l->offer, l->timing.break_us, l->timing.mab_us) : 0,
+        .rdm_est_us = rdm_pending ? pm_port_rdm_estimate_us(l->offer, l->timing.break_us, l->timing.mab_us,
+                                                            l->timing.mbs_us)
+                                  : 0,
         .frames_since_rdm = l->frames_since_rdm,
     };
     uint32_t wake = now;
@@ -145,7 +148,8 @@ static PM_PORT_IRAM void rdm_finish(pm_port_line_t *l, pm_rdm_rx_status_t st)
     l->result.data = l->rx;
     l->result_ready = true;
     l->frames_since_rdm = 0;
-    if (st == PM_RDM_RX_TIMEOUT && l->offer->kind != PM_RDM_TXN_BROADCAST) l->stats.rdm_timeouts++;
+    /* broadcasts never answer, and an empty DUB branch is normal: neither is a timeout */
+    if (st == PM_RDM_RX_TIMEOUT && l->offer->kind == PM_RDM_TXN_REQUEST) l->stats.rdm_timeouts++;
     if (st == PM_RDM_RX_GARBAGE) l->stats.rdm_garbage++;
     l->ops.rdm_done(l->ops.ctx);
 }
@@ -160,6 +164,7 @@ static PM_PORT_IRAM void input_finish(pm_port_line_t *l, uint32_t now)
         if (l->in[0] == 0x00) {
             l->stats.frames_in++;
             l->last_in_us = now;
+            l->in_seen = true;
             l->ops.input_frame(l->ops.ctx, l->in, l->in_len);
         } else {
             l->stats.frames_in_other_sc++;
@@ -187,6 +192,7 @@ PM_PORT_IRAM void pm_port_line_set_timing(pm_port_line_t *l, const pm_port_line_
     l->timing.mab_us = clamp16(t->mab_us, PM_PORT_MAB_MIN_US, PM_PORT_MAB_MAX_US);
     l->timing.rate_hz = (uint8_t)clamp16(t->rate_hz, PM_PORT_RATE_MIN_HZ, PM_PORT_RATE_MAX_HZ);
     l->timing.continuous = t->continuous;
+    l->timing.mbs_us = t->mbs_us > 1000u ? 1000u : t->mbs_us;
     l->period_us = 1000000u / l->timing.rate_hz;
 }
 
@@ -198,12 +204,14 @@ PM_PORT_IRAM void pm_port_line_configure(pm_port_line_t *l, pm_port_line_mode_t 
         rdm_finish(l, PM_RDM_RX_TIMEOUT);
     }
     if (timing) pm_port_line_set_timing(l, timing);
+    if (l->state == PM_PORT_LINE_TX) l->ops.tx_abort(l->ops.ctx);
     l->ops.set_break(l->ops.ctx, false);
     l->mode = mode;
     l->dmx_started = false;
     l->frames_since_rdm = 0;
     l->in_len = 0;
     l->in_sync = false;
+    l->in_seen = false;
     l->rx_len = 0;
     l->rx_err = false;
     switch (mode) {
@@ -214,7 +222,7 @@ PM_PORT_IRAM void pm_port_line_configure(pm_port_line_t *l, pm_port_line_mode_t 
         break;
     case PM_PORT_LINE_MODE_INPUT:
         l->ops.set_de(l->ops.ctx, false);
-        l->ops.rx_flush(l->ops.ctx);
+        l->ops.rx_start(l->ops.ctx, false);
         enter(l, PM_PORT_LINE_INPUT);
         break;
     case PM_PORT_LINE_MODE_OFF:
@@ -275,11 +283,12 @@ PM_PORT_IRAM void pm_port_line_timer(pm_port_line_t *l, uint32_t now)
             break;
         }
         /* watchdog: twice the nominal time plus 2 ms */
-        set_deadline(l, now + 2u * l->cur_len * PM_PORT_US_PER_SLOT + 2000u);
+        set_deadline(l, now + 2u * l->cur_len * (PM_PORT_US_PER_SLOT + l->timing.mbs_us) + 2000u);
         l->ops.tx_start(l->ops.ctx, l->cur_data, l->cur_len);
         break;
     case PM_PORT_LINE_TX:
         l->stats.tx_watchdog++;
+        l->ops.tx_abort(l->ops.ctx);
         pm_port_line_tx_done(l, now);
         break;
     case PM_PORT_LINE_RDM_WAIT:
@@ -332,10 +341,11 @@ PM_PORT_IRAM void pm_port_line_tx_done(pm_port_line_t *l, uint32_t now)
     }
     /* turnaround: release the line immediately, the responder may answer after 176 us */
     l->ops.set_de(l->ops.ctx, false);
-    l->ops.rx_flush(l->ops.ctx);
+    l->ops.rx_start(l->ops.ctx, true);
     enter(l, PM_PORT_LINE_RDM_WAIT);
-    set_deadline(l, now + (l->offer->kind == PM_RDM_TXN_DUB ? PM_PORT_RDM_DUB_WINDOW_US
-                                                            : PM_PORT_RDM_RESPONSE_TIMEOUT_US));
+    /* + latency: the break / first byte is reported a little after it started on the wire */
+    set_deadline(l, now + PM_PORT_RX_LATENCY_US + (l->offer->kind == PM_RDM_TXN_DUB ? PM_PORT_RDM_DUB_WINDOW_US
+                                                                                    : PM_PORT_RDM_RESPONSE_TIMEOUT_US));
 }
 
 static PM_PORT_IRAM void rx_append(pm_port_line_t *l, const uint8_t *data, uint16_t len, uint16_t cap)
@@ -381,7 +391,7 @@ PM_PORT_IRAM void pm_port_line_rx_bytes(pm_port_line_t *l, uint32_t now, const u
             break;
         }
         rx_append(l, data, len, PM_RDM_MAX_MSG_LEN);
-        set_deadline(l, now + PM_PORT_RDM_INTERSLOT_TIMEOUT_US);
+        set_deadline(l, now + PM_PORT_RDM_INTERSLOT_TIMEOUT_US + PM_PORT_RX_LATENCY_US);
         if (l->rx_len >= 1 && l->rx[0] != PM_RDM_START_CODE) {
             rdm_finish(l, PM_RDM_RX_GARBAGE);
             backoff(l, later(now + PM_PORT_RDM_GAP_US, l->tx_end + PM_PORT_RDM_NORESP_BACKOFF_US));
@@ -407,6 +417,12 @@ PM_PORT_IRAM void pm_port_line_rx_error(pm_port_line_t *l, uint32_t now)
         l->offer->kind == PM_RDM_TXN_DUB) {
         l->rx_err = true;
     }
+    /* DMX input: a corrupted slot is missing from the FIFO, all later slots would shift - drop the frame.
+     * (The platform must not report the framing error of the break itself, see pm_port.c uart_isr.) */
+    if (l->state == PM_PORT_LINE_INPUT) {
+        l->in_sync = false;
+        l->in_len = 0;
+    }
 }
 
 PM_PORT_IRAM void pm_port_line_rx_break(pm_port_line_t *l, uint32_t now)
@@ -424,7 +440,7 @@ PM_PORT_IRAM void pm_port_line_rx_break(pm_port_line_t *l, uint32_t now)
             l->rx_len = 0;
             l->rx_err = false; /* noise before the response break does not matter */
             enter(l, PM_PORT_LINE_RDM_RX);
-            set_deadline(l, now + PM_PORT_RDM_INTERSLOT_TIMEOUT_US);
+            set_deadline(l, now + PM_PORT_RDM_INTERSLOT_TIMEOUT_US + PM_PORT_RX_LATENCY_US);
         }
         break;
     case PM_PORT_LINE_RDM_RX:
