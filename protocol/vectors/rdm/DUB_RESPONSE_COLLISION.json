@@ -1,0 +1,27 @@
+{
+  "$schema": "../schema.json",
+  "protocol": "rdm",
+  "packet": "DUB_RESPONSE",
+  "vectors": [
+    {
+      "name": "collision_aligned",
+      "description": "two DUB answers (7FF0:12345678 and 7FF0:12345687, both 7 preamble bytes) on the wire at once, modelled as wired AND: EUID decodes, ECS does not match -> collision, split the branch",
+      "source": "pm_rdm test_rdm_sim.c bus model (bitwise AND of both answers); decode rule rdm-digest.md \u00a73.1",
+      "hex": "FE FE FE FE FE FE FE AA FF 7F FA F5 BA 57 BE 75 FE 57 AA 55 AA 5D AE 5D",
+      "valid": false,
+      "fields": {
+        "error": "bad_checksum"
+      }
+    },
+    {
+      "name": "collision_misaligned",
+      "description": "DUB answers of 7FF0:12345678 (7 preamble bytes) and 7FF0:00000001 (3 preamble bytes) overlapping: separator lands on a preamble position -> no valid frame",
+      "source": "pm_rdm test_rdm_sim.c bus model (bitwise AND of both answers); decode rule rdm-digest.md \u00a73.1",
+      "hex": "FE FE FE AA FE 7E FA A0 AA 55 AA 55 AA 55 AA 55 AE 57 EA 7D AA 5D FF 7D",
+      "valid": false,
+      "fields": {
+        "error": "bad_checksum"
+      }
+    }
+  ]
+}

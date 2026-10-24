@@ -3,7 +3,8 @@
 #include "test.h"
 #include "vectors.h"
 
-void test_rdm_responder(void); /* test_rdm_responder.c */
+void test_rdm_responder(void);
+void test_rdm_ctrl(void); /* test_rdm_responder.c */
 
 static void check_msg(const pm_vec_t *v)
 {
@@ -65,4 +66,5 @@ void test_rdm(void)
     g_context = NULL;
     CHECK(done >= 20);
     test_rdm_responder();
+    test_rdm_ctrl();
 }
