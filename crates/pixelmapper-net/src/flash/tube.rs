@@ -811,7 +811,7 @@ mod tests {
                 return self.node(cmd, p, pd);
             }
             self.n += 1;
-            if uid != self.uid || (self.lose_every != 0 && self.n % self.lose_every == 0) {
+            if uid != self.uid || (self.lose_every != 0 && self.n.is_multiple_of(self.lose_every)) {
                 return None;
             }
             let nack = |r: NackReason| Some(Err(r.0));
@@ -1057,8 +1057,7 @@ mod tests {
             }
             let last_write = seen
                 .iter()
-                .filter(|p| p.phase == FlashPhase::Writing)
-                .last()
+                .rfind(|p| p.phase == FlashPhase::Writing)
                 .unwrap();
             assert_eq!(last_write.done, last_write.total);
             assert_eq!(last_write.total as usize, im.page_plan(true).len());
