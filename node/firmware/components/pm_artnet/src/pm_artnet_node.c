@@ -115,6 +115,9 @@ typedef struct {
     uint32_t last_ms;
     bool reboot_pending;
     uint32_t reboot_at;
+    bool done;             /* last session finished with FirmAllGood (answer a repeated FirmLast) */
+    uint32_t done_ip;
+    uint8_t done_block;
 } fw_state_t;
 
 struct pm_artnet_node {
@@ -172,7 +175,12 @@ static void refresh_net(pm_artnet_node_t *n)
 
 static bool net_ready(const pm_artnet_node_t *n) { return n->net.ip != 0 && n->net.link_up; }
 
-static uint32_t bcast_addr(const pm_artnet_node_t *n) { return n->net.ip | ~n->net.mask; }
+/** Directed broadcast of our subnet, 0 (= do not send) while the mask is unknown: never 255.255.255.255. */
+static uint32_t bcast_addr(const pm_artnet_node_t *n)
+{
+    if (n->net.mask == 0 || n->net.mask == 0xFFFFFFFFu) return 0;
+    return n->net.ip | ~n->net.mask;
+}
 
 static bool is_broadcast(const pm_artnet_node_t *n, uint32_t dst)
 {
@@ -397,8 +405,12 @@ static void queue_reply(pm_artnet_node_t *n, uint32_t ip, uint32_t due, uint8_t 
         pending_reply_t *e = &n->pend[i];
         if (e->used && e->ip == ip) {
             e->pages |= pages;
-            if (time_before(due, e->due_ms)) e->due_ms = due;
-            e->await_settings |= await_settings;
+            /* a reply that waits for pm_artnet_settings_changed() is not pulled forward (it would show old values) */
+            if (time_before(due, e->due_ms) && !e->await_settings) e->due_ms = due;
+            if (await_settings && !e->await_settings) {
+                e->await_settings = true;
+                e->due_ms = due;
+            }
             return;
         }
         if (!e->used && free_slot == NULL) free_slot = e;
@@ -558,7 +570,7 @@ static void apply_failsafe(pm_artnet_node_t *n, unsigned p)
 
 /** Feed one frame into output port p (ArtDmx or local input). Returns true when accepted. */
 static bool dmx_to_port(pm_artnet_node_t *n, unsigned p, uint32_t ip, uint8_t physical, uint8_t seq,
-                        const uint8_t *data, uint16_t len)
+                        const uint8_t *data, uint16_t len, bool defer)
 {
     pm_artnet_merge_t *m = &n->merge[p];
     int s = merge_find(m, ip, physical);
@@ -579,7 +591,7 @@ static bool dmx_to_port(pm_artnet_node_t *n, unsigned p, uint32_t ip, uint8_t ph
     ps->rx_ever = true;
     ps->data_lost = false;
     ps->last_rx_ms = n->now;
-    output_frame(n, p, m->out, m->out_len, n->sync_mode);
+    output_frame(n, p, m->out, m->out_len, defer);
     return true;
 }
 
@@ -597,7 +609,7 @@ static void on_dmx(pm_artnet_node_t *n, uint32_t src, const uint8_t *data, size_
     bool accepted = false;
     for (unsigned p = 0; p < num_pages(n); p++) {
         if (output_active(n, p) && pset(n, p)->address == d.port_address) {
-            accepted |= dmx_to_port(n, p, src, d.physical, d.sequence, d.data, d.length);
+            accepted |= dmx_to_port(n, p, src, d.physical, d.sequence, d.data, d.length, n->sync_mode);
         }
     }
     if (!accepted) return;
@@ -809,19 +821,26 @@ static void on_ip_prog(pm_artnet_node_t *n, uint32_t src, const uint8_t *data, s
             w->dhcp = true; /* lower bits ignored */
         } else {
             if (req.command & PM_IPPROG_RESET) *w = def;
-            if (req.command & PM_IPPROG_PROG_IP) {
+            /* invalid values (IP 0/255.255.255.255, non-contiguous or empty mask) are ignored */
+            if ((req.command & PM_IPPROG_PROG_IP) && req.ip != 0 && req.ip != 0xFFFFFFFFu) {
                 w->static_ip = req.ip;
                 w->dhcp = false;
             }
-            if (req.command & PM_IPPROG_PROG_MASK) w->static_mask = req.mask;
+            if ((req.command & PM_IPPROG_PROG_MASK) && req.mask != 0 && ((~req.mask + 1u) & ~req.mask) == 0) {
+                w->static_mask = req.mask;
+            }
             if (req.command & PM_IPPROG_PROG_GATEWAY) w->gateway = req.gateway;
         }
     }
     const pm_ip_settings_t *o = &n->settings.ip;
     bool changed = w->dhcp != o->dhcp || w->static_ip != o->static_ip || w->static_mask != o->static_mask ||
                    w->gateway != o->gateway;
-    const pm_ip_settings_t new_ip = *w;
-    if (changed && n->ops.settings_apply) n->ops.settings_apply(n->ops.ctx, &n->work, PM_CHG_IP, PM_SRC_IPPROG);
+    pm_ip_settings_t new_ip = *w;
+    if (changed && (n->ops.settings_apply == NULL ||
+                    n->ops.settings_apply(n->ops.ctx, &n->work, PM_CHG_IP, PM_SRC_IPPROG) != PM_OK)) {
+        changed = false; /* not stored: report the unchanged configuration */
+        new_ip = n->settings.ip;
+    }
 
     /* Reply from the old address with the new values (contract §5). */
     pm_artipprogreply_t r = {.ip = n->net.ip, .mask = n->net.mask, .gateway = n->net.gateway};
@@ -842,12 +861,12 @@ static void on_ip_prog(pm_artnet_node_t *n, uint32_t src, const uint8_t *data, s
 
 static bool rdm_port(const pm_artnet_node_t *n, unsigned p) { return output_active(n, p) && pset(n, p)->rdm_enabled; }
 
-static void send_tod(pm_artnet_node_t *n, uint32_t ip, unsigned p)
+static void send_tod(pm_artnet_node_t *n, uint32_t ip, unsigned p, bool nak)
 {
     pm_port_address_t pa = pset(n, p)->address;
     pm_arttoddata_t t = {.rdm_ver = 1, .port = 1, .bind_index = (uint8_t)(p + 1u), .net = PM_PA_NET(pa),
                          .address = (uint8_t)(pa & 0xFFu), .uids = n->tod};
-    if (!rdm_port(n, p) || n->ops.tod_get == NULL) { /* no RDM on this port: TOD not available */
+    if (nak || !rdm_port(n, p) || n->ops.tod_get == NULL) { /* no RDM / discovery restarted: TOD not available */
         t.command_response = PM_TOD_NAK;
         send(n, ip, n->tx, pm_arttoddata_encode(&t, n->tx, sizeof(n->tx)));
         return;
@@ -898,7 +917,7 @@ static void on_tod_request(pm_artnet_node_t *n, uint32_t src, const uint8_t *dat
         for (unsigned i = 0; i < r.adcount; i++) {
             if (tod_addressed(n, p, r.net, r.address[i])) {
                 tod_subscribe(n, src, p);
-                send_tod(n, src, p);
+                send_tod(n, src, p, false);
                 break;
             }
         }
@@ -929,7 +948,7 @@ static void on_tod_control(pm_artnet_node_t *n, uint32_t src, const uint8_t *dat
     for (unsigned p = 0; p < num_pages(n); p++) {
         if (!(ports & (1u << p))) continue;
         tod_subscribe(n, src, p);
-        send_tod(n, src, p);
+        send_tod(n, src, p, c.command == PM_ATC_FLUSH); /* the new TOD follows via pm_artnet_tod_changed() */
     }
 }
 
@@ -953,7 +972,14 @@ static void on_rdm(pm_artnet_node_t *n, uint32_t src, const uint8_t *data, size_
     pm_port_address_t pa = (pm_port_address_t)(((r.net & 0x7Fu) << 8) | r.address);
     for (unsigned p = 0; p < num_pages(n); p++) {
         if (pset(n, p)->address != pa) continue;
-        /* routing (node UID / DMX line / broadcast) is the platform's job: every UID is forwarded */
+        /* Every UID is forwarded on an RDM port (routing node UID / line / broadcast is the platform's job). A port
+           without RDM (input, RDM disabled, disabled) only passes requests the node responder handles. */
+        if (!rdm_port(n, p)) {
+            pm_uid_t dest;
+            if (r.rdm_len < 8) continue;
+            memcpy(dest.b, r.rdm + 2, 6);
+            if (!pm_uid_addresses(&dest, &n->id.uid)) continue;
+        }
         rdm_pending_t *slot = &n->rdm[0];
         for (unsigned i = 0; i < PM_ARTNET_MAX_RDM_PENDING; i++) {
             if (!n->rdm[i].used) {
@@ -1042,6 +1068,14 @@ static void on_firmware(pm_artnet_node_t *n, uint32_t src, const uint8_t *data, 
         fw_reply(n, src, PM_FIRM_FAIL);
         return;
     }
+    if (f->done && f->done_ip == src && fm.type == PM_FIRM_LAST && fm.block_id == f->done_block) {
+        fw_reply(n, src, PM_FIRM_ALL_GOOD); /* our FirmAllGood got lost */
+        return;
+    }
+    if (f->reboot_pending) { /* a new image is about to boot */
+        fw_reply(n, src, PM_FIRM_FAIL);
+        return;
+    }
     pm_fw_error_t e;
     if (fm.type == PM_FIRM_FIRST) {
         if (f->active) fw_abort(n, PM_FW_ERROR_SEQUENCE); /* restart by the same controller */
@@ -1087,6 +1121,9 @@ static void on_firmware(pm_artnet_node_t *n, uint32_t src, const uint8_t *data, 
         return;
     }
     fw_reply(n, src, PM_FIRM_ALL_GOOD);
+    f->done = true;
+    f->done_ip = src;
+    f->done_block = fm.block_id;
     f->reboot_pending = true;
     f->reboot_at = n->now + PM_ARTNET_REBOOT_DELAY_MS;
 }
@@ -1100,7 +1137,7 @@ static void send_input(pm_artnet_node_t *n, unsigned p)
     /* local loopback: own output ports on the same universe (our own ArtDmx never comes back, digest §3.2) */
     for (unsigned q = 0; q < num_pages(n); q++) {
         if (q != p && output_active(n, q) && pset(n, q)->address == pset(n, p)->address) {
-            dmx_to_port(n, q, n->net.ip, (uint8_t)p, 0, s->in_data, s->in_len);
+            dmx_to_port(n, q, n->net.ip, (uint8_t)p, 0, s->in_data, s->in_len, false); /* not part of a sync */
         }
     }
     if (!net_ready(n)) return;
@@ -1226,7 +1263,7 @@ void pm_artnet_tick(pm_artnet_node_t *n)
         if (output_active(n, p)) {
             pm_artnet_merge_t *m = &n->merge[p];
             if (pm_artnet_merge_expire(m, n->now) && pm_artnet_merge_sources(m) == 1 && !s->data_lost) {
-                output_frame(n, p, m->out, m->out_len, false);
+                output_frame(n, p, m->out, m->out_len, n->sync_mode);
             }
             if (!s->data_lost && elapsed(n->now, s->last_rx_ms, PM_ARTNET_DATA_LOSS_MS)) {
                 s->data_lost = true;
@@ -1249,6 +1286,16 @@ void pm_artnet_tick(pm_artnet_node_t *n)
     }
     for (unsigned i = 0; i < PM_ARTNET_MAX_RDM_PENDING; i++) {
         if (n->rdm[i].used && elapsed(n->now, n->rdm[i].t_ms, PM_ARTNET_RDM_TIMEOUT_MS)) n->rdm[i].used = false;
+    }
+    /* drop expired entries, so they cannot come back after the 2^32 ms wrap-around */
+    for (unsigned i = 0; i < PM_ARTNET_MAX_CONTROLLERS; i++) {
+        if (n->ctl[i].used && elapsed(n->now, n->ctl[i].last_ms, PM_ARTNET_CONTROLLER_KEEP_MS)) n->ctl[i].used = false;
+    }
+    for (unsigned p = 0; p < PM_NUM_PORTS; p++) {
+        for (unsigned i = 0; i < PM_ARTNET_MAX_SUBSCRIBERS; i++) {
+            in_sub_t *sub = &n->port[p].subs[i];
+            if (sub->used && elapsed(n->now, sub->last_ms, PM_ARTNET_SUBSCRIBER_TIMEOUT_MS)) sub->used = false;
+        }
     }
     finish(n);
 }
@@ -1308,7 +1355,7 @@ void pm_artnet_tod_changed(pm_artnet_node_t *n, pm_port_idx_t port)
     if (n == NULL || port >= num_pages(n)) return;
     now_ms(n);
     for (unsigned i = 0; i < PM_ARTNET_MAX_SUBSCRIBERS; i++) {
-        if (n->tod_subs[i].used && (n->tod_subs[i].ports & (1u << port))) send_tod(n, n->tod_subs[i].ip, port);
+        if (n->tod_subs[i].used && (n->tod_subs[i].ports & (1u << port))) send_tod(n, n->tod_subs[i].ip, port, false);
     }
     finish(n);
 }

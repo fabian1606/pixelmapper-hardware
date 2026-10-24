@@ -35,6 +35,7 @@ static struct {
     pm_artnet_net_info_t net;
     pm_settings_t settings;
     bool sync_cb;
+    pm_err_t apply_result;
     unsigned applies;
     pm_change_mask_t last_mask;
     pm_change_source_t last_src;
@@ -93,6 +94,7 @@ static void f_net_info(void *ctx, pm_artnet_net_info_t *out) { (void)ctx; *out =
 static pm_err_t f_settings_apply(void *ctx, const pm_settings_t *s, pm_change_mask_t mask, pm_change_source_t src)
 {
     (void)ctx;
+    if (F.apply_result != PM_OK) return F.apply_result;
     F.settings = *s;
     F.applies++;
     F.last_mask = mask;
@@ -1097,8 +1099,119 @@ static void test_diag(void)
     g_context = NULL;
 }
 
+/* ------------------------------------------------------------------------------------------------ review fixes */
+
+static void test_edge_cases(void)
+{
+    g_context = "edge_rdm_routing";
+    setup();
+    F.settings.port[3].direction = PM_PORT_DIR_INPUT;
+    pm_artnet_settings_changed(N, &F.settings, PM_CHG_PORT(PM_CHG_P_DIRECTION, 3));
+    uint8_t msg[25] = {0x01, 0x18, 0x7f, 0xf0, 0, 0, 0, 1, 0x7f, 0xf0, 0, 0, 0, 9, 5, 1, 0, 0, 0, 0x20, 0, 0x60, 0};
+    pm_artrdm_t r = {.rdm_ver = 1, .address = 4, .rdm = msg, .rdm_len = sizeof(msg)};
+    rx(CTL_A, PKT, pm_artrdm_encode(&r, PKT, sizeof(PKT)));
+    CHECK_EQ(F.rdm_count, 0); /* tube UID on an input port: no RDM there */
+    memcpy(msg + 2, NODE_UID.b, 6);
+    rx(CTL_A, PKT, pm_artrdm_encode(&r, PKT, sizeof(PKT)));
+    CHECK_EQ(F.rdm_count, 1); /* the node responder is reachable through every port */
+    rx(CTL_A, PKT, mk_address(1, PM_AC_RDM_DISABLE0));
+    memcpy(msg + 2, "\x7f\xf0\x00\x00\x00\x01", 6);
+    r.address = 1;
+    rx(CTL_A, PKT, pm_artrdm_encode(&r, PKT, sizeof(PKT)));
+    CHECK_EQ(F.rdm_count, 1);
+
+    g_context = "edge_ip_prog";
+    setup();
+    pm_artipprog_t ip = {.command = PM_IPPROG_ENABLE | PM_IPPROG_PROG_IP | PM_IPPROG_PROG_MASK, .ip = 0,
+                         .mask = 0xFF00FF00u};
+    rx(CTL_A, PKT, pm_artipprog_encode(&ip, PKT, sizeof(PKT)));
+    CHECK_EQ(F.applies, 0);
+    CHECK_EQ(F.ip_applies, 0);
+    F.apply_result = PM_ERR_IO;
+    ip = (pm_artipprog_t){.command = PM_IPPROG_ENABLE | PM_IPPROG_PROG_IP, .ip = IP(10, 0, 0, 5)};
+    clear_sent();
+    rx(CTL_A, PKT, pm_artipprog_encode(&ip, PKT, sizeof(PKT)));
+    CHECK_EQ(F.ip_applies, 0);
+    const sent_t *s = nth_sent(PM_OP_IP_PROG_REPLY, CTL_A, 0);
+    pm_artipprogreply_t ir;
+    CHECK(s != NULL);
+    if (s && pm_artipprogreply_decode(s->data, s->len, &ir) == PM_OK) CHECK(ir.ip == NODE_IP && ir.status == 0x40);
+
+    g_context = "edge_firmware";
+    setup();
+    build_alf(PM_ARTNET_OEM_NODE);
+    unsigned nb = alf_blocks();
+    for (unsigned b = 0; b < nb; b++) send_block(CTL_A, b, type_of(b, nb), (uint8_t)b);
+    CHECK_EQ(send_block(CTL_A, nb - 1, PM_FIRM_LAST, (uint8_t)(nb - 1)), PM_FIRM_ALL_GOOD); /* reply was lost */
+    CHECK_EQ(F.fw_finishes, 1);
+    CHECK_EQ(send_block(CTL_B, 0, PM_FIRM_FIRST, 0), PM_FIRM_FAIL); /* during the reboot delay */
+    CHECK_EQ(F.fw_begins, 1);
+    advance(PM_ARTNET_REBOOT_DELAY_MS + 10);
+    CHECK_EQ(F.fw_reboots, 1);
+
+    g_context = "edge_tod_flush";
+    setup();
+    F.tod_n[0] = 5;
+    pm_arttodcontrol_t c = {.net = 0, .command = PM_ATC_FLUSH, .address = 1};
+    clear_sent();
+    rx(CTL_A, PKT, pm_arttodcontrol_encode(&c, PKT, sizeof(PKT)));
+    pm_arttoddata_t t;
+    s = nth_sent(PM_OP_TOD_DATA, CTL_A, 0);
+    CHECK(s != NULL);
+    if (s && pm_arttoddata_decode(s->data, s->len, &t) == PM_OK) CHECK_EQ(t.command_response, PM_TOD_NAK);
+    clear_sent();
+    pm_artnet_tod_changed(N, 0); /* the flushing controller gets the new TOD */
+    CHECK_EQ(count_sent(PM_OP_TOD_DATA, CTL_A), 1);
+
+    g_context = "edge_await_reply";
+    setup();
+    rx(CTL_A, PKT, mk_poll(PM_POLL_FLAG_REPLY_ON_CHANGE));
+    advance(10);
+    F.sync_cb = false;
+    pm_artaddress_t a;
+    memset(&a, 0, sizeof(a));
+    a.net_switch = a.sub_switch = 0x7F;
+    memset(a.sw_in, 0x7F, 4);
+    a.sw_out[0] = 0x89;
+    a.bind_index = 1;
+    a.command = PM_AC_LED_LOCATE; /* visible at once, the address only after settings_changed */
+    clear_sent();
+    rx(CTL_A, PKT, pm_artaddress_encode(&a, PKT, sizeof(PKT)));
+    CHECK_EQ(count_sent(PM_OP_POLL_REPLY, CTL_A), 0);
+    pm_artnet_settings_changed(N, &F.settings, F.last_mask);
+    CHECK(count_sent(PM_OP_POLL_REPLY, CTL_A) >= 1);
+    CHECK_EQ(reply_of(nth_sent(PM_OP_POLL_REPLY, CTL_A, 0)).sw_out[0], 9);
+
+    g_context = "edge_time_wrap";
+    setup();
+    F.now = 0xFFFFFF00u;
+    pm_artnet_tick(N);
+    F.rnd = 500;
+    clear_sent();
+    rx(CTL_A, PKT, mk_poll(0));
+    advance(600); /* crosses 2^32 */
+    CHECK_EQ(count_sent(PM_OP_POLL_REPLY, CTL_A), 4);
+    rx(CTL_A, PKT, mk_dmx_fill(1, 0, 0, 1, 2));
+    F.settings.port[0].failsafe = PM_FAILSAFE_FULL;
+    pm_artnet_settings_changed(N, &F.settings, PM_CHG_PORT(PM_CHG_P_OUTPUT, 0));
+    advance(PM_ARTNET_DATA_LOSS_MS - 20);
+    CHECK_EQ(F.out[0].len, 4);
+    advance(30);
+    CHECK_EQ(F.out[0].len, 512);
+
+    g_context = "edge_no_mask";
+    setup_with(port4_input);
+    F.net.mask = 0;
+    pm_artnet_net_changed(N);
+    clear_sent();
+    advance(PM_ARTNET_OWN_POLL_MS + 10);
+    CHECK_EQ(count_sent(PM_OP_POLL, 0), 0); /* never 255.255.255.255 */
+    g_context = NULL;
+}
+
 void test_artnet_node(void)
 {
+    test_edge_cases();
     test_poll_reply();
     test_unsolicited();
     test_merge_unit();
