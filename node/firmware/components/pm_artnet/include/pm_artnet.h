@@ -40,9 +40,18 @@ extern "C" {
 #define PM_ARTNET_OWN_POLL_MS 3000u        /**< node's own ArtPoll to find input subscribers */
 #define PM_ARTNET_REPLY_DELAY_MAX_MS 1000u /**< random ArtPollReply delay (spec) */
 #define PM_ARTNET_FIRMWARE_TIMEOUT_MS 30000u
+#define PM_ARTNET_CONTROLLER_KEEP_MS 30000u /**< a poller with Flags bit 1/2 gets unsolicited replies / diagnostics
+                                                 this long after its last ArtPoll (our definition) */
+#define PM_ARTNET_ADDRESS_REPLY_WAIT_MS 200u /**< reply to ArtAddress/ArtInput waits this long at most for the
+                                                  platform's pm_artnet_settings_changed() */
+#define PM_ARTNET_REBOOT_DELAY_MS 500u     /**< FirmAllGood -> fw_sink->reboot() */
+#define PM_ARTNET_RDM_TIMEOUT_MS 10000u    /**< forget a forwarded ArtRdm request without answer */
+#define PM_ARTNET_SUBSCRIBER_TIMEOUT_MS 10000u /**< input subscriber (output node) not seen in own polls */
 
 #define PM_ARTNET_MAX_CONTROLLERS 16u      /**< remembered pollers (reply-on-change, input targets) */
 #define PM_ARTNET_MAX_SUBSCRIBERS 32u      /**< remembered output nodes per input port / ArtTodData subscribers */
+#define PM_ARTNET_MAX_RDM_PENDING 32u      /**< forwarded ArtRdm requests waiting for an answer */
+#define PM_ARTNET_TOD_MAX 512u             /**< UIDs per port that are reported in ArtTodData */
 
 /* ------------------------------------------------------------------------------------------------ platform ops */
 
@@ -109,6 +118,8 @@ typedef struct {
     pm_err_t (*rdm_request)(void *ctx, const pm_artnet_rdm_request_t *req);
     /** Free request slots of a port (ArtRdm FifoAvail). */
     uint8_t (*rdm_fifo_avail)(void *ctx, pm_port_idx_t port);
+    /** Optional: size of the RDM request queue of a port (ArtRdm FifoMax). NULL = the largest FifoAvail seen. */
+    uint8_t (*rdm_fifo_max)(void *ctx, pm_port_idx_t port);
 
     /** LED/indicator mode changed: PM_AC_LED_NORMAL / MUTE / LOCATE (display off / identify). */
     void (*indicator)(void *ctx, uint8_t ac_led_command);
@@ -141,6 +152,12 @@ pm_artnet_node_t *pm_artnet_node_init(void *mem, const pm_artnet_identity_t *id,
 /** Handle one received UDP datagram (any port 6454 traffic, also our own broadcasts - they are ignored). */
 void pm_artnet_handle_packet(pm_artnet_node_t *n, uint32_t src_ip, uint16_t src_port, const uint8_t *data,
                              size_t len);
+
+/** Same with the destination address of the datagram (host order, 0 = unknown). Needed to accept ArtSync only
+ *  as broadcast (spec: "Unicast Transmit Not Allowed"); with 0 every ArtSync is treated as broadcast. pm_net should
+ *  use this variant (IP_PKTINFO). */
+void pm_artnet_handle_packet_ex(pm_artnet_node_t *n, uint32_t src_ip, uint16_t src_port, uint32_t dst_ip,
+                                const uint8_t *data, size_t len);
 
 /** Periodic work: delayed poll replies, merge/sync/data-loss timeouts, input keepalive, own polls, firmware
  *  timeout. Call every 5-20 ms. */
@@ -180,19 +197,27 @@ typedef struct {
         uint32_t ip;
         uint8_t physical;
         uint32_t last_ms;
+        uint8_t sequence;        /**< last accepted ArtDmx Sequence (node logic, 0 = none) */
+        uint8_t seq_drops;       /**< consecutive out-of-order drops (node logic) */
         uint16_t len;
         uint8_t data[512];
     } src[2];
     pm_merge_mode_t mode;
+    bool cancel_pending;         /**< AcCancelMerge received: the next ArtDmx ends the merge */
+    bool exclusive;              /**< after AcCancelMerge: only exclusive_ip is accepted until it expires */
+    uint32_t exclusive_ip;
     uint16_t out_len;
     uint8_t out[512];
 } pm_artnet_merge_t;
 
 void pm_artnet_merge_init(pm_artnet_merge_t *m, pm_merge_mode_t mode);
-/** Feed one ArtDmx. Returns PM_OK (out updated), PM_ERR_FULL (third source dropped). */
+/** Feed one ArtDmx. Returns PM_OK (out updated), PM_ERR_FULL (third source dropped), PM_ERR_REJECTED (other IP
+ *  after AcCancelMerge), PM_ERR_INVALID_ARG. HTP: highest value per slot; LTP: the latest packet wins (slots
+ *  beyond its length keep the other source). */
 pm_err_t pm_artnet_merge_feed(pm_artnet_merge_t *m, uint32_t ip, uint8_t physical, const uint8_t *data,
                               uint16_t len, uint32_t now_ms);
-/** Expire sources older than PM_ARTNET_MERGE_TIMEOUT_MS. Returns true if a source was removed. */
+/** Expire sources older than PM_ARTNET_MERGE_TIMEOUT_MS. Returns true if a source was removed. When one source
+ *  remains, `out` is recomputed from it; when none remains, `out` keeps the last merge result. */
 bool pm_artnet_merge_expire(pm_artnet_merge_t *m, uint32_t now_ms);
 /** Number of active sources (2 = merging -> GoodOutputA bit 3). */
 unsigned pm_artnet_merge_sources(const pm_artnet_merge_t *m);
