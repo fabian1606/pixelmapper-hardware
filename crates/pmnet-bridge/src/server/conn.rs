@@ -143,6 +143,7 @@ async fn writer_loop(
     ping_every: Duration,
 ) {
     let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + ping_every, ping_every);
+    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // True once a queued close frame went out (orderly close).
     let mut close_sent = false;
     loop {

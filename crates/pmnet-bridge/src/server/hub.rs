@@ -245,10 +245,8 @@ impl<B: NetBackend> Hub<B> {
     /// The backend's event stream overflowed: re-read its state and send the differences as events.
     fn resync(&mut self, lost: u64) {
         tracing::warn!("event stream lagged by {lost} events, resynchronizing");
-        let events = self
-            .mirror
-            .read()
-            .resync_events(self.backend.status(), self.backend.snapshot());
+        let (status, snapshot) = (self.backend.status(), self.backend.snapshot());
+        let events = self.mirror.read().resync_events(status, snapshot);
         for event in events {
             self.on_event(event);
         }
