@@ -1,0 +1,26 @@
+[package]
+name = "pmnet-bridge"
+description = "WebSocket bridge between the Pixelmapper web app and Art-Net 4 / RDM (`pmnet serve`)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "pmnet-bridge"
+path = "src/main.rs"
+
+[dependencies]
+bytes = "1"
+clap.workspace = true
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+serde.workspace = true
+serde_json.workspace = true
+serde_path_to_error = "0.1"
+thiserror.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
+tokio-tungstenite = "0.30"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi", "std"] }
