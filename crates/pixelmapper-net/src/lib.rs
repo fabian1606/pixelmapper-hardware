@@ -8,12 +8,17 @@
 #![warn(missing_docs)]
 
 pub mod artnet;
-pub mod discovery;
+pub mod crc;
+pub mod error;
+pub mod event;
 pub mod flash;
-pub mod node_config;
+pub mod image;
+pub mod link;
 pub mod rdm;
 pub mod sim;
-pub mod tod;
+pub mod state;
+
+pub use error::{Error, Result};
 
 /// Manufacturer-specific PIDs and constants, generated from `protocol/pids.toml` by `protocol/gen.py`.
 #[allow(missing_docs, dead_code, clippy::all)]
