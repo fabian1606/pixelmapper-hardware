@@ -143,35 +143,36 @@ async fn writer_loop(
     ping_every: Duration,
 ) {
     let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + ping_every, ping_every);
+    // True once a queued close frame went out (orderly close).
+    let mut close_sent = false;
     loop {
-        tokio::select! {
+        let msg = tokio::select! {
             biased;
-            _ = close.changed() => {
-                let reason = close.borrow_and_update().clone();
-                if let Some(CloseReason::Code(code, text)) = reason {
-                    let _ = tokio::time::timeout(CLOSE_SEND_TIMEOUT, sink.send(close_message(code, &text))).await;
-                }
-                break;
-            }
-            msg = rx.recv() => {
-                let Some(msg) = msg else { break };
-                let is_close = matches!(msg, Message::Close(_));
-                // A stuck socket must not keep the writer alive after `close_now`.
-                let sent = tokio::select! {
-                    r = sink.send(msg) => r.is_ok(),
-                    _ = close.changed() => false,
-                };
-                if !sent || is_close {
-                    break;
-                }
-            }
-            _ = ping.tick() => {
-                if sink.send(Message::Ping(Bytes::new())).await.is_err() {
-                    break;
-                }
-            }
+            _ = close.changed() => break,
+            msg = rx.recv() => match msg {
+                Some(msg) => msg,
+                None => break,
+            },
+            _ = ping.tick() => Message::Ping(Bytes::new()),
+        };
+        let is_close = matches!(msg, Message::Close(_));
+        // A stuck socket must not keep the writer alive after `close_now`.
+        let sent = tokio::select! {
+            r = sink.send(msg) => r.is_ok(),
+            _ = close.changed() => false,
+        };
+        if is_close {
+            close_sent = sent;
+        }
+        if !sent || is_close {
+            break;
         }
     }
+    // Closed with `close_now` and a code (e.g. 4003): try to deliver that close frame, but never wait long.
+    let reason = close.borrow().clone();
+    if let (false, Some(CloseReason::Code(code, text))) = (close_sent, reason) {
+        let _ =
+            tokio::time::timeout(CLOSE_SEND_TIMEOUT, sink.send(close_message(code, &text))).await;
+    }
     conn.close_now(CloseReason::Gone);
-    let _ = tokio::time::timeout(CLOSE_SEND_TIMEOUT, sink.close()).await;
 }
