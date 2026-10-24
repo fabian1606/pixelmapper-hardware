@@ -1,10 +1,16 @@
 //! RDM (ANSI E1.20) message layer: [`Uid`], checksum, encode/decode of the basic RDM message
 //! (start code 0xCC, `protocol/rdm-digest.md` §1) and decoding of DISC_UNIQUE_BRANCH responses (§3.1).
 //!
-//! PIDs specific to this project live in [`crate::pids`]; the standard PID tables are in digest §6.
+//! PIDs specific to this project live in [`crate::pids`]; the standard PID numbers are in [`pid`] (digest §6) and
+//! the parameter-data codecs in [`pd`].
 
+pub mod pd;
+pub mod pid;
+
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::str::FromStr;
+use std::time::Duration;
 use thiserror::Error;
 
 /// RDM start code.
@@ -15,6 +21,30 @@ pub const SUB_START_CODE: u8 = 0x01;
 pub const HEADER_LEN: usize = 24;
 /// Maximum parameter data length.
 pub const MAX_PDL: usize = 231;
+/// Sub-device number of the root device.
+pub const SUB_DEVICE_ROOT: u16 = 0x0000;
+/// Sub-device number addressing all sub-devices (SET only, digest §5).
+pub const SUB_DEVICE_ALL: u16 = 0xFFFF;
+
+/// Status types (digest §4.3), used in QUEUED_MESSAGE / STATUS_MESSAGES requests and status message entries.
+pub mod status_type {
+    /// STATUS_NONE.
+    pub const NONE: u8 = 0x00;
+    /// STATUS_GET_LAST_MESSAGE.
+    pub const GET_LAST_MESSAGE: u8 = 0x01;
+    /// STATUS_ADVISORY.
+    pub const ADVISORY: u8 = 0x02;
+    /// STATUS_WARNING.
+    pub const WARNING: u8 = 0x03;
+    /// STATUS_ERROR.
+    pub const ERROR: u8 = 0x04;
+    /// STATUS_ADVISORY_CLEARED.
+    pub const ADVISORY_CLEARED: u8 = 0x12;
+    /// STATUS_WARNING_CLEARED.
+    pub const WARNING_CLEARED: u8 = 0x13;
+    /// STATUS_ERROR_CLEARED.
+    pub const ERROR_CLEARED: u8 = 0x14;
+}
 
 /// Command class values (digest §1).
 pub mod cc {
@@ -61,6 +91,9 @@ pub enum RdmError {
     /// Text is not a valid `MMMM:DDDDDDDD` UID.
     #[error("invalid UID")]
     BadUid,
+    /// Parameter data does not match the layout of the PID (wrong length or invalid content).
+    #[error("bad parameter data: {0}")]
+    BadParameterData(&'static str),
 }
 
 /// 48-bit RDM UID: ESTA manufacturer ID + device ID. Printed as `MMMM:DDDDDDDD` (upper-case hex).
@@ -107,6 +140,156 @@ impl Uid {
     /// Broadcast to all devices or vendorcast (`MMMM:FFFFFFFF`).
     pub fn is_broadcast(self) -> bool {
         self.device == 0xFFFF_FFFF
+    }
+    /// Vendorcast `MMMM:FFFFFFFF` to all devices of one manufacturer (not the all-devices broadcast).
+    pub fn is_vendorcast(self) -> bool {
+        self.device == 0xFFFF_FFFF && self.manufacturer != 0xFFFF
+    }
+    /// The all-devices broadcast `FFFF:FFFFFFFF`.
+    pub fn is_all_broadcast(self) -> bool {
+        self == Self::BROADCAST
+    }
+    /// Whether a message with destination `dest` is meant for the device with this UID: unicast to this UID,
+    /// all-devices broadcast, or vendorcast with this UID's manufacturer (digest §5).
+    pub fn addressed_to(self, dest: Uid) -> bool {
+        dest == self
+            || dest.is_all_broadcast()
+            || (dest.is_vendorcast() && dest.manufacturer == self.manufacturer)
+    }
+    /// Read a UID from the first 6 bytes of `b`; `None` if `b` is shorter.
+    pub fn from_slice(b: &[u8]) -> Option<Self> {
+        match b {
+            [a0, a1, a2, a3, a4, a5, ..] => Some(Self::from_bytes([*a0, *a1, *a2, *a3, *a4, *a5])),
+            _ => None,
+        }
+    }
+}
+
+impl Serialize for Uid {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Uid {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        s.parse()
+            .map_err(|_| serde::de::Error::custom(format!("invalid RDM UID {s:?}")))
+    }
+}
+
+/// Response type in byte 16 of a response (digest §4.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum ResponseType {
+    /// RESPONSE_TYPE_ACK: PD carries the answer.
+    Ack = 0x00,
+    /// RESPONSE_TYPE_ACK_TIMER: PD is a u16 delay in 100 ms units, fetch the answer via QUEUED_MESSAGE.
+    AckTimer = 0x01,
+    /// RESPONSE_TYPE_NACK_REASON: PD is a u16 [`NackReason`].
+    NackReason = 0x02,
+    /// RESPONSE_TYPE_ACK_OVERFLOW: partial data, repeat the same request and concatenate.
+    AckOverflow = 0x03,
+}
+
+impl ResponseType {
+    /// From the wire value; `None` for values > 3 (invalid per E1.20).
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0x00 => Some(Self::Ack),
+            0x01 => Some(Self::AckTimer),
+            0x02 => Some(Self::NackReason),
+            0x03 => Some(Self::AckOverflow),
+            _ => None,
+        }
+    }
+}
+
+/// NACK reason code (digest §4.2). Unknown codes are kept as-is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+#[serde(transparent)]
+pub struct NackReason(pub u16);
+
+macro_rules! nack_reasons {
+    ($($(#[$m:meta])* $name:ident = $val:expr;)*) => {
+        impl NackReason {
+            $($(#[$m])* pub const $name: NackReason = NackReason($val);)*
+
+            /// Name without the `NR_` prefix, e.g. `"BUFFER_FULL"`; `None` for unknown codes.
+            pub fn name(&self) -> Option<&'static str> {
+                match self.0 {
+                    $($val => Some(stringify!($name)),)*
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+nack_reasons! {
+    /// NR_UNKNOWN_PID (E1.20).
+    UNKNOWN_PID = 0x0000;
+    /// NR_FORMAT_ERROR: wrong PDL or unparsable PD (E1.20).
+    FORMAT_ERROR = 0x0001;
+    /// NR_HARDWARE_FAULT (E1.20).
+    HARDWARE_FAULT = 0x0002;
+    /// NR_PROXY_REJECT (E1.20).
+    PROXY_REJECT = 0x0003;
+    /// NR_WRITE_PROTECT (E1.20).
+    WRITE_PROTECT = 0x0004;
+    /// NR_UNSUPPORTED_COMMAND_CLASS (E1.20).
+    UNSUPPORTED_COMMAND_CLASS = 0x0005;
+    /// NR_DATA_OUT_OF_RANGE (E1.20).
+    DATA_OUT_OF_RANGE = 0x0006;
+    /// NR_BUFFER_FULL (E1.20).
+    BUFFER_FULL = 0x0007;
+    /// NR_PACKET_SIZE_UNSUPPORTED (E1.20).
+    PACKET_SIZE_UNSUPPORTED = 0x0008;
+    /// NR_SUB_DEVICE_OUT_OF_RANGE (E1.20).
+    SUB_DEVICE_OUT_OF_RANGE = 0x0009;
+    /// NR_PROXY_BUFFER_FULL (E1.20).
+    PROXY_BUFFER_FULL = 0x000A;
+    /// NR_ACTION_NOT_SUPPORTED (E1.37-2).
+    ACTION_NOT_SUPPORTED = 0x000B;
+    /// NR_ENDPOINT_NUMBER_INVALID (E1.37-7).
+    ENDPOINT_NUMBER_INVALID = 0x000C;
+    /// NR_INVALID_ENDPOINT_MODE (E1.37-7).
+    INVALID_ENDPOINT_MODE = 0x000D;
+    /// NR_UNKNOWN_UID (E1.37-7).
+    UNKNOWN_UID = 0x000E;
+    /// NR_UNKNOWN_SCOPE (E1.33).
+    UNKNOWN_SCOPE = 0x000F;
+    /// NR_INVALID_STATIC_CONFIG_TYPE (E1.33).
+    INVALID_STATIC_CONFIG_TYPE = 0x0010;
+    /// NR_INVALID_IPV4_ADDRESS (E1.33).
+    INVALID_IPV4_ADDRESS = 0x0011;
+    /// NR_INVALID_IPV6_ADDRESS (E1.33).
+    INVALID_IPV6_ADDRESS = 0x0012;
+    /// NR_INVALID_PORT (E1.33).
+    INVALID_PORT = 0x0013;
+    /// NR_DEVICE_ABSENT (E1.37-5 / E1.20-2025).
+    DEVICE_ABSENT = 0x0014;
+    /// NR_SENSOR_OUT_OF_RANGE (E1.37-5 / E1.20-2025).
+    SENSOR_OUT_OF_RANGE = 0x0015;
+    /// NR_SENSOR_FAULT (E1.37-5 / E1.20-2025).
+    SENSOR_FAULT = 0x0016;
+    /// NR_PACKING_NOT_SUPPORTED (E1.37-5 / E1.20-2025).
+    PACKING_NOT_SUPPORTED = 0x0017;
+    /// NR_ERROR_IN_PACKED_LIST_TRANSACTION (E1.37-5 / E1.20-2025).
+    ERROR_IN_PACKED_LIST_TRANSACTION = 0x0018;
+    /// NR_PROXY_DROP (E1.37-5 / E1.20-2025).
+    PROXY_DROP = 0x0019;
+    /// NR_ALL_CALL_SET_FAIL (E1.20-2025).
+    ALL_CALL_SET_FAIL = 0x0020;
+}
+
+impl fmt::Display for NackReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.name() {
+            Some(n) => f.write_str(n),
+            None => write!(f, "0x{:04X}", self.0),
+        }
     }
 }
 
@@ -162,6 +345,82 @@ pub struct RdmMessage {
 }
 
 impl RdmMessage {
+    /// Build a request (message count 0).
+    #[allow(clippy::too_many_arguments)]
+    pub fn request(
+        dest: Uid,
+        src: Uid,
+        tn: u8,
+        port_id: u8,
+        sub_device: u16,
+        command_class: u8,
+        pid: u16,
+        data: Vec<u8>,
+    ) -> Self {
+        Self {
+            dest_uid: dest,
+            src_uid: src,
+            transaction_number: tn,
+            port_id_or_response_type: port_id,
+            message_count: 0,
+            sub_device,
+            command_class,
+            parameter_id: pid,
+            parameter_data: data,
+        }
+    }
+
+    /// Build the response to this request as responder `src` (digest §1 response rules): destination = request
+    /// source, TN, sub-device and PID mirrored, command class + 1 (computed as `cc | 0x01`).
+    pub fn response_to(
+        &self,
+        src: Uid,
+        rt: ResponseType,
+        message_count: u8,
+        data: Vec<u8>,
+    ) -> Self {
+        Self {
+            dest_uid: self.src_uid,
+            src_uid: src,
+            transaction_number: self.transaction_number,
+            port_id_or_response_type: rt as u8,
+            message_count,
+            sub_device: self.sub_device,
+            command_class: self.command_class | 0x01,
+            parameter_id: self.parameter_id,
+            parameter_data: data,
+        }
+    }
+
+    /// Response type of a response; `None` for requests or invalid values (> 3).
+    pub fn response_type(&self) -> Option<ResponseType> {
+        if self.is_response() {
+            ResponseType::from_u8(self.port_id_or_response_type)
+        } else {
+            None
+        }
+    }
+
+    /// NACK reason of a NACK_REASON response with PDL 2; `None` otherwise.
+    pub fn nack_reason(&self) -> Option<NackReason> {
+        match (self.response_type(), self.parameter_data.as_slice()) {
+            (Some(ResponseType::NackReason), [hi, lo]) => {
+                Some(NackReason(u16::from_be_bytes([*hi, *lo])))
+            }
+            _ => None,
+        }
+    }
+
+    /// Delay of an ACK_TIMER response with PDL 2 (u16 × 100 ms); `None` otherwise.
+    pub fn ack_timer_delay(&self) -> Option<Duration> {
+        match (self.response_type(), self.parameter_data.as_slice()) {
+            (Some(ResponseType::AckTimer), [hi, lo]) => Some(Duration::from_millis(
+                u64::from(u16::from_be_bytes([*hi, *lo])) * 100,
+            )),
+            _ => None,
+        }
+    }
+
     /// Whether the command class is a response.
     pub fn is_response(&self) -> bool {
         self.command_class & 0x01 != 0
@@ -172,9 +431,25 @@ impl RdmMessage {
         (HEADER_LEN + self.parameter_data.len()) as u8
     }
 
-    /// Encode to wire bytes incl. start code and checksum. Panics if PDL > 231.
+    /// Encode to wire bytes incl. start code and checksum; [`RdmError::BadLength`] if PDL > 231.
+    pub fn try_encode(&self) -> Result<Vec<u8>, RdmError> {
+        if self.parameter_data.len() > MAX_PDL {
+            return Err(RdmError::BadLength);
+        }
+        Ok(self.encode_unchecked())
+    }
+
+    /// Encode to wire bytes incl. start code and checksum.
+    ///
+    /// # Panics
+    /// If PDL > 231 (a programming error). Use [`RdmMessage::try_encode`] when the PD length is not under the
+    /// caller's control (e.g. data taken from a network peer or user input).
     pub fn encode(&self) -> Vec<u8> {
         assert!(self.parameter_data.len() <= MAX_PDL, "RDM PDL > 231");
+        self.encode_unchecked()
+    }
+
+    fn encode_unchecked(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(HEADER_LEN + self.parameter_data.len() + 2);
         out.push(START_CODE);
         out.push(SUB_START_CODE);
@@ -218,10 +493,10 @@ impl RdmMessage {
         if got != expected {
             return Err(RdmError::BadChecksum { got, expected });
         }
-        let uid = |o: usize| Uid::from_bytes(buf[o..o + 6].try_into().expect("6 bytes"));
+        let uid = |o: usize| Uid::from_slice(&buf[o..]).ok_or(RdmError::Short);
         Ok(Self {
-            dest_uid: uid(3),
-            src_uid: uid(9),
+            dest_uid: uid(3)?,
+            src_uid: uid(9)?,
             transaction_number: buf[15],
             port_id_or_response_type: buf[16],
             message_count: buf[17],
@@ -356,6 +631,109 @@ mod tests {
             RdmMessage::decode(&b),
             Err(RdmError::BadChecksum { .. })
         ));
+    }
+
+    #[test]
+    fn uid_casts_and_serde() {
+        let me = Uid::new(0x7FF0, 0x1234_5678);
+        assert!(me.addressed_to(me));
+        assert!(me.addressed_to(Uid::BROADCAST));
+        assert!(me.addressed_to(Uid::new(0x7FF0, 0xFFFF_FFFF)));
+        assert!(!me.addressed_to(Uid::new(0x7FF1, 0xFFFF_FFFF)));
+        assert!(!me.addressed_to(Uid::new(0x7FF0, 0x1234_5679)));
+        assert!(Uid::new(0x7FF0, 0xFFFF_FFFF).is_vendorcast());
+        assert!(!Uid::BROADCAST.is_vendorcast());
+        assert!(Uid::BROADCAST.is_all_broadcast());
+        assert!(!me.is_vendorcast() && !me.is_all_broadcast());
+        assert_eq!(Uid::from_slice(&me.to_bytes()), Some(me));
+        assert_eq!(Uid::from_slice(&[1, 2, 3, 4, 5]), None);
+        let j = serde_json::to_string(&me).unwrap();
+        assert_eq!(j, "\"7FF0:12345678\"");
+        assert_eq!(serde_json::from_str::<Uid>(&j).unwrap(), me);
+        assert!(serde_json::from_str::<Uid>("\"7FF0\"").is_err());
+        assert!(serde_json::from_str::<Uid>("5").is_err());
+    }
+
+    #[test]
+    fn response_types_and_nacks() {
+        for v in 0..=3u8 {
+            assert_eq!(ResponseType::from_u8(v).map(|r| r as u8), Some(v));
+        }
+        assert_eq!(ResponseType::from_u8(4), None);
+        assert_eq!(NackReason::BUFFER_FULL.to_string(), "BUFFER_FULL");
+        assert_eq!(NackReason(0x1234).to_string(), "0x1234");
+        assert_eq!(NackReason::ACTION_NOT_SUPPORTED.0, 0x000B);
+        assert_eq!(NackReason(0x0020).name(), Some("ALL_CALL_SET_FAIL"));
+        assert_eq!(NackReason(0x001A).name(), None);
+        assert_eq!(
+            serde_json::to_string(&NackReason::FORMAT_ERROR).unwrap(),
+            "1"
+        );
+    }
+
+    #[test]
+    fn request_response_helpers() {
+        let ctl = Uid::new(0x7FF0, 0xA000_0001);
+        let dev = Uid::new(0x7FF0, 0x1234_5678);
+        let req = RdmMessage::request(dev, ctl, 9, 1, SUB_DEVICE_ROOT, cc::GET, 0x0060, vec![]);
+        assert!(!req.is_response());
+        assert_eq!(req.response_type(), None);
+        let rsp = req.response_to(dev, ResponseType::NackReason, 3, vec![0x00, 0x07]);
+        assert_eq!(rsp.dest_uid, ctl);
+        assert_eq!(rsp.src_uid, dev);
+        assert_eq!(rsp.transaction_number, 9);
+        assert_eq!(rsp.command_class, cc::GET_RESPONSE);
+        assert_eq!(rsp.parameter_id, 0x0060);
+        assert_eq!(rsp.message_count, 3);
+        assert_eq!(rsp.response_type(), Some(ResponseType::NackReason));
+        assert_eq!(rsp.nack_reason(), Some(NackReason::BUFFER_FULL));
+        assert_eq!(rsp.ack_timer_delay(), None);
+        let t = req.response_to(dev, ResponseType::AckTimer, 0, vec![0x00, 0x0B]);
+        assert_eq!(t.ack_timer_delay(), Some(Duration::from_millis(1100)));
+        assert_eq!(t.nack_reason(), None);
+        let s = RdmMessage::request(dev, ctl, 1, 1, SUB_DEVICE_ALL, cc::SET, 0x1000, vec![1]);
+        assert_eq!(
+            s.response_to(dev, ResponseType::Ack, 0, vec![])
+                .command_class,
+            cc::SET_RESPONSE
+        );
+        let d = RdmMessage::request(dev, ctl, 1, 1, 0, cc::DISCOVERY, 0x0002, vec![]);
+        assert_eq!(
+            d.response_to(dev, ResponseType::Ack, 0, vec![])
+                .command_class,
+            cc::DISCOVERY_RESPONSE
+        );
+        assert_eq!(rsp.try_encode().unwrap(), rsp.encode());
+        let big = RdmMessage::request(dev, ctl, 1, 1, 0, cc::SET, 0x8182, vec![0; MAX_PDL + 1]);
+        assert_eq!(big.try_encode(), Err(RdmError::BadLength));
+        let max = RdmMessage::request(dev, ctl, 1, 1, 0, cc::SET, 0x8182, vec![0; MAX_PDL]);
+        assert_eq!(RdmMessage::decode(&max.try_encode().unwrap()).unwrap(), max);
+    }
+
+    #[test]
+    fn decode_never_panics() {
+        let base = RdmMessage::request(
+            Uid::new(1, 2),
+            Uid::new(3, 4),
+            1,
+            1,
+            0,
+            cc::GET,
+            0x0060,
+            vec![0xAB; 20],
+        )
+        .encode();
+        for len in 0..=base.len() + 2 {
+            let mut b = base.clone();
+            b.resize(len, 0);
+            let _ = RdmMessage::decode(&b);
+            let _ = DubResponse::decode(&b);
+            for i in 0..len.min(26) {
+                let mut c = b.clone();
+                c[i] = 0xFF;
+                let _ = RdmMessage::decode(&c);
+            }
+        }
     }
 
     #[test]
