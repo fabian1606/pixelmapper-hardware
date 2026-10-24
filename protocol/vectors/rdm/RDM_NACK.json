@@ -1,0 +1,101 @@
+{
+  "$schema": "../schema.json",
+  "protocol": "rdm",
+  "packet": "RDM",
+  "vectors": [
+    {
+      "name": "get_unsupported_pid_request",
+      "description": "GET DEVICE_HOURS (0x0400) - not implemented by the tube",
+      "source": "E1.20 §6 packet format (layout as in OLA RDMCommand.cpp / tube_fw rdm.c offsets)",
+      "hex": "CC 01 18 7F F0 12 34 56 78 7F F0 A0 00 00 01 07 01 00 00 00 20 04 00 00 05 A4",
+      "valid": true,
+      "fields": {
+        "start_code": 204,
+        "sub_start_code": 1,
+        "message_length": 24,
+        "dest_uid": "7FF0:12345678",
+        "src_uid": "7FF0:A0000001",
+        "transaction_number": 7,
+        "port_id": 1,
+        "message_count": 0,
+        "sub_device": 0,
+        "command_class": 32,
+        "parameter_id": 1024,
+        "parameter_data_length": 0,
+        "parameter_data": "",
+        "checksum": 1444
+      }
+    },
+    {
+      "name": "nack_unknown_pid",
+      "description": "NACK_REASON (response type 0x02), reason NR_UNKNOWN_PID 0x0000",
+      "source": "E1.20 §6.3 / Table 6-5 (codes as OLA RDMEnums.h); tube_fw rdm.c default: nack(NR_UNKNOWN_PID)",
+      "hex": "CC 01 1A 7F F0 A0 00 00 01 7F F0 12 34 56 78 07 02 00 00 00 21 04 00 02 00 00 05 AA",
+      "valid": true,
+      "fields": {
+        "start_code": 204,
+        "sub_start_code": 1,
+        "message_length": 26,
+        "dest_uid": "7FF0:A0000001",
+        "src_uid": "7FF0:12345678",
+        "transaction_number": 7,
+        "response_type": 2,
+        "message_count": 0,
+        "sub_device": 0,
+        "command_class": 33,
+        "parameter_id": 1024,
+        "parameter_data_length": 2,
+        "parameter_data": "0000",
+        "checksum": 1450,
+        "nack_reason": 0
+      }
+    },
+    {
+      "name": "get_device_info_with_data",
+      "description": "GET DEVICE_INFO with 1 stray PD byte",
+      "source": "E1.20 §6 packet format (layout as in OLA RDMCommand.cpp / tube_fw rdm.c offsets)",
+      "hex": "CC 01 19 7F F0 12 34 56 78 7F F0 A0 00 00 01 08 01 00 00 00 20 00 60 01 00 06 03",
+      "valid": true,
+      "fields": {
+        "start_code": 204,
+        "sub_start_code": 1,
+        "message_length": 25,
+        "dest_uid": "7FF0:12345678",
+        "src_uid": "7FF0:A0000001",
+        "transaction_number": 8,
+        "port_id": 1,
+        "message_count": 0,
+        "sub_device": 0,
+        "command_class": 32,
+        "parameter_id": 96,
+        "parameter_data_length": 1,
+        "parameter_data": "00",
+        "checksum": 1539
+      }
+    },
+    {
+      "name": "nack_format_error",
+      "description": "NACK_REASON NR_FORMAT_ERROR 0x0001 for wrong request PDL (OLA GetDeviceInfoWithData expects this)",
+      "source": "OLA TestDefinitions.py GetDeviceInfoWithData; tube_fw rdm.c PDL() macro",
+      "hex": "CC 01 1A 7F F0 A0 00 00 01 7F F0 12 34 56 78 08 02 00 00 00 21 00 60 02 00 01 06 08",
+      "valid": true,
+      "fields": {
+        "start_code": 204,
+        "sub_start_code": 1,
+        "message_length": 26,
+        "dest_uid": "7FF0:A0000001",
+        "src_uid": "7FF0:12345678",
+        "transaction_number": 8,
+        "response_type": 2,
+        "message_count": 0,
+        "sub_device": 0,
+        "command_class": 33,
+        "parameter_id": 96,
+        "parameter_data_length": 2,
+        "parameter_data": "0001",
+        "checksum": 1544,
+        "nack_reason": 1
+      }
+    }
+  ]
+}

@@ -1,0 +1,83 @@
+{
+  "$schema": "../schema.json",
+  "protocol": "artnet",
+  "packet": "ArtPoll",
+  "vectors": [
+    {
+      "name": "poll_reply_on_change",
+      "description": "ArtPoll from Pixelmapper: Flags bit1 (send ArtPollReply on change), no diagnostics, not targeted, EstaMan 0x7FF0, Oem 0x00FF placeholder",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtPoll packet definition p.18-19",
+      "hex": "4172742d4e6574000020000e0210000000007ff000ff",
+      "valid": true,
+      "fields": {
+        "op_code": 8192,
+        "prot_ver": 14,
+        "flags": 2,
+        "diag_priority": 16,
+        "target_port_address_top": 0,
+        "target_port_address_bottom": 0,
+        "esta_man": 32752,
+        "oem": 255,
+        "targeted_mode": false,
+        "reply_on_change": true
+      },
+      "notes": "EstaMan and Oem are big-endian here (Hi byte first) - unlike ArtPollReply.EstaMan which is Lo byte first."
+    },
+    {
+      "name": "poll_targeted_1_to_4",
+      "description": "Targeted-mode ArtPoll (Flags bit5 + bit1) for Port-Addresses 1..4 inclusive",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtPoll packet definition p.18-19, Targeted Mode p.17",
+      "hex": "4172742d4e6574000020000e2210000400017ff000ff",
+      "valid": true,
+      "fields": {
+        "op_code": 8192,
+        "prot_ver": 14,
+        "flags": 34,
+        "diag_priority": 16,
+        "target_port_address_top": 4,
+        "target_port_address_bottom": 1,
+        "esta_man": 32752,
+        "oem": 255,
+        "targeted_mode": true,
+        "reply_on_change": true
+      }
+    },
+    {
+      "name": "poll_min_14_bytes",
+      "description": "Legacy ArtPoll of exactly 14 bytes (minimum length); missing fields are zero",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtPoll packet definition p.18-19, Minimum Packet Length p.17",
+      "hex": "4172742d4e6574000020000e0210",
+      "valid": true,
+      "fields": {
+        "op_code": 8192,
+        "prot_ver": 14,
+        "flags": 2,
+        "diag_priority": 16,
+        "target_port_address_top": 0,
+        "target_port_address_bottom": 0,
+        "esta_man": 0,
+        "oem": 0
+      }
+    },
+    {
+      "name": "poll_short_13",
+      "description": "13 bytes: shorter than the 14-byte minimum",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtPoll packet definition p.18-19",
+      "hex": "4172742d4e6574000020000e02",
+      "valid": false,
+      "fields": {
+        "error": "short"
+      }
+    },
+    {
+      "name": "poll_bad_id",
+      "description": "ID 'Art-Net' without NUL terminator ('Art-Netx')",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), Data Integrity p.96",
+      "hex": "4172742d4e6574780020000e0210000000007ff000ff",
+      "valid": false,
+      "fields": {
+        "error": "bad_id"
+      }
+    }
+  ]
+}

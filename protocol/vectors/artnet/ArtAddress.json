@@ -1,0 +1,144 @@
+{
+  "$schema": "../schema.json",
+  "protocol": "artnet",
+  "packet": "ArtAddress",
+  "vectors": [
+    {
+      "name": "led_locate",
+      "description": "AcLedLocate (0x04) to BindIndex 1; nothing else changed",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtAddress packet definition p.38-46",
+      "hex": "4172742d4e6574000060000e7f01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007f7f7f7f7f7f7f7f7fff04",
+      "valid": true,
+      "fields": {
+        "op_code": 24576,
+        "prot_ver": 14,
+        "net_switch": 127,
+        "short_name": "",
+        "long_name": "",
+        "sw_in": [
+          127,
+          127,
+          127,
+          127
+        ],
+        "sw_out": [
+          127,
+          127,
+          127,
+          127
+        ],
+        "sub_switch": 127,
+        "acn_priority": 255,
+        "bind_index": 1,
+        "command": 4
+      },
+      "notes": "'No change' for Net/Sub/SwIn/SwOut encoded as 0x7F (bit7 clear, non-zero). The spec only says the value is ignored unless bit7 is set and that 0x00 resets to the physical switch; 0x7F is our convention. AcnPriority 255 = no change (spec)."
+    },
+    {
+      "name": "program_names_and_universes",
+      "description": "Program Net 0, Sub-Net 0, SwOut 1..4 (Port-Addresses 1..4), short and long name, AcNone",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtAddress packet definition p.38-46",
+      "hex": "4172742d4e6574000060000e80015374616765204c0000000000000000000000506978656c6d6170706572204e6f6465205374616765204c656674000000000000000000000000000000000000000000000000000000000000000000000000007f7f7f7f8182838480ff00",
+      "valid": true,
+      "fields": {
+        "op_code": 24576,
+        "prot_ver": 14,
+        "net_switch": 128,
+        "bind_index": 1,
+        "short_name": "Stage L",
+        "long_name": "Pixelmapper Node Stage Left",
+        "sw_in": [
+          127,
+          127,
+          127,
+          127
+        ],
+        "sw_out": [
+          129,
+          130,
+          131,
+          132
+        ],
+        "sub_switch": 128,
+        "acn_priority": 255,
+        "command": 0,
+        "port_addresses_out": [
+          1,
+          2,
+          3,
+          4
+        ]
+      }
+    },
+    {
+      "name": "merge_ltp_bind2",
+      "description": "AcMergeLtp0 (0x10) addressed to BindIndex 2 (Art-Net 4 style: port 0 of bound node 2)",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtAddress packet definition p.38-46",
+      "hex": "4172742d4e6574000060000e7f02000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007f7f7f7f7f7f7f7f7fff10",
+      "valid": true,
+      "fields": {
+        "op_code": 24576,
+        "prot_ver": 14,
+        "net_switch": 127,
+        "short_name": "",
+        "long_name": "",
+        "sw_in": [
+          127,
+          127,
+          127,
+          127
+        ],
+        "sw_out": [
+          127,
+          127,
+          127,
+          127
+        ],
+        "sub_switch": 127,
+        "acn_priority": 255,
+        "bind_index": 2,
+        "command": 16
+      }
+    },
+    {
+      "name": "fail_zero",
+      "description": "AcFailZero (0x09): outputs to zero on loss of network data (persist over power cycle)",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtAddress packet definition p.38-46",
+      "hex": "4172742d4e6574000060000e7f01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007f7f7f7f7f7f7f7f7fff09",
+      "valid": true,
+      "fields": {
+        "op_code": 24576,
+        "prot_ver": 14,
+        "net_switch": 127,
+        "short_name": "",
+        "long_name": "",
+        "sw_in": [
+          127,
+          127,
+          127,
+          127
+        ],
+        "sw_out": [
+          127,
+          127,
+          127,
+          127
+        ],
+        "sub_switch": 127,
+        "acn_priority": 255,
+        "bind_index": 1,
+        "command": 9
+      }
+    },
+    {
+      "name": "short_106",
+      "description": "106 bytes, Command missing",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtAddress packet definition p.38-46",
+      "hex": "4172742d4e6574000060000e7f01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007f7f7f7f7f7f7f7f7fff",
+      "valid": false,
+      "fields": {
+        "error": "short"
+      }
+    }
+  ]
+}

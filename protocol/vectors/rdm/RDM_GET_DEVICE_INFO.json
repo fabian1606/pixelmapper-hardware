@@ -1,0 +1,110 @@
+{
+  "$schema": "../schema.json",
+  "protocol": "rdm",
+  "packet": "RDM",
+  "vectors": [
+    {
+      "name": "get_request",
+      "description": "GET DEVICE_INFO (0x0060) from controller 7FF0:A0000001 to tube 7FF0:12345678, TN 1, port 1",
+      "source": "E1.20 §6 packet format (layout as in OLA RDMCommand.cpp / tube_fw rdm.c offsets); E1.20 §10.5.1 DEVICE_INFO",
+      "hex": "CC 01 18 7F F0 12 34 56 78 7F F0 A0 00 00 01 01 01 00 00 00 20 00 60 00 05 FA",
+      "valid": true,
+      "fields": {
+        "start_code": 204,
+        "sub_start_code": 1,
+        "message_length": 24,
+        "dest_uid": "7FF0:12345678",
+        "src_uid": "7FF0:A0000001",
+        "transaction_number": 1,
+        "port_id": 1,
+        "message_count": 0,
+        "sub_device": 0,
+        "command_class": 32,
+        "parameter_id": 96,
+        "parameter_data_length": 0,
+        "parameter_data": "",
+        "checksum": 1530
+      }
+    },
+    {
+      "name": "ack_response_tube_app",
+      "description": "ACK with 19-byte DEVICE_INFO as tube_fw 0.5.0 sends it (personality 1 = 12 slots of 4)",
+      "source": "tube_fw rdm.c handle_get(PID_DEVICE_INFO) + config.h (model 0x0001, category 0x0101 FIXTURE_FIXED, FW_VERSION_ID 0x00000500)",
+      "hex": "CC 01 2B 7F F0 A0 00 00 01 7F F0 12 34 56 78 01 00 00 00 00 21 00 60 13 01 00 00 01 01 01 00 00 05 00 00 0C 01 04 00 01 00 00 00 06 3B",
+      "valid": true,
+      "fields": {
+        "start_code": 204,
+        "sub_start_code": 1,
+        "message_length": 43,
+        "dest_uid": "7FF0:A0000001",
+        "src_uid": "7FF0:12345678",
+        "transaction_number": 1,
+        "response_type": 0,
+        "message_count": 0,
+        "sub_device": 0,
+        "command_class": 33,
+        "parameter_id": 96,
+        "parameter_data_length": 19,
+        "parameter_data": "01000001010100000500000c01040001000000",
+        "checksum": 1595,
+        "device_info": {
+          "rdm_protocol_version": 256,
+          "device_model_id": 1,
+          "product_category": 257,
+          "software_version_id": 1280,
+          "dmx_footprint": 12,
+          "current_personality": 1,
+          "personality_count": 4,
+          "dmx_start_address": 1,
+          "sub_device_count": 0,
+          "sensor_count": 0
+        }
+      }
+    },
+    {
+      "name": "ack_response_tube_bootloader",
+      "description": "ACK DEVICE_INFO from tube_boot_rdm v3: footprint 0, personality 0/0, start address 0xFFFF",
+      "source": "tube_boot_rdm main.c dev_info[] + rdm_boot.h BOOT_RDM_SW_VERSION_ID 0xB0000003",
+      "hex": "CC 01 2B 7F F0 A0 00 00 01 7F F0 12 34 56 78 01 00 00 00 00 21 00 60 13 01 00 00 01 01 01 B0 00 00 03 00 00 00 00 FF FF 00 00 00 08 D5",
+      "valid": true,
+      "fields": {
+        "start_code": 204,
+        "sub_start_code": 1,
+        "message_length": 43,
+        "dest_uid": "7FF0:A0000001",
+        "src_uid": "7FF0:12345678",
+        "transaction_number": 1,
+        "response_type": 0,
+        "message_count": 0,
+        "sub_device": 0,
+        "command_class": 33,
+        "parameter_id": 96,
+        "parameter_data_length": 19,
+        "parameter_data": "010000010101b000000300000000ffff000000",
+        "checksum": 2261,
+        "device_info": {
+          "rdm_protocol_version": 256,
+          "device_model_id": 1,
+          "product_category": 257,
+          "software_version_id": 2952790019,
+          "dmx_footprint": 0,
+          "current_personality": 0,
+          "personality_count": 0,
+          "dmx_start_address": 65535,
+          "sub_device_count": 0,
+          "sensor_count": 0
+        }
+      }
+    },
+    {
+      "name": "get_request_bad_checksum",
+      "description": "get_request with the low checksum byte flipped - must be ignored (no response)",
+      "source": "E1.20 §6.2.11 checksum; tube_fw rdm.c drops packets with a wrong checksum",
+      "hex": "CC 01 18 7F F0 12 34 56 78 7F F0 A0 00 00 01 01 01 00 00 00 20 00 60 00 05 FB",
+      "valid": false,
+      "fields": {
+        "error": "bad_checksum"
+      }
+    }
+  ]
+}

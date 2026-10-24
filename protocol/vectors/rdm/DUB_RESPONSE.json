@@ -1,0 +1,46 @@
+{
+  "$schema": "../schema.json",
+  "protocol": "rdm",
+  "packet": "DUB_RESPONSE",
+  "vectors": [
+    {
+      "name": "uid_7ff0_12345678",
+      "description": "DUB response for 7FF0:12345678: 7x FE, AA, 12 encoded UID bytes (b|AA, b|55), 4 encoded checksum bytes",
+      "source": "E1.20 §7.5.1 (encoding as in tube_fw rdm.c send_dub_response and OLA DiscoveryAgent::BranchComplete)",
+      "hex": "FE FE FE FE FE FE FE AA FF 7F FA F5 BA 57 BE 75 FE 57 FA 7D AA 5D FF 7D",
+      "valid": true,
+      "fields": {
+        "preamble_length": 7,
+        "uid": "7FF0:12345678",
+        "euid": "ff7ffaf5ba57be75fe57fa7d",
+        "ecs": "aa5dff7d",
+        "checksum": 2173
+      },
+      "notes": "No start code, no break. Checksum = sum of the 12 EUID bytes = sum(UID)+6*0xFF."
+    },
+    {
+      "name": "uid_7ff0_12345678_no_preamble",
+      "description": "Same response with 0 preamble bytes (controller must accept 0..7 x FE before AA)",
+      "source": "OLA DiscoveryAgent::BranchComplete (PREAMBLE_SIZE 8 incl. separator)",
+      "hex": "AA FF 7F FA F5 BA 57 BE 75 FE 57 FA 7D AA 5D FF 7D",
+      "valid": true,
+      "fields": {
+        "preamble_length": 0,
+        "uid": "7FF0:12345678",
+        "euid": "ff7ffaf5ba57be75fe57fa7d",
+        "ecs": "aa5dff7d",
+        "checksum": 2173
+      }
+    },
+    {
+      "name": "collision_garbled",
+      "description": "Encoded UID byte damaged (as by a collision) -> checksum mismatch -> treat as collision, split range",
+      "source": "OLA DiscoveryAgent::BranchComplete -> HandleCollision",
+      "hex": "FE FE FE FE FE FE FE AA FE 7F FA F5 BA 57 BE 75 FE 57 FA 7D AA 5D FF 7D",
+      "valid": false,
+      "fields": {
+        "error": "bad_checksum"
+      }
+    }
+  ]
+}

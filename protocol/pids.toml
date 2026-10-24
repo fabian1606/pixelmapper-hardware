@@ -1,0 +1,634 @@
+# Pixelmapper hardware - manufacturer-specific RDM definitions (single source of truth)
+#
+# Everything Pixelmapper may hard-code about our devices lives here: manufacturer PIDs (numbers, command
+# classes, PDL layouts, PARAMETER_DESCRIPTION values), manufacturer status message IDs and shared constants.
+# protocol/gen.py turns this file into
+#   node/firmware/components/pm_protocol/include/pm_pids.h   (C, node firmware)
+#   crates/pixelmapper-net/src/pids_generated.rs              (Rust)
+# and `gen.py --check` verifies that the hand-written tube header tube/firmware/include/rdm_boot.h
+# (parsed by flash_rdm.py, therefore not generated) and tube/firmware/include/config.h agree with it.
+#
+# Conventions
+# - Multi-byte values in parameter data are big-endian (E1.20).
+# - Field types: u8 u16 u32 i8 i16 i32 bool uid(6 B) ipv4(4 B) ascii (needs len or max_len) bytes (len/max_len).
+# - `listed = true`  -> the PID is in SUPPORTED_PARAMETERS and answers PARAMETER_DESCRIPTION with [pid.pd].
+#   `listed = false` -> hidden (tube bootloader PIDs, E1.20 10.4.1 "may or may not be included").
+# - [pid.pd] holds the PARAMETER_DESCRIPTION values (E1.20 Table A-? via OLA pids.proto, see rdm-digest.md 6.2):
+#   data_type: not_defined bit_field ascii unsigned_byte signed_byte unsigned_word signed_word unsigned_dword
+#              signed_dword (E1.20-2010 codes 0x00..0x08 only - newer codes are not understood by older controllers)
+#   unit:      none second hertz percent byte ... (E1.20 unit names, lower case, see gen.py UNITS)
+#   prefix:    none milli micro kilo ... (see gen.py PREFIXES)
+#   description: printable ASCII, max 32 characters.
+#   Single-value PIDs (one numeric field) carry min/max/default so Pixelmapper can build a settings page.
+#   Structured PIDs use data_type = "not_defined" (Pixelmapper shows them only via code generated from this file).
+# - `repeat = N` expands an entry N times (ports 1..N): `{n}` in name/description is replaced by 1..N and the
+#   PID number increases by `stride` (default 1) per repetition.
+# - Number plan: 0x8000-0x80FF tube (app + bootloader), 0x8100-0x81FF node. Numbers are never reused.
+
+schema = 1
+
+[constants]
+ESTA_MANUFACTURER = { value = 0x7FF0, doc = "ESTA prototype range 7FF0h (not for shipping products)" }
+MODEL_TUBE        = { value = 0x0001, doc = "DEVICE_MODEL_ID of the LED tube (app, bootloader, image trailer)" }
+MODEL_NODE        = { value = 0x0002, doc = "DEVICE_MODEL_ID of the Pixelmapper Node" }
+ARTNET_OEM_NODE   = { value = 0x00FF, doc = "Art-Net OEM code of the prototype: placeholder OemUnknown, apply for an own code before devices leave the lab" }
+NODE_PRODUCT_CATEGORY = { value = 0x0801, doc = "DEVICE_INFO product category PRODUCT_CATEGORY_DATA_DISTRIBUTION" }
+NODE_PRODUCT_DETAIL   = { value = 0x0601, doc = "PRODUCT_DETAIL_ID_LIST entry PRODUCT_DETAIL_ETHERNET_NODE" }
+NODE_UID_DEVICE_FLAG  = { value = 0x80000000, doc = "node UID = ESTA:(0x80000000 | lower 28 bits of the Ethernet MAC)" }
+NODE_PORTS            = { value = 4, doc = "DMX ports of hardware revision 0" }
+BOOT_CATCH_PERIOD_MS   = { value = 20, doc = "BOOT_CATCH: interval between GET BOOT_INFO requests" }
+BOOT_CATCH_DURATION_MS = { value = 60000, doc = "BOOT_CATCH: give up after this time" }
+NODE_FW_MAX_BLOCK      = { value = 224, doc = "FW_WRITE: maximum data bytes per request (PDL = 4 + data <= 228)" }
+NODE_IMAGE_MAGIC       = { value = 0x4D494D50, doc = "Node image description block magic, bytes 50 4D 49 4D = 'PMIM' (u32 LE)" }
+NODE_IMAGE_FORMAT      = { value = 1, doc = "Node image description block format" }
+TUBE_TRAILER_MAGIC     = { value = 0x4D50, doc = "Tube image trailer magic 'PM' (u16 LE at 0x17F0)" }
+
+# Constants that also exist in tube/firmware/include/rdm_boot.h (checked by gen.py --check, same names).
+[tube_constants]
+BOOT_RDM_VERSION       = 3
+BOOT_RDM_SW_VERSION_ID = 0xB0000003
+BOOT_RDM_PROTOCOL      = 2
+BOOT_RDM_PAGE_SIZE     = 64
+BOOT_RDM_CRC_MAX_LEN   = 256
+BOOT_ERR_NONE          = 0
+BOOT_ERR_VERIFY        = 1
+BOOT_ERR_APP_INVALID   = 2
+BOOT_ERR_MODEL         = 3
+BOOT_ERR_FORMAT        = 4
+
+# ---------------------------------------------------------------------------------------------------------------
+# Enumerations used in PDLs
+# ---------------------------------------------------------------------------------------------------------------
+[enums.boot_catch_state]
+IDLE = 0
+RUNNING = 1
+CAUGHT = 2        # the target answered GET BOOT_INFO; it now stays in its bootloader for 60 s
+TIMEOUT = 3       # no answer within BOOT_CATCH_DURATION_MS
+ABORTED = 4       # BOOT_CATCH_ABORT, port disabled or port switched to input
+
+[enums.fw_state]
+IDLE = 0
+RECEIVING = 1     # FW_BEGIN accepted, FW_WRITE expected
+VERIFYING = 2
+READY = 3         # FW_FINISH accepted, reboot pending
+FAILED = 4        # see last_error
+
+[enums.fw_error]
+NONE = 0
+DESC_MAGIC = 1        # description block magic/format/size/desc_crc wrong
+DESC_MANUFACTURER = 2 # ESTA manufacturer is not ours
+DESC_MODEL = 3        # DEVICE_MODEL_ID is not MODEL_NODE
+DESC_HW_REV = 4       # this hardware revision is not in hw_rev_mask
+TOO_LARGE = 5         # image_length > OTA partition
+SEQUENCE = 6          # FW_WRITE offset beyond received bytes / write without FW_BEGIN
+DESC_MISMATCH = 7     # description block inside the image differs from the announced one
+CRC = 8               # CRC-32 over the image wrong
+IMAGE_INVALID = 9     # esp_ota_end rejected the image (ESP-IDF image verification)
+FLASH = 10            # flash write/erase error
+TIMEOUT = 11          # no FW_WRITE / ArtFirmwareMaster block for 30 s
+OEM = 12              # ArtFirmwareMaster: OEM code not in the .alf OEM list
+
+[enums.address_format]
+NET_SUB_UNI = 0   # "Net:Sub:Uni"
+PORT_ADDRESS = 1  # 15-bit number
+
+# ---------------------------------------------------------------------------------------------------------------
+# Manufacturer status message IDs (STATUS_MESSAGES / STATUS_ID_DESCRIPTION), node only, range 0x8000-0xFFDF
+# ---------------------------------------------------------------------------------------------------------------
+[[status]]
+name = "BOOT_CATCH_CAUGHT"
+id = 0x8001
+type = "advisory"
+description = "Boot catch: port %d caught"
+data1 = "port 1..4"
+
+[[status]]
+name = "BOOT_CATCH_TIMEOUT"
+id = 0x8002
+type = "warning"
+description = "Boot catch: port %d timed out"
+data1 = "port 1..4"
+
+[[status]]
+name = "PANEL_UNLOCKED_LOCAL"
+id = 0x8003
+type = "advisory"
+description = "Panel lock released at device"
+
+[[status]]
+name = "LOCAL_RDM_SET"
+id = 0x8004
+type = "advisory"
+description = "Port %d: RDM SET from panel"
+data1 = "port 1..4"
+data2 = "PID (as signed 16 bit)"
+
+# ---------------------------------------------------------------------------------------------------------------
+# Tube: app (tube_fw) - names as in rdm_boot.h (c_name)
+# ---------------------------------------------------------------------------------------------------------------
+[[pid]]
+name = "ENTER_BOOTLOADER"
+c_name = "PID_ENTER_BOOTLOADER"
+pid = 0x8000
+device = "tube_app"
+cc = "set"
+listed = true
+doc = "ACK, then RAM magic + watchdog reset into tube_boot_rdm. Not executed when sent to a broadcast UID."
+set_request = [ { name = "magic", type = "ascii", len = 4, value = "BOOT" } ]
+set_response = []
+[pid.pd]
+pdl_size = 4
+data_type = "ascii"
+unit = "none"
+prefix = "none"
+min = 0
+max = 0
+default = 0
+description = "Enter bootloader (SET \"BOOT\")"
+
+# ---------------------------------------------------------------------------------------------------------------
+# Tube: bootloader (tube_boot_rdm v3) - not listed in SUPPORTED_PARAMETERS
+# ---------------------------------------------------------------------------------------------------------------
+[[pid]]
+name = "BOOT_INFO"
+c_name = "PID_BOOT_INFO"
+pid = 0x8010
+device = "tube_boot"
+cc = "get"
+listed = false
+doc = "Bootloader state. GET within ~200 ms after reset keeps the bootloader active (rescue)."
+get_request = []
+get_response = [
+  { name = "version", type = "u8", doc = "BOOT_RDM_VERSION" },
+  { name = "page_size", type = "u8", doc = "64" },
+  { name = "app_end", type = "u16", doc = "0x1800" },
+  { name = "busy", type = "u8", doc = "1 while a page is erased/written" },
+  { name = "last_error", type = "u8", enum = "BOOT_ERR_*", doc = "reading clears it" },
+  { name = "manufacturer", type = "u16" },
+  { name = "model", type = "u16" },
+  { name = "boot_sw_version", type = "u32", doc = "BOOT_RDM_SW_VERSION_ID" },
+  { name = "app_valid", type = "u8", doc = "installed app trailer valid 0/1 (state of the last check)" },
+  { name = "app_fw_version", type = "u32", doc = "FW_VERSION_ID from that trailer" },
+]
+
+[[pid]]
+name = "BOOT_WRITE_PAGE"
+c_name = "PID_BOOT_WRITE_PAGE"
+pid = 0x8011
+device = "tube_boot"
+cc = "set"
+listed = false
+doc = "ACK = page buffered (written in the background). NACK BUFFER_FULL = previous page busy, resend. NACK DATA_OUT_OF_RANGE = address >= app end or not page aligned."
+set_request = [ { name = "address", type = "u16" }, { name = "data", type = "bytes", len = 64 } ]
+set_response = []
+
+[[pid]]
+name = "BOOT_APP_CRC"
+c_name = "PID_BOOT_APP_CRC"
+pid = 0x8012
+device = "tube_boot"
+cc = "get"
+listed = false
+doc = "CRC16-CCITT (0x1021, init 0xFFFF) of flash address..address+length-1. NACK BUFFER_FULL while a page is written."
+get_request = [ { name = "address", type = "u16" }, { name = "length", type = "u16", max = 256 } ]
+get_response = [ { name = "crc16", type = "u16" } ]
+
+[[pid]]
+name = "BOOT_FINISH"
+c_name = "PID_BOOT_FINISH"
+pid = 0x8013
+device = "tube_boot"
+cc = "set"
+listed = false
+doc = "ACK (NACK BUFFER_FULL if busy), then trailer check: valid -> reset into the app, else stays with last_error FORMAT/MODEL/APP_INVALID."
+set_request = []
+set_response = []
+
+# ---------------------------------------------------------------------------------------------------------------
+# Node (Pixelmapper Node, MODEL_NODE). All listed with PARAMETER_DESCRIPTION.
+# Standard PIDs used instead of manufacturer PIDs: see [node.standard_pids].
+# ---------------------------------------------------------------------------------------------------------------
+[[pid]]
+name = "NODE_HW_REVISION"
+pid = 0x8100
+device = "node"
+cc = "get"
+listed = true
+doc = "Hardware revision detected at boot (0 = prototype: Waveshare ESP32-P4-WIFI6-POE-ETH + hand-wired transceivers)."
+get_request = []
+get_response = [ { name = "hw_revision", type = "u8" } ]
+[pid.pd]
+pdl_size = 1
+data_type = "unsigned_byte"
+unit = "none"
+prefix = "none"
+min = 0
+max = 255
+default = 0
+description = "Hardware revision"
+
+[[pid]]
+name = "PORT{n}_ENABLED"
+pid = 0x8101
+repeat = 4
+device = "node"
+cc = "get_set"
+listed = true
+doc = "Port n on/off (output and input). For input ports ArtInput changes the same setting."
+get_request = []
+get_response = [ { name = "enabled", type = "bool" } ]
+set_request = [ { name = "enabled", type = "bool" } ]
+set_response = []
+[pid.pd]
+pdl_size = 1
+data_type = "unsigned_byte"
+unit = "none"
+prefix = "none"
+min = 0
+max = 1
+default = 1
+description = "Port {n} enabled"
+
+[[pid]]
+name = "PORT{n}_DMX_BREAK"
+pid = 0x8110
+repeat = 4
+device = "node"
+cc = "get_set"
+listed = true
+doc = "DMX/RDM break length sent on port n. E1.20 controller range 176..352 us."
+get_request = []
+get_response = [ { name = "break_us", type = "u16" } ]
+set_request = [ { name = "break_us", type = "u16" } ]
+set_response = []
+[pid.pd]
+pdl_size = 2
+data_type = "unsigned_word"
+unit = "second"
+prefix = "micro"
+min = 176
+max = 352
+default = 176
+description = "Port {n} DMX break"
+
+[[pid]]
+name = "PORT{n}_DMX_MAB"
+pid = 0x8114
+repeat = 4
+device = "node"
+cc = "get_set"
+listed = true
+doc = "Mark-after-break sent on port n. E1.20 controller range 12..88 us."
+get_request = []
+get_response = [ { name = "mab_us", type = "u16" } ]
+set_request = [ { name = "mab_us", type = "u16" } ]
+set_response = []
+[pid.pd]
+pdl_size = 2
+data_type = "unsigned_word"
+unit = "second"
+prefix = "micro"
+min = 12
+max = 88
+default = 16
+description = "Port {n} DMX mark after break"
+
+[[pid]]
+name = "PORT{n}_DMX_RATE"
+pid = 0x8118
+repeat = 4
+device = "node"
+cc = "get_set"
+listed = true
+doc = "Target DMX refresh rate of port n (continuous output). RDM traffic may lower it, never below 30 Hz while discovery runs (plan)."
+get_request = []
+get_response = [ { name = "rate_hz", type = "u8" } ]
+set_request = [ { name = "rate_hz", type = "u8" } ]
+set_response = []
+[pid.pd]
+pdl_size = 1
+data_type = "unsigned_byte"
+unit = "hertz"
+prefix = "none"
+min = 1
+max = 44
+default = 40
+description = "Port {n} DMX refresh rate"
+
+[[pid]]
+name = "PORT{n}_RDM_BG_DISCOVERY"
+pid = 0x8120
+repeat = 4
+device = "node"
+cc = "get_set"
+listed = true
+doc = "Background (incremental) discovery on port n on/off. Same state as ArtTodControl AtcIncOn/AtcIncOff."
+get_request = []
+get_response = [ { name = "enabled", type = "bool" } ]
+set_request = [ { name = "enabled", type = "bool" } ]
+set_response = []
+[pid.pd]
+pdl_size = 1
+data_type = "unsigned_byte"
+unit = "none"
+prefix = "none"
+min = 0
+max = 1
+default = 1
+description = "Port {n} background discovery"
+
+[[pid]]
+name = "RDM_BG_DISCOVERY_INTERVAL"
+pid = 0x8124
+device = "node"
+cc = "get_set"
+listed = true
+doc = "Interval of the background discovery (new devices + presence check of known ones), all ports."
+get_request = []
+get_response = [ { name = "interval_s", type = "u16" } ]
+set_request = [ { name = "interval_s", type = "u16" } ]
+set_response = []
+[pid.pd]
+pdl_size = 2
+data_type = "unsigned_word"
+unit = "second"
+prefix = "none"
+min = 1
+max = 600
+default = 3
+description = "Background discovery interval"
+
+[[pid]]
+name = "DISPLAY_DIM_TIMEOUT"
+pid = 0x8130
+device = "node"
+cc = "get_set"
+listed = true
+doc = "Seconds without operation until the display dims (never off; LED Mute switches it off). 0 = never dim. Brightness: standard DISPLAY_LEVEL."
+get_request = []
+get_response = [ { name = "timeout_s", type = "u16" } ]
+set_request = [ { name = "timeout_s", type = "u16" } ]
+set_response = []
+[pid.pd]
+pdl_size = 2
+data_type = "unsigned_word"
+unit = "second"
+prefix = "none"
+min = 0
+max = 3600
+default = 60
+description = "Display dim timeout"
+
+[[pid]]
+name = "DISPLAY_ADDRESS_FORMAT"
+pid = 0x8131
+device = "node"
+cc = "get_set"
+listed = true
+doc = "How the display shows Port-Addresses: 0 = Net:Sub:Uni, 1 = 15-bit number (enum address_format)."
+get_request = []
+get_response = [ { name = "format", type = "u8", enum = "address_format" } ]
+set_request = [ { name = "format", type = "u8", enum = "address_format" } ]
+set_response = []
+[pid.pd]
+pdl_size = 1
+data_type = "unsigned_byte"
+unit = "none"
+prefix = "none"
+min = 0
+max = 1
+default = 0
+description = "Addr format 0=Net:Sub:Uni 1=15b"
+
+[[pid]]
+name = "PANEL_LOCK"
+pid = 0x8132
+device = "node"
+cc = "get_set"
+listed = true
+doc = "Front panel lock. Remote SETs are never blocked. BACK + push for 3 s at the device releases it (no PIN) and queues PANEL_UNLOCKED_LOCAL. E1.37-1 LOCK_STATE is not used: it requires a PIN and locks RDM SETs (WRITE_PROTECT)."
+get_request = []
+get_response = [ { name = "locked", type = "bool" } ]
+set_request = [ { name = "locked", type = "bool" } ]
+set_response = []
+[pid.pd]
+pdl_size = 1
+data_type = "unsigned_byte"
+unit = "none"
+prefix = "none"
+min = 0
+max = 1
+default = 0
+description = "Front panel locked"
+
+[[pid]]
+name = "BOOT_CATCH_START"
+pid = 0x8140
+device = "node"
+cc = "set"
+listed = true
+doc = "Start catching a tube bootloader: the node sends GET BOOT_INFO (0x8010) to target_uid on port every BOOT_CATCH_PERIOD_MS for BOOT_CATCH_DURATION_MS. A running catch is replaced. NACK DATA_OUT_OF_RANGE: port not 1..4, disabled, input, or broadcast UID."
+set_request = [ { name = "port", type = "u8", min = 1, max = 4 }, { name = "target_uid", type = "uid" } ]
+set_response = []
+[pid.pd]
+pdl_size = 7
+data_type = "not_defined"
+unit = "none"
+prefix = "none"
+min = 0
+max = 0
+default = 0
+description = "Boot catch start (port, UID)"
+
+[[pid]]
+name = "BOOT_CATCH_STATUS"
+pid = 0x8141
+device = "node"
+cc = "get"
+listed = true
+doc = "State of the last/current catch. Every state change queues this GET response as a queued message (plus status BOOT_CATCH_CAUGHT / BOOT_CATCH_TIMEOUT)."
+get_request = []
+get_response = [
+  { name = "state", type = "u8", enum = "boot_catch_state" },
+  { name = "port", type = "u8" },
+  { name = "target_uid", type = "uid" },
+  { name = "elapsed_ms", type = "u32" },
+  { name = "attempts", type = "u16" },
+]
+[pid.pd]
+pdl_size = 14
+data_type = "not_defined"
+unit = "none"
+prefix = "none"
+min = 0
+max = 0
+default = 0
+description = "Boot catch status"
+
+[[pid]]
+name = "BOOT_CATCH_ABORT"
+pid = 0x8142
+device = "node"
+cc = "set"
+listed = true
+doc = "Abort a running catch (state ABORTED). ACK also when idle."
+set_request = []
+set_response = []
+[pid.pd]
+pdl_size = 0
+data_type = "not_defined"
+unit = "none"
+prefix = "none"
+min = 0
+max = 0
+default = 0
+description = "Boot catch abort"
+
+[[pid]]
+name = "LOCAL_RDM_SET"
+pid = 0x8150
+device = "node"
+cc = "get"
+listed = true
+doc = "Last RDM SET the node made from its own panel to an attached device. Each such SET queues this GET response (and status LOCAL_RDM_SET) so Pixelmapper can re-read that parameter. sequence counts up from boot."
+get_request = []
+get_response = [
+  { name = "sequence", type = "u16" },
+  { name = "port", type = "u8" },
+  { name = "uid", type = "uid" },
+  { name = "sub_device", type = "u16" },
+  { name = "pid", type = "u16" },
+]
+[pid.pd]
+pdl_size = 13
+data_type = "not_defined"
+unit = "none"
+prefix = "none"
+min = 0
+max = 0
+default = 0
+description = "Last RDM SET from front panel"
+
+[[pid]]
+name = "FW_INFO"
+pid = 0x8180
+device = "node"
+cc = "get"
+listed = true
+doc = "Firmware update state of the node (RDM path, also reflects an ArtFirmwareMaster session)."
+get_request = []
+get_response = [
+  { name = "manufacturer", type = "u16" },
+  { name = "model", type = "u16" },
+  { name = "hw_revision", type = "u8" },
+  { name = "fw_version", type = "u32", doc = "running FW_VERSION_ID 0x00MMmmpp" },
+  { name = "state", type = "u8", enum = "fw_state" },
+  { name = "last_error", type = "u8", enum = "fw_error" },
+  { name = "max_block", type = "u8", doc = "NODE_FW_MAX_BLOCK" },
+  { name = "received", type = "u32" },
+  { name = "total", type = "u32" },
+]
+[pid.pd]
+pdl_size = 20
+data_type = "not_defined"
+unit = "none"
+prefix = "none"
+min = 0
+max = 0
+default = 0
+description = "Firmware update info"
+
+[[pid]]
+name = "FW_BEGIN"
+pid = 0x8181
+device = "node"
+cc = "set"
+listed = true
+doc = "Start an update. PD = the 64-byte node image description block (image-format.md) with image_length and image_crc32 filled in. Checked immediately: NACK DATA_OUT_OF_RANGE + FW_INFO.last_error on mismatch. Opens the inactive OTA partition (erase may take long: ACK_TIMER allowed). Restarts a running session."
+set_request = [ { name = "description", type = "bytes", len = 64 } ]
+set_response = []
+[pid.pd]
+pdl_size = 64
+data_type = "not_defined"
+unit = "none"
+prefix = "none"
+min = 0
+max = 0
+default = 0
+description = "Firmware update begin"
+
+[[pid]]
+name = "FW_WRITE"
+pid = 0x8182
+device = "node"
+cc = "set"
+listed = true
+doc = "Write image bytes. offset == received: append. offset + len <= received: ACK without writing (retransmission). offset > received: NACK DATA_OUT_OF_RANGE. NACK BUFFER_FULL: busy, resend."
+set_request = [ { name = "offset", type = "u32" }, { name = "data", type = "bytes", max_len = 224 } ]
+set_response = []
+[pid.pd]
+pdl_size = 228
+data_type = "not_defined"
+unit = "none"
+prefix = "none"
+min = 0
+max = 0
+default = 0
+description = "Firmware update write"
+
+[[pid]]
+name = "FW_FINISH"
+pid = 0x8183
+device = "node"
+cc = "set"
+listed = true
+doc = "Verify (length, CRC-32, ESP-IDF image check) and activate. ACK -> reboot after ~500 ms into the new image (rollback if it does not mark itself valid). NACK + last_error on failure, the old firmware stays active."
+set_request = []
+set_response = []
+[pid.pd]
+pdl_size = 0
+data_type = "not_defined"
+unit = "none"
+prefix = "none"
+min = 0
+max = 0
+default = 0
+description = "Firmware update finish"
+
+# ---------------------------------------------------------------------------------------------------------------
+# Standard PIDs the node supports (E1.20, E1.37-2). Not manufacturer PIDs - listed here so firmware, tests and
+# Pixelmapper agree on the node's SUPPORTED_PARAMETERS. `required` = E1.20 says "shall not be reported" in
+# SUPPORTED_PARAMETERS.
+# ---------------------------------------------------------------------------------------------------------------
+[node.standard_pids]
+required = [
+  { name = "DEVICE_INFO", pid = 0x0060 },
+  { name = "SUPPORTED_PARAMETERS", pid = 0x0050 },
+  { name = "PARAMETER_DESCRIPTION", pid = 0x0051 },
+  { name = "SOFTWARE_VERSION_LABEL", pid = 0x00C0 },
+  { name = "IDENTIFY_DEVICE", pid = 0x1000 },
+]
+listed = [
+  { name = "QUEUED_MESSAGE", pid = 0x0020, std = "E1.20" },
+  { name = "STATUS_MESSAGES", pid = 0x0030, std = "E1.20" },
+  { name = "STATUS_ID_DESCRIPTION", pid = 0x0031, std = "E1.20" },
+  { name = "CLEAR_STATUS_ID", pid = 0x0032, std = "E1.20" },
+  { name = "PRODUCT_DETAIL_ID_LIST", pid = 0x0070, std = "E1.20" },
+  { name = "DEVICE_MODEL_DESCRIPTION", pid = 0x0080, std = "E1.20" },
+  { name = "MANUFACTURER_LABEL", pid = 0x0081, std = "E1.20" },
+  { name = "DEVICE_LABEL", pid = 0x0082, std = "E1.20" },
+  { name = "FACTORY_DEFAULTS", pid = 0x0090, std = "E1.20" },
+  { name = "BOOT_SOFTWARE_VERSION_ID", pid = 0x00C1, std = "E1.20" },
+  { name = "BOOT_SOFTWARE_VERSION_LABEL", pid = 0x00C2, std = "E1.20" },
+  { name = "DISPLAY_LEVEL", pid = 0x0501, std = "E1.20" },
+  { name = "RESET_DEVICE", pid = 0x1001, std = "E1.20" },
+  { name = "LIST_INTERFACES", pid = 0x0700, std = "E1.37-2" },
+  { name = "INTERFACE_LABEL", pid = 0x0701, std = "E1.37-2" },
+  { name = "INTERFACE_HARDWARE_ADDRESS_TYPE1", pid = 0x0702, std = "E1.37-2" },
+  { name = "IPV4_DHCP_MODE", pid = 0x0703, std = "E1.37-2" },
+  { name = "IPV4_CURRENT_ADDRESS", pid = 0x0705, std = "E1.37-2" },
+  { name = "IPV4_STATIC_ADDRESS", pid = 0x0706, std = "E1.37-2" },
+  { name = "INTERFACE_RENEW_DHCP", pid = 0x0707, std = "E1.37-2" },
+  { name = "INTERFACE_APPLY_CONFIGURATION", pid = 0x0709, std = "E1.37-2" },
+  { name = "IPV4_DEFAULT_ROUTE", pid = 0x070A, std = "E1.37-2" },
+]

@@ -1,0 +1,47 @@
+{
+  "$schema": "../schema.json",
+  "protocol": "artnet",
+  "packet": "ArtTodControl",
+  "vectors": [
+    {
+      "name": "atc_flush_pa1",
+      "description": "AtcFlush (0x01) for Port-Address 1: flush TOD, full discovery",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtTodControl packet definition p.90-91",
+      "hex": "4172742d4e6574000082000e000000000000000000000101",
+      "valid": true,
+      "fields": {
+        "op_code": 33280,
+        "prot_ver": 14,
+        "net": 0,
+        "command": 1,
+        "address": 1,
+        "port_address": 1
+      }
+    },
+    {
+      "name": "atc_inc_off_pa3",
+      "description": "AtcIncOff (0x04) for Port-Address 3: disable incremental discovery",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtTodControl packet definition p.90-91",
+      "hex": "4172742d4e6574000082000e000000000000000000000403",
+      "valid": true,
+      "fields": {
+        "op_code": 33280,
+        "prot_ver": 14,
+        "net": 0,
+        "command": 4,
+        "address": 3,
+        "port_address": 3
+      }
+    },
+    {
+      "name": "short_23",
+      "description": "23 bytes, Address missing",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtTodControl packet definition p.90-91",
+      "hex": "4172742d4e6574000082000e0000000000000000000001",
+      "valid": false,
+      "fields": {
+        "error": "short"
+      }
+    }
+  ]
+}

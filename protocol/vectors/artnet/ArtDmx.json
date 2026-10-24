@@ -1,0 +1,98 @@
+{
+  "$schema": "../schema.json",
+  "protocol": "artnet",
+  "packet": "ArtDmx",
+  "vectors": [
+    {
+      "name": "uni1_len4",
+      "description": "Port-Address 1 (Net 0, Sub-Net 0, Universe 1), Sequence 1, Physical 0, 4 channels",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtDmx packet definition p.63-64",
+      "hex": "4172742d4e6574000050000e01000100000401020304",
+      "valid": true,
+      "fields": {
+        "op_code": 20480,
+        "prot_ver": 14,
+        "sequence": 1,
+        "physical": 0,
+        "sub_uni": 1,
+        "net": 0,
+        "port_address": 1,
+        "sub_net": 0,
+        "universe": 1,
+        "length": 4,
+        "data": "01020304"
+      }
+    },
+    {
+      "name": "pa_0x0213_len512",
+      "description": "Port-Address 0x0213 (Net 2, Sub-Net 1, Universe 3), Sequence 255, 512 channels 00..ff repeating",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtDmx packet definition p.63-64",
+      "hex": "4172742d4e6574000050000eff0013020200000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+      "valid": true,
+      "fields": {
+        "op_code": 20480,
+        "prot_ver": 14,
+        "sequence": 255,
+        "physical": 0,
+        "sub_uni": 19,
+        "net": 2,
+        "port_address": 531,
+        "sub_net": 1,
+        "universe": 3,
+        "length": 512,
+        "data": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"
+      }
+    },
+    {
+      "name": "pa_max_seq_disabled",
+      "description": "Port-Address 32767 (Net 127), Sequence 0 (re-sequencing disabled), Physical 3, 2 channels",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtDmx packet definition p.63-64",
+      "hex": "4172742d4e6574000050000e0003ff7f0002ff00",
+      "valid": true,
+      "fields": {
+        "op_code": 20480,
+        "prot_ver": 14,
+        "sequence": 0,
+        "physical": 3,
+        "sub_uni": 255,
+        "net": 127,
+        "port_address": 32767,
+        "sub_net": 15,
+        "universe": 15,
+        "length": 2,
+        "data": "ff00"
+      }
+    },
+    {
+      "name": "short_header",
+      "description": "17 bytes: header incomplete (Length low byte missing)",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtDmx packet definition p.63-64",
+      "hex": "4172742d4e6574000050000e0100010000",
+      "valid": false,
+      "fields": {
+        "error": "short"
+      }
+    },
+    {
+      "name": "length_exceeds_payload",
+      "description": "Length field says 4 but only 2 data bytes follow",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtDmx packet definition p.63-64",
+      "hex": "4172742d4e6574000050000e0100010000040102",
+      "valid": false,
+      "fields": {
+        "error": "short"
+      },
+      "notes": "Spec only demands a minimum length; a decoder must not read past the UDP payload."
+    },
+    {
+      "name": "bad_id",
+      "description": "ID 'Art-Neu\\0'",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), Data Integrity p.96",
+      "hex": "4172742d4e6575000050000e01000100000401020304",
+      "valid": false,
+      "fields": {
+        "error": "bad_id"
+      }
+    }
+  ]
+}

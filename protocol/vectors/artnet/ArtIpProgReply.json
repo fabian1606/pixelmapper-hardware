@@ -1,0 +1,41 @@
+{
+  "$schema": "../schema.json",
+  "protocol": "artnet",
+  "packet": "ArtIpProgReply",
+  "vectors": [
+    {
+      "name": "static_2_0_0_10",
+      "description": "Static IP 2.0.0.10/8, DHCP off, no gateway",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtIpProgReply packet definition p.36-37",
+      "hex": "4172742d4e65740000f9000e000000000200000aff00000000000000000000000000",
+      "valid": true,
+      "fields": {
+        "op_code": 63744,
+        "prot_ver": 14,
+        "prog_ip": "2.0.0.10",
+        "prog_sm": "255.0.0.0",
+        "prog_port": 0,
+        "status": 0,
+        "dhcp_enabled": false,
+        "prog_dg": "0.0.0.0"
+      }
+    },
+    {
+      "name": "dhcp_lease",
+      "description": "DHCP enabled (Status bit6), 192.168.1.50/24, gateway 192.168.1.1",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtIpProgReply packet definition p.36-37",
+      "hex": "4172742d4e65740000f9000e00000000c0a80132ffffff0000004000c0a801010000",
+      "valid": true,
+      "fields": {
+        "op_code": 63744,
+        "prot_ver": 14,
+        "prog_ip": "192.168.1.50",
+        "prog_sm": "255.255.255.0",
+        "prog_port": 0,
+        "status": 64,
+        "dhcp_enabled": true,
+        "prog_dg": "192.168.1.1"
+      }
+    }
+  ]
+}

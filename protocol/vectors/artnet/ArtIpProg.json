@@ -1,0 +1,71 @@
+{
+  "$schema": "../schema.json",
+  "protocol": "artnet",
+  "packet": "ArtIpProg",
+  "vectors": [
+    {
+      "name": "set_ip_and_mask",
+      "description": "Command 0x86: enable programming + program IP + program subnet mask",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtIpProg packet definition p.34-35",
+      "hex": "4172742d4e65740000f8000e0000860002000014ff00000000000000000000000000",
+      "valid": true,
+      "fields": {
+        "op_code": 63488,
+        "prot_ver": 14,
+        "command": 134,
+        "prog_ip": "2.0.0.20",
+        "prog_sm": "255.0.0.0",
+        "prog_port": 0,
+        "prog_dg": "0.0.0.0"
+      }
+    },
+    {
+      "name": "enable_dhcp",
+      "description": "Command 0xC0: enable programming + enable DHCP (lower bits ignored)",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtIpProg packet definition p.34-35",
+      "hex": "4172742d4e65740000f8000e0000c000000000000000000000000000000000000000",
+      "valid": true,
+      "fields": {
+        "op_code": 63488,
+        "prot_ver": 14,
+        "command": 192,
+        "prog_ip": "0.0.0.0",
+        "prog_sm": "0.0.0.0",
+        "prog_port": 0,
+        "prog_dg": "0.0.0.0"
+      }
+    },
+    {
+      "name": "enquiry",
+      "description": "Command 0x00: enquiry only, node answers with ArtIpProgReply",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtIpProg packet definition p.34-35",
+      "hex": "4172742d4e65740000f8000e00000000000000000000000000000000000000000000",
+      "valid": true,
+      "fields": {
+        "op_code": 63488,
+        "prot_ver": 14,
+        "command": 0,
+        "prog_ip": "0.0.0.0",
+        "prog_sm": "0.0.0.0",
+        "prog_port": 0,
+        "prog_dg": "0.0.0.0"
+      }
+    },
+    {
+      "name": "set_gateway",
+      "description": "Command 0x90: enable programming + program default gateway 2.0.0.1",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtIpProg packet definition p.34-35",
+      "hex": "4172742d4e65740000f8000e00009000000000000000000000000200000100000000",
+      "valid": true,
+      "fields": {
+        "op_code": 63488,
+        "prot_ver": 14,
+        "command": 144,
+        "prog_ip": "0.0.0.0",
+        "prog_sm": "0.0.0.0",
+        "prog_port": 0,
+        "prog_dg": "2.0.0.1"
+      }
+    }
+  ]
+}

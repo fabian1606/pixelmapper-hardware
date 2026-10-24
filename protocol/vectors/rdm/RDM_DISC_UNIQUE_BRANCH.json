@@ -1,0 +1,57 @@
+{
+  "$schema": "../schema.json",
+  "protocol": "rdm",
+  "packet": "RDM",
+  "vectors": [
+    {
+      "name": "full_range",
+      "description": "DISC_UNIQUE_BRANCH to broadcast, lower 0000:00000000, upper FFFF:FFFFFFFF",
+      "source": "E1.20 §6 packet format (layout as in OLA RDMCommand.cpp / tube_fw rdm.c offsets); E1.20 §7.5 DISC_UNIQUE_BRANCH; range as OLA DiscoveryAgent::InitDiscovery",
+      "hex": "CC 01 24 FF FF FF FF FF FF 7F F0 A0 00 00 01 02 01 00 00 00 10 00 01 0C 00 00 00 00 00 00 FF FF FF FF FF FF 0F 15",
+      "valid": true,
+      "fields": {
+        "start_code": 204,
+        "sub_start_code": 1,
+        "message_length": 36,
+        "dest_uid": "FFFF:FFFFFFFF",
+        "src_uid": "7FF0:A0000001",
+        "transaction_number": 2,
+        "port_id": 1,
+        "message_count": 0,
+        "sub_device": 0,
+        "command_class": 16,
+        "parameter_id": 1,
+        "parameter_data_length": 12,
+        "parameter_data": "000000000000ffffffffffff",
+        "checksum": 3861,
+        "lower_bound_uid": "0000:00000000",
+        "upper_bound_uid": "FFFF:FFFFFFFF"
+      }
+    },
+    {
+      "name": "lower_half",
+      "description": "DUB after a collision: first half 0000:00000000..7FFF:FFFFFFFF (OLA splits at (lo+hi)/2)",
+      "source": "OLA DiscoveryAgent::HandleCollision; packet per E1.20 §7.5",
+      "hex": "CC 01 24 FF FF FF FF FF FF 7F F0 A0 00 00 01 03 01 00 00 00 10 00 01 0C 00 00 00 00 00 00 7F FF FF FF FF FF 0E 96",
+      "valid": true,
+      "fields": {
+        "start_code": 204,
+        "sub_start_code": 1,
+        "message_length": 36,
+        "dest_uid": "FFFF:FFFFFFFF",
+        "src_uid": "7FF0:A0000001",
+        "transaction_number": 3,
+        "port_id": 1,
+        "message_count": 0,
+        "sub_device": 0,
+        "command_class": 16,
+        "parameter_id": 1,
+        "parameter_data_length": 12,
+        "parameter_data": "0000000000007fffffffffff",
+        "checksum": 3734,
+        "lower_bound_uid": "0000:00000000",
+        "upper_bound_uid": "7FFF:FFFFFFFF"
+      }
+    }
+  ]
+}

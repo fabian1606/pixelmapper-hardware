@@ -1,0 +1,65 @@
+{
+  "$schema": "../schema.json",
+  "protocol": "rdm",
+  "packet": "RDM",
+  "vectors": [
+    {
+      "name": "get_request",
+      "description": "GET BOOT_INFO (manufacturer PID 0x8010) to tube_boot_rdm",
+      "source": "rdm_boot.h PID_BOOT_INFO; tube_boot_rdm main.c pids[]",
+      "hex": "CC 01 18 7F F0 12 34 56 78 7F F0 A0 00 00 01 0B 01 00 00 00 20 80 10 00 06 34",
+      "valid": true,
+      "fields": {
+        "start_code": 204,
+        "sub_start_code": 1,
+        "message_length": 24,
+        "dest_uid": "7FF0:12345678",
+        "src_uid": "7FF0:A0000001",
+        "transaction_number": 11,
+        "port_id": 1,
+        "message_count": 0,
+        "sub_device": 0,
+        "command_class": 32,
+        "parameter_id": 32784,
+        "parameter_data_length": 0,
+        "parameter_data": "",
+        "checksum": 1588
+      }
+    },
+    {
+      "name": "ack_response",
+      "description": "BOOT_INFO 19 bytes: version 3, page 64, app end 0x1800, busy 0, last error 0, manufacturer 0x7FF0, model 0x0001, boot sw 0xB0000003, app valid 1, app FW_VERSION_ID 0x00000500",
+      "source": "tube_boot_rdm main.c boot_info_c[] + app_st[]; rdm_boot.h comment; README BOOT_INFO table",
+      "hex": "CC 01 2B 7F F0 A0 00 00 01 7F F0 12 34 56 78 0B 00 00 00 00 21 80 10 13 03 40 18 00 00 00 7F F0 00 01 B0 00 00 03 01 00 00 05 00 08 DE",
+      "valid": true,
+      "fields": {
+        "start_code": 204,
+        "sub_start_code": 1,
+        "message_length": 43,
+        "dest_uid": "7FF0:A0000001",
+        "src_uid": "7FF0:12345678",
+        "transaction_number": 11,
+        "response_type": 0,
+        "message_count": 0,
+        "sub_device": 0,
+        "command_class": 33,
+        "parameter_id": 32784,
+        "parameter_data_length": 19,
+        "parameter_data": "0340180000007ff00001b00000030100000500",
+        "checksum": 2270,
+        "boot_info": {
+          "version": 3,
+          "page_size": 64,
+          "app_space_end": 6144,
+          "busy": 0,
+          "last_error": 0,
+          "manufacturer_id": 32752,
+          "device_model_id": 1,
+          "boot_sw_version_id": 2952790019,
+          "app_valid": 1,
+          "app_fw_version_id": 1280
+        }
+      }
+    }
+  ]
+}

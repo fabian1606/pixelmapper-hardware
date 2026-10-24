@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pixelmapper-hardware/protocol/vectors/schema.json",
+  "title": "Pixelmapper test vector file",
+  "description": "One file per packet type: protocol/vectors/<protocol>/<packet>.json. See README.md for field conventions.",
+  "type": "object",
+  "required": ["protocol", "packet", "vectors"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {"type": "string"},
+    "protocol": {"enum": ["artnet", "rdm", "image"]},
+    "packet": {"type": "string", "description": "Spec name of the packet, e.g. ArtPoll, ArtPollReply, RDM, DUB_RESPONSE"},
+    "vectors": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name", "description", "source", "hex", "valid", "fields"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {"type": "string", "pattern": "^[a-z0-9_]+$", "description": "unique within the file"},
+          "description": {"type": "string"},
+          "source": {"type": "string", "description": "where the bytes come from, e.g. 'Art-Net 4 rev 1.4dh, ArtPoll table' or 'E1.20-2010 Table 6-4' or 'tube_fw rdm.c'"},
+          "hex": {"type": "string", "pattern": "^[0-9a-fA-F\\s]*$", "description": "complete packet bytes (UDP payload resp. RDM wire bytes starting with 0xCC); whitespace is ignored"},
+          "valid": {"type": "boolean", "description": "false = a decoder must reject these bytes; fields then holds {'error': '<reason>'}"},
+          "fields": {"type": "object", "description": "decoded fields, snake_case spec names; see README.md"},
+          "notes": {"type": "string"}
+        }
+      }
+    }
+  }
+}

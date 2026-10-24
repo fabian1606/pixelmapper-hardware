@@ -1,0 +1,67 @@
+{
+  "$schema": "../schema.json",
+  "protocol": "rdm",
+  "packet": "RDM",
+  "vectors": [
+    {
+      "name": "request_0x8000",
+      "description": "GET PARAMETER_DESCRIPTION for manufacturer PID 0x8000 (ENTER_BOOTLOADER)",
+      "source": "E1.20 §6 packet format (layout as in OLA RDMCommand.cpp / tube_fw rdm.c offsets)",
+      "hex": "CC 01 1A 7F F0 12 34 56 78 7F F0 A0 00 00 01 09 01 00 00 00 20 00 51 02 80 00 06 77",
+      "valid": true,
+      "fields": {
+        "start_code": 204,
+        "sub_start_code": 1,
+        "message_length": 26,
+        "dest_uid": "7FF0:12345678",
+        "src_uid": "7FF0:A0000001",
+        "transaction_number": 9,
+        "port_id": 1,
+        "message_count": 0,
+        "sub_device": 0,
+        "command_class": 32,
+        "parameter_id": 81,
+        "parameter_data_length": 2,
+        "parameter_data": "8000",
+        "checksum": 1655,
+        "requested_pid": 32768
+      }
+    },
+    {
+      "name": "ack_0x8000",
+      "description": "ACK: pid 0x8000, pdl_size 4, data_type DS_ASCII (2), command_class CC_SET (2), type 0, unit 0, prefix 0, min/max/default 0, description",
+      "source": "tube_fw rdm.c pdesc_boot[] / s_pdesc_boot; layout OLA pids.proto PARAMETER_DESCRIPTION",
+      "hex": "CC 01 49 7F F0 A0 00 00 01 7F F0 12 34 56 78 09 00 00 00 00 21 00 51 31 80 00 04 02 02 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 45 6E 74 65 72 20 62 6F 6F 74 6C 6F 61 64 65 72 20 28 53 45 54 20 22 42 4F 4F 54 22 29 10 1B",
+      "valid": true,
+      "fields": {
+        "start_code": 204,
+        "sub_start_code": 1,
+        "message_length": 73,
+        "dest_uid": "7FF0:A0000001",
+        "src_uid": "7FF0:12345678",
+        "transaction_number": 9,
+        "response_type": 0,
+        "message_count": 0,
+        "sub_device": 0,
+        "command_class": 33,
+        "parameter_id": 81,
+        "parameter_data_length": 49,
+        "parameter_data": "8000040202000000000000000000000000000000456e74657220626f6f746c6f6164657220285345542022424f4f542229",
+        "checksum": 4123,
+        "parameter_description": {
+          "pid": 32768,
+          "pdl_size": 4,
+          "data_type": 2,
+          "command_class": 2,
+          "type": 0,
+          "unit": 0,
+          "prefix": 0,
+          "min_valid_value": 0,
+          "max_valid_value": 0,
+          "default_value": 0,
+          "description": "Enter bootloader (SET \"BOOT\")"
+        }
+      }
+    }
+  ]
+}

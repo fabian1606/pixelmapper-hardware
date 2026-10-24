@@ -1,0 +1,44 @@
+{
+  "$schema": "../schema.json",
+  "protocol": "artnet",
+  "packet": "ArtTodRequest",
+  "vectors": [
+    {
+      "name": "todfull_net0_4_ports",
+      "description": "TodFull for Net 0, Port-Address low bytes 0x00..0x03 (AddCount 4), Address[32] zero-padded",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtTodRequest packet definition p.85-86",
+      "hex": "4172742d4e6574000080000e0000000000000000000000040001020300000000000000000000000000000000000000000000000000000000",
+      "valid": true,
+      "fields": {
+        "op_code": 32768,
+        "prot_ver": 14,
+        "net": 0,
+        "command": 0,
+        "add_count": 4,
+        "address": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "port_addresses": [
+          0,
+          1,
+          2,
+          3
+        ]
+      }
+    },
+    {
+      "name": "short_23",
+      "description": "23 bytes, Address array missing",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtTodRequest packet definition p.85-86",
+      "hex": "4172742d4e6574000080000e0000000000000000000000",
+      "valid": false,
+      "fields": {
+        "error": "short"
+      },
+      "notes": "Receivers must honour AddCount; we accept packets >= 24 + AddCount bytes."
+    }
+  ]
+}

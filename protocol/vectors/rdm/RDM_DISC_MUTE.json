@@ -1,0 +1,130 @@
+{
+  "$schema": "../schema.json",
+  "protocol": "rdm",
+  "packet": "RDM",
+  "vectors": [
+    {
+      "name": "request",
+      "description": "DISC_MUTE to 7FF0:12345678, PDL 0",
+      "source": "E1.20 \u00a76 packet format (layout as in OLA RDMCommand.cpp / tube_fw rdm.c offsets); E1.20 \u00a77.6 DISC_MUTE",
+      "hex": "CC 01 18 7F F0 12 34 56 78 7F F0 A0 00 00 01 04 01 00 00 00 10 00 02 00 05 8F",
+      "valid": true,
+      "fields": {
+        "start_code": 204,
+        "sub_start_code": 1,
+        "message_length": 24,
+        "dest_uid": "7FF0:12345678",
+        "src_uid": "7FF0:A0000001",
+        "transaction_number": 4,
+        "port_id": 1,
+        "message_count": 0,
+        "sub_device": 0,
+        "command_class": 16,
+        "parameter_id": 2,
+        "parameter_data_length": 0,
+        "parameter_data": "",
+        "checksum": 1423
+      }
+    },
+    {
+      "name": "response_bootloader_flag",
+      "description": "DISC_MUTE response, control field 0x0004 (Boot-Loader flag) from tube_boot_rdm without valid app",
+      "source": "tube_boot_rdm main.c handle() (CF_BOOTLOADER); bit values per Ja Rule rdm.h MUTE_*_FLAG",
+      "hex": "CC 01 1A 7F F0 A0 00 00 01 7F F0 12 34 56 78 04 00 00 00 00 11 00 02 02 00 04 05 97",
+      "valid": true,
+      "fields": {
+        "start_code": 204,
+        "sub_start_code": 1,
+        "message_length": 26,
+        "dest_uid": "7FF0:A0000001",
+        "src_uid": "7FF0:12345678",
+        "transaction_number": 4,
+        "response_type": 0,
+        "message_count": 0,
+        "sub_device": 0,
+        "command_class": 17,
+        "parameter_id": 2,
+        "parameter_data_length": 2,
+        "parameter_data": "0004",
+        "checksum": 1431,
+        "control_field": 4,
+        "managed_proxy": false,
+        "boot_loader": true,
+        "proxied_device": false,
+        "sub_device_flag": false
+      }
+    },
+    {
+      "name": "response_app",
+      "description": "DISC_MUTE response from tube_fw app, control field 0x0000",
+      "source": "tube_fw rdm.c rdm_poll()",
+      "hex": "CC 01 1A 7F F0 A0 00 00 01 7F F0 12 34 56 78 04 00 00 00 00 11 00 02 02 00 00 05 93",
+      "valid": true,
+      "fields": {
+        "start_code": 204,
+        "sub_start_code": 1,
+        "message_length": 26,
+        "dest_uid": "7FF0:A0000001",
+        "src_uid": "7FF0:12345678",
+        "transaction_number": 4,
+        "response_type": 0,
+        "message_count": 0,
+        "sub_device": 0,
+        "command_class": 17,
+        "parameter_id": 2,
+        "parameter_data_length": 2,
+        "parameter_data": "0000",
+        "checksum": 1427,
+        "control_field": 0
+      }
+    },
+    {
+      "name": "response_with_binding_uid",
+      "description": "DISC_MUTE response with optional binding UID (PDL 8): port UID 7FF0:A0000002 bound to primary 7FF0:A0000000",
+      "source": "OLA pids.proto DISC_MUTE (control_field + optional binding_uid); UIDs synthetic",
+      "hex": "CC 01 20 7F F0 A0 00 00 01 7F F0 A0 00 00 02 05 00 00 00 00 11 00 02 08 00 00 7F F0 A0 00 00 00 07 3D",
+      "valid": true,
+      "fields": {
+        "start_code": 204,
+        "sub_start_code": 1,
+        "message_length": 32,
+        "dest_uid": "7FF0:A0000001",
+        "src_uid": "7FF0:A0000002",
+        "transaction_number": 5,
+        "response_type": 0,
+        "message_count": 0,
+        "sub_device": 0,
+        "command_class": 17,
+        "parameter_id": 2,
+        "parameter_data_length": 8,
+        "parameter_data": "00007ff0a0000000",
+        "checksum": 1853,
+        "control_field": 0,
+        "binding_uid": "7FF0:A0000000"
+      }
+    },
+    {
+      "name": "unmute_broadcast",
+      "description": "DISC_UN_MUTE to FFFF:FFFFFFFF (no response expected)",
+      "source": "E1.20 \u00a77.6; OLA DiscoveryAgent UnMuteAll",
+      "hex": "CC 01 18 FF FF FF FF FF FF 7F F0 A0 00 00 01 06 01 00 00 00 10 00 03 00 09 09",
+      "valid": true,
+      "fields": {
+        "start_code": 204,
+        "sub_start_code": 1,
+        "message_length": 24,
+        "dest_uid": "FFFF:FFFFFFFF",
+        "src_uid": "7FF0:A0000001",
+        "transaction_number": 6,
+        "port_id": 1,
+        "message_count": 0,
+        "sub_device": 0,
+        "command_class": 16,
+        "parameter_id": 3,
+        "parameter_data_length": 0,
+        "parameter_data": "",
+        "checksum": 2313
+      }
+    }
+  ]
+}

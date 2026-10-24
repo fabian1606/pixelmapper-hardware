@@ -1,0 +1,64 @@
+{
+  "$schema": "../schema.json",
+  "protocol": "artnet",
+  "packet": "ArtTodData",
+  "vectors": [
+    {
+      "name": "two_tubes_pa1",
+      "description": "TodFull for Port-Address 1, BindIndex 1, Port 1, 2 UIDs in one block",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtTodData packet definition p.87-89",
+      "hex": "4172742d4e6574000081000e010100000000000001000001000200027ff0000000017ff000000002",
+      "valid": true,
+      "fields": {
+        "op_code": 33024,
+        "prot_ver": 14,
+        "rdm_ver": 1,
+        "port": 1,
+        "bind_index": 1,
+        "net": 0,
+        "command_response": 0,
+        "address": 1,
+        "port_address": 1,
+        "uid_total": 2,
+        "block_count": 0,
+        "uid_count": 2,
+        "tod": [
+          "7FF0:00000001",
+          "7FF0:00000002"
+        ]
+      }
+    },
+    {
+      "name": "tod_nak",
+      "description": "TodNak (0xFF): TOD not available / discovery incomplete, BindIndex 2, Port-Address 2",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtTodData packet definition p.87-89",
+      "hex": "4172742d4e6574000081000e01010000000000000200ff0200000000",
+      "valid": true,
+      "fields": {
+        "op_code": 33024,
+        "prot_ver": 14,
+        "rdm_ver": 1,
+        "port": 1,
+        "bind_index": 2,
+        "net": 0,
+        "command_response": 255,
+        "address": 2,
+        "port_address": 2,
+        "uid_total": 0,
+        "block_count": 0,
+        "uid_count": 0,
+        "tod": []
+      }
+    },
+    {
+      "name": "uid_count_exceeds_payload",
+      "description": "UidCount 2 but only one UID present",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtTodData packet definition p.87-89",
+      "hex": "4172742d4e6574000081000e010100000000000001000001000200027ff000000001",
+      "valid": false,
+      "fields": {
+        "error": "short"
+      }
+    }
+  ]
+}

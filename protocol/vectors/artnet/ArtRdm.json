@@ -1,0 +1,37 @@
+{
+  "$schema": "../schema.json",
+  "protocol": "artnet",
+  "packet": "ArtRdm",
+  "vectors": [
+    {
+      "name": "get_device_info_pa1",
+      "description": "ArtRdm to Port-Address 1 carrying RDM GET DEVICE_INFO (0x0060) to 7FF0:00000001; RdmPacket without start code 0xCC",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtRdm packet definition p.92-93; RDM bytes per ANSI E1.20",
+      "hex": "4172742d4e6574000083000e01000000000000000000000101187ff0000000017ff0801234560501000000200060000566",
+      "valid": true,
+      "fields": {
+        "op_code": 33536,
+        "prot_ver": 14,
+        "rdm_ver": 1,
+        "fifo_avail": 0,
+        "fifo_max": 0,
+        "net": 0,
+        "command": 0,
+        "address": 1,
+        "port_address": 1,
+        "rdm_packet": "01187ff0000000017ff0801234560501000000200060000566"
+      },
+      "notes": "RdmPacket starts with sub-start-code 0x01. Message Length (24) and the checksum still count the omitted 0xCC start code, exactly as on the wire."
+    },
+    {
+      "name": "short_23",
+      "description": "23 bytes, no RDM payload and Address missing",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtRdm packet definition p.92-93",
+      "hex": "4172742d4e6574000083000e0100000000000000000000",
+      "valid": false,
+      "fields": {
+        "error": "short"
+      }
+    }
+  ]
+}

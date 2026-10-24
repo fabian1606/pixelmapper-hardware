@@ -1,0 +1,23 @@
+# Pixelmapper Node - ESP32-P4 (Waveshare ESP32-P4-WIFI6-POE-ETH, hardware rev 0)
+CONFIG_IDF_TARGET="esp32p4"
+
+# Flash / partitions: two 4 MB OTA slots, no factory app (rollback via otadata)
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# Chip revision: IDF v5.5 builds for P4 rev >= 3.0 by default. If the board carries an older chip
+# (check: esptool.py chip_id), set CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y in sdkconfig (not here, per board).
+
+# PSRAM (32 MB on the Waveshare board): TOD label cache, UI frame strips
+CONFIG_SPIRAM=y
+
+# FreeRTOS: 1 kHz tick for the port engine bookkeeping (DMX timing itself is hardware/timer driven)
+CONFIG_FREERTOS_HZ=1000
+
+# Ethernet: internal EMAC + IP101 PHY over RMII
+CONFIG_ETH_USE_ESP32_EMAC=y
+
+# Logging
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y

@@ -1,0 +1,112 @@
+{
+  "$schema": "../schema.json",
+  "protocol": "artnet",
+  "packet": "ArtPollReply",
+  "vectors": [
+    {
+      "name": "pm_node_4_outputs_bind1",
+      "description": "Full 239-byte ArtPollReply of a 4-port node (all ports output DMX512, Port-Address 0..3), BindIndex 1",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtPollReply packet definition p.25-33",
+      "hex": "4172742d4e65740000210200000a36190100000000ff00e2f07f504d204e6f64650000000000000000000000506978656c6d6170706572204e6f64650000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002330303031205b303030315d20506f776572204f6e205465737473207375636365737366756c000000000000000000000000000000000000000000000000000000048080808000000000800000000000000000010203000000000000000200001234560200000a01cc60606060287ff0801234560000002c0000000000000000000000",
+      "valid": true,
+      "fields": {
+        "op_code": 8448,
+        "ip": "2.0.0.10",
+        "port": 6454,
+        "vers_info": 256,
+        "net_switch": 0,
+        "sub_switch": 0,
+        "oem": 255,
+        "ubea_version": 0,
+        "status1": 226,
+        "esta_man": 32752,
+        "short_name": "PM Node",
+        "long_name": "Pixelmapper Node",
+        "node_report": "#0001 [0001] Power On Tests successful",
+        "num_ports": 4,
+        "port_types": [
+          128,
+          128,
+          128,
+          128
+        ],
+        "good_input": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "good_output_a": [
+          128,
+          0,
+          0,
+          0
+        ],
+        "sw_in": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "sw_out": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "port_addresses_out": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "acn_priority": 0,
+        "sw_macro": 0,
+        "sw_remote": 0,
+        "style": 0,
+        "mac": "02:00:00:12:34:56",
+        "bind_ip": "2.0.0.10",
+        "bind_index": 1,
+        "status2": 204,
+        "good_output_b": [
+          96,
+          96,
+          96,
+          96
+        ],
+        "status3": 40,
+        "default_resp_uid": "7FF0:80123456",
+        "user": 0,
+        "refresh_rate": 44,
+        "background_queue_policy": 0
+      },
+      "notes": "Status1 0xE2 = indicators normal (11), Port-Address set by network (10), RDM capable. Status2 0xCC = RDM control via ArtAddress, output-style switching, 15-bit Port-Address, DHCP capable, IP static. GoodOutputB 0x60 = RDM enabled, style continuous, discovery not running, background discovery enabled. Status3 0x28 = failsafe hold, programmable failsafe supported, port direction switchable (PortTypes shows current direction). EstaMan is Lo byte first (offset 24=0xF0, 25=0x7F). Oem 0x00FF is a placeholder. Port-Address 0 is deprecated since rev DP (valid range 1-32767); kept here because the contract asked for 0..3. IP 2.0.0.10 does not follow the spec's MAC/OEM derivation (would be 2.(0x12+0x00+0xFF).0x34.0x56) - test value only."
+    },
+    {
+      "name": "min_207_bytes",
+      "description": "ArtPollReply truncated after MAC (207 bytes, the minimum); later fields read as zero",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtPollReply packet definition p.25-33, Minimum Packet Length p.25",
+      "hex": "4172742d4e65740000210200000a36190100000000ff00e2f07f504d204e6f64650000000000000000000000506978656c6d6170706572204e6f64650000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002330303031205b303030315d20506f776572204f6e205465737473207375636365737366756c00000000000000000000000000000000000000000000000000000004808080800000000080000000000000000001020300000000000000020000123456",
+      "valid": true,
+      "fields": {
+        "op_code": 8448,
+        "ip": "2.0.0.10",
+        "short_name": "PM Node",
+        "mac": "02:00:00:12:34:56",
+        "bind_index": 0,
+        "status2": 0,
+        "default_resp_uid": "0000:00000000"
+      }
+    },
+    {
+      "name": "short_206",
+      "description": "206 bytes: below the 207-byte minimum",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtPollReply packet definition p.25-33",
+      "hex": "4172742d4e65740000210200000a36190100000000ff00e2f07f504d204e6f64650000000000000000000000506978656c6d6170706572204e6f64650000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002330303031205b303030315d20506f776572204f6e205465737473207375636365737366756c000000000000000000000000000000000000000000000000000000048080808000000000800000000000000000010203000000000000000200001234",
+      "valid": false,
+      "fields": {
+        "error": "short"
+      }
+    }
+  ]
+}

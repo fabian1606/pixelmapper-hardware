@@ -1,0 +1,43 @@
+{
+  "$schema": "../schema.json",
+  "protocol": "artnet",
+  "packet": "ArtFirmwareReply",
+  "vectors": [
+    {
+      "name": "block_good",
+      "description": "FirmBlockGood (0x00)",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtFirmwareReply packet definition p.80-81",
+      "hex": "4172742d4e65740000f3000e000000000000000000000000000000000000000000000000",
+      "valid": true,
+      "fields": {
+        "op_code": 62208,
+        "prot_ver": 14,
+        "type": 0
+      }
+    },
+    {
+      "name": "all_good",
+      "description": "FirmAllGood (0x01)",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtFirmwareReply packet definition p.80-81",
+      "hex": "4172742d4e65740000f3000e000001000000000000000000000000000000000000000000",
+      "valid": true,
+      "fields": {
+        "op_code": 62208,
+        "prot_ver": 14,
+        "type": 1
+      }
+    },
+    {
+      "name": "fail",
+      "description": "FirmFail (0xFF), all error conditions",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtFirmwareReply packet definition p.80-81",
+      "hex": "4172742d4e65740000f3000e0000ff000000000000000000000000000000000000000000",
+      "valid": true,
+      "fields": {
+        "op_code": 62208,
+        "prot_ver": 14,
+        "type": 255
+      }
+    }
+  ]
+}

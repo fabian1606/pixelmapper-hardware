@@ -1,0 +1,56 @@
+{
+  "$schema": "../schema.json",
+  "protocol": "rdm",
+  "packet": "RDM",
+  "vectors": [
+    {
+      "name": "get_request_advisory",
+      "description": "GET QUEUED_MESSAGE, status type STATUS_ADVISORY (0x02)",
+      "source": "E1.20 §10.3.1; status type codes OLA RDMEnums.h",
+      "hex": "CC 01 19 7F F0 12 34 56 78 7F F0 A0 00 00 01 0A 01 00 00 00 20 00 20 01 02 05 C7",
+      "valid": true,
+      "fields": {
+        "start_code": 204,
+        "sub_start_code": 1,
+        "message_length": 25,
+        "dest_uid": "7FF0:12345678",
+        "src_uid": "7FF0:A0000001",
+        "transaction_number": 10,
+        "port_id": 1,
+        "message_count": 0,
+        "sub_device": 0,
+        "command_class": 32,
+        "parameter_id": 32,
+        "parameter_data_length": 1,
+        "parameter_data": "02",
+        "checksum": 1479,
+        "status_type": 2
+      }
+    },
+    {
+      "name": "empty_status_messages_response",
+      "description": "Nothing queued: ACK with PID STATUS_MESSAGES (0x0030), PDL 0, message count 0",
+      "source": "OLA AckTimerResponder.cpp EmptyStatusMessage (GetResponseWithPid(PID_STATUS_MESSAGES, NULL, 0, RDM_ACK))",
+      "hex": "CC 01 18 7F F0 A0 00 00 01 7F F0 12 34 56 78 0A 00 00 00 00 21 00 30 00 05 D3",
+      "valid": true,
+      "fields": {
+        "start_code": 204,
+        "sub_start_code": 1,
+        "message_length": 24,
+        "dest_uid": "7FF0:A0000001",
+        "src_uid": "7FF0:12345678",
+        "transaction_number": 10,
+        "response_type": 0,
+        "message_count": 0,
+        "sub_device": 0,
+        "command_class": 33,
+        "parameter_id": 48,
+        "parameter_data_length": 0,
+        "parameter_data": "",
+        "checksum": 1491,
+        "status_messages": []
+      },
+      "notes": "Response PID differs from request PID (0x0020 -> 0x0030); OLA RDMCommand.cpp accepts this only for QUEUED_MESSAGE."
+    }
+  ]
+}

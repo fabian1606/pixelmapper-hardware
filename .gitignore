@@ -1,0 +1,27 @@
+# macOS / editors
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# PlatformIO (tube)
+.pio/
+tube/tools/sim/.build/
+
+# ESP-IDF (node)
+node/firmware/build/
+node/firmware/sdkconfig
+node/firmware/sdkconfig.old
+node/firmware/managed_components/
+node/firmware/dependencies.lock
+node/firmware/test_host/build/
+build/
+
+# Rust
+target/

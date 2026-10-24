@@ -1,0 +1,32 @@
+{
+  "$schema": "../schema.json",
+  "protocol": "artnet",
+  "packet": "ArtSync",
+  "vectors": [
+    {
+      "name": "sync",
+      "description": "ArtSync, Aux1/Aux2 zero",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtSync packet definition p.67-68",
+      "hex": "4172742d4e6574000052000e0000",
+      "valid": true,
+      "fields": {
+        "op_code": 20992,
+        "prot_ver": 14,
+        "aux1": 0,
+        "aux2": 0
+      },
+      "notes": "Spec: controller sends ArtSync as directed broadcast (unicast transmit 'Not Allowed')."
+    },
+    {
+      "name": "short_12",
+      "description": "12 bytes, Aux fields missing",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtSync packet definition p.67-68",
+      "hex": "4172742d4e6574000052000e",
+      "valid": false,
+      "fields": {
+        "error": "short"
+      },
+      "notes": "Spec gives no explicit minimum for ArtSync; we require the full 14 bytes."
+    }
+  ]
+}

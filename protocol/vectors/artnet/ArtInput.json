@@ -1,0 +1,36 @@
+{
+  "$schema": "../schema.json",
+  "protocol": "artnet",
+  "packet": "ArtInput",
+  "vectors": [
+    {
+      "name": "disable_input_1",
+      "description": "BindIndex 1, 4 ports, disable input of port 1 (second port)",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtInput packet definition p.75-76",
+      "hex": "4172742d4e6574000070000e0001000400010000",
+      "valid": true,
+      "fields": {
+        "op_code": 28672,
+        "prot_ver": 14,
+        "bind_index": 1,
+        "num_ports": 4,
+        "input": [
+          0,
+          1,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "name": "short_19",
+      "description": "19 bytes",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtInput packet definition p.75-76",
+      "hex": "4172742d4e6574000070000e00010004000100",
+      "valid": false,
+      "fields": {
+        "error": "short"
+      }
+    }
+  ]
+}
