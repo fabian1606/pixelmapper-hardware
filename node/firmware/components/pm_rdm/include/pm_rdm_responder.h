@@ -101,6 +101,39 @@ void pm_rdm_responder_status(pm_rdm_responder_t *r, uint16_t status_id, uint8_t 
 void pm_rdm_responder_local_set(pm_rdm_responder_t *r, pm_port_idx_t port, const pm_uid_t *uid,
                                 uint16_t sub_device, uint16_t pid);
 
+/* ------------------------------------------------------------------------------------------------ Phase 1 additions */
+
+/** FW_* session timeout: without FW_WRITE for this long the session is aborted (PM_FW_ERROR_TIMEOUT). */
+#define PM_RDM_RESP_FW_TIMEOUT_MS 30000u
+/** Delay between the ACK of FW_FINISH and fw_sink->reboot(). */
+#define PM_RDM_RESP_REBOOT_DELAY_MS 500u
+/** Delay between the ACK of RESET_DEVICE and ops->reset() (the response must leave the node first). */
+#define PM_RDM_RESP_RESET_DELAY_MS 100u
+/** E1.37-2 interface ID of the single Ethernet interface. */
+#define PM_RDM_RESP_INTERFACE_ID 1u
+/** E1.37-2 NR_ACTION_NOT_SUPPORTED (rdm-digest.md §4.2 [ungeprüft]); INTERFACE_RENEW_DHCP while DHCP is inactive. */
+#define PM_RDM_RESP_NR_ACTION_NOT_SUPPORTED 0x000Bu
+
+/**
+ * Periodic work (call every few ms from the network task): runs RESET_DEVICE and the post-FW_FINISH reboot after
+ * their delays and aborts an FW_* session after PM_RDM_RESP_FW_TIMEOUT_MS without FW_WRITE. Uses ops->now_ms.
+ */
+void pm_rdm_responder_poll(pm_rdm_responder_t *r);
+
+/**
+ * BOOT_CATCH state change on `port` (0-based; wire it to pm_rdm_ctrl_cb_t.on_boot_catch). Queues the GET response
+ * of BOOT_CATCH_STATUS; on CAUGHT / TIMEOUT also adds status PM_STATUS_BOOT_CATCH_CAUGHT (advisory) /
+ * PM_STATUS_BOOT_CATCH_TIMEOUT (warning) with data1 = port 1-based.
+ */
+void pm_rdm_responder_boot_catch_event(pm_rdm_responder_t *r, pm_port_idx_t port, uint8_t state);
+
+/**
+ * Message Count as sent in every response: queued PIDs + pending status messages, capped at 255. Status messages
+ * count because they are fetched through QUEUED_MESSAGE too (when no queued PID is left, QUEUED_MESSAGE returns the
+ * STATUS_MESSAGES response), so a controller polling until the count is 0 also collects them.
+ */
+uint8_t pm_rdm_responder_message_count(const pm_rdm_responder_t *r);
+
 #ifdef __cplusplus
 }
 #endif
