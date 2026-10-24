@@ -1,0 +1,11 @@
+X11 misc-fixed 5x8 bitmap font (5x8.bdf)
+
+Source: xorg font-misc-misc 1.1.3
+  https://www.x.org/releases/individual/font/font-misc-misc-1.1.3.tar.xz
+BDF header: $ucs-fonts: 5x8.bdf,v 1.32 2006-01-05 20:03:17+00 mgk25 Rel $
+            (Markus Kuhn, http://www.cl.cam.ac.uk/~mgk25/)
+
+License notice, verbatim from the COPYRIGHT property of 5x8.bdf and from the
+COPYING file of font-misc-misc 1.1.3:
+
+  "Public domain font.  Share and enjoy."
