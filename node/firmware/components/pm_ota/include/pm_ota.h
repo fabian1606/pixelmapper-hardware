@@ -31,6 +31,27 @@ bool pm_ota_pending_verify(void);
 /** Mark the running image valid (cancel rollback). Idempotent. */
 esp_err_t pm_ota_mark_valid(void);
 
+/**
+ * Listener for update progress (e.g. the UI). Called in the caller's task of the sink (= network task) on every
+ * state change and per whole percent of progress. Keep it short and non-blocking.
+ */
+typedef void (*pm_ota_listener_fn)(void *ctx, const pm_fw_status_t *st);
+
+/** Register (or with fn = NULL remove) the single progress listener. Call before the network task starts. */
+esp_err_t pm_ota_set_listener(pm_ota_listener_fn fn, void *ctx);
+
+/** Size of the inactive OTA partition in bytes (= maximum image_length), 0 before pm_ota_init()/without OTA. */
+uint32_t pm_ota_max_image_size(void);
+
+/**
+ * Drop a session idle for more than 30 s (FW_INFO.last_error = TIMEOUT, image-format.md §2.4/§2.5). Call
+ * periodically (e.g. once per second) from the network task, the same task that uses the sink.
+ */
+void pm_ota_poll(void);
+
+/** Thread-safe copy of the current update status (any task). */
+void pm_ota_get_status(pm_fw_status_t *out);
+
 #ifdef __cplusplus
 }
 #endif
