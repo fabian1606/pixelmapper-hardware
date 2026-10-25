@@ -8,11 +8,11 @@ mod node_rdm;
 pub mod responder;
 pub mod tube;
 
+pub use fixture::{FixtureConfig, SimFixture};
 pub use node::{
     SimConfig, SimDirection, SimDmxFrame, SimIndicators, SimNode, SimPortConfig, SimPortSnapshot,
     SimSnapshot,
 };
-pub use fixture::{FixtureConfig, SimFixture};
 pub use responder::SimResponder;
 pub use tube::{SimTube, TubeMode};
 
