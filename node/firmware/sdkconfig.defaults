@@ -27,3 +27,6 @@ CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 
 # Logging
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# pm_ui places its large static buffers (EXT_RAM_BSS_ATTR, no DMA from them) in PSRAM: ~23 KB internal RAM saved
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
