@@ -29,7 +29,7 @@ pub use net::{default_broadcast_targets, interfaces, Interface};
 use crate::artnet::{
     ArtAddress, ArtDmx, ArtFirmwareMaster, ArtFirmwareReply, ArtInput, ArtIpProg, ArtIpProgReply,
     ArtPacket, ArtPoll, ArtPollReply, ArtSync, ArtTodControl, ArtTodData, ArtTodRequest,
-    PortAddress, TOD_NAK,
+    IpProgChange, PortAddress, TOD_NAK,
 };
 use crate::error::{Error, Result};
 use crate::event::Event;
@@ -535,6 +535,22 @@ impl Controller {
             input,
         };
         self.send_and_wait_reply(&n, ArtPacket::Input(p)).await
+    }
+
+    /// Read the node's IP configuration without changing it: ArtIpProg with Command = 0 → ArtIpProgReply
+    /// (IP, mask, gateway, DHCP state; ArtPollReply carries no mask/gateway).
+    pub async fn ip_prog_query(&self, node: &NodeId) -> Result<ArtIpProgReply> {
+        self.ip_prog(node, ArtIpProg::query()).await
+    }
+
+    /// Program the node's IP configuration (a default `change` is a query). The reply still comes from the
+    /// old IP and carries the new values (contract §5).
+    pub async fn ip_prog_change(
+        &self,
+        node: &NodeId,
+        change: &IpProgChange,
+    ) -> Result<ArtIpProgReply> {
+        self.ip_prog(node, ArtIpProg::from_change(change)).await
     }
 
     /// ArtIpProg → ArtIpProgReply.

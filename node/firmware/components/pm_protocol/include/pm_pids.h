@@ -81,6 +81,15 @@ typedef enum {
     X(0x8003u, "Panel lock released at device") \
     X(0x8004u, "Port %d: RDM SET from panel") \
 
+/* X(id, status_type, name, description) - name = pids.toml [[status]] name (e.g. for logs/UI) */
+#define PM_STATUS_LIST(X) \
+    X(0x8001u, 0x02u, "BOOT_CATCH_CAUGHT", "Boot catch: port %d caught") \
+    X(0x8002u, 0x03u, "BOOT_CATCH_TIMEOUT", "Boot catch: port %d timed out") \
+    X(0x8003u, 0x02u, "PANEL_UNLOCKED_LOCAL", "Panel lock released at device") \
+    X(0x8004u, 0x02u, "LOCAL_RDM_SET", "Port %d: RDM SET from panel") \
+
+#define PM_STATUS_COUNT 4u
+
 /* ---- manufacturer PIDs ---- */
 #define PM_PID_ENTER_BOOTLOADER 0x8000u /* tube_app set */
 #define PM_PID_BOOT_INFO 0x8010u /* tube_boot get */

@@ -2,7 +2,8 @@
 //! Every test uses ephemeral ports, so the tests run in parallel.
 
 use pixelmapper_net::artnet::{
-    address_command, ArtAddress, ArtIpProg, PortAddress, IPPROG_ENABLE, IPPROG_IP, IPPROG_MASK,
+    address_command, ArtAddress, ArtIpProg, IpProgChange, PortAddress, IPPROG_ENABLE, IPPROG_IP,
+    IPPROG_MASK,
 };
 use pixelmapper_net::controller::{Controller, ControllerConfig, RdmRequest};
 use pixelmapper_net::flash::node::{NodeFlashMethod, NodeFlashOptions};
@@ -408,7 +409,12 @@ async fn node_configuration() {
         st.status1.indicators,
         pixelmapper_net::state::Indicators::Locate
     );
-    // IP programming
+    // IP query (Command 0) changes nothing and reports the current configuration
+    let q = ctrl.ip_prog_query(&id).await.unwrap();
+    assert_eq!(q.prog_ip.to_string(), "127.0.0.1");
+    assert!(q.dhcp_enabled());
+    assert_eq!(sim.snapshot().ip.to_string(), "127.0.0.1");
+    // IP programming (raw packet)
     let r = ctrl
         .ip_prog(
             &id,
@@ -424,6 +430,33 @@ async fn node_configuration() {
         .unwrap();
     assert_eq!(r.prog_ip.to_string(), "2.0.0.20");
     assert_eq!(sim.snapshot().ip.to_string(), "2.0.0.20");
+    // typed change: gateway only, then the query shows everything
+    let r = ctrl
+        .ip_prog_change(
+            &id,
+            &IpProgChange {
+                gateway: Some("2.0.0.1".parse().unwrap()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.prog_dg.to_string(), "2.0.0.1");
+    let q = ctrl.ip_prog_query(&id).await.unwrap();
+    assert_eq!(
+        (
+            q.prog_ip.to_string(),
+            q.prog_sm.to_string(),
+            q.prog_dg.to_string(),
+            q.dhcp_enabled()
+        ),
+        (
+            "2.0.0.20".into(),
+            "255.0.0.0".into(),
+            "2.0.0.1".into(),
+            false
+        )
+    );
     // TOD flush answered with TodData
     ctrl.tod_flush(&id, pa(1)).await.unwrap();
     ctrl.shutdown();

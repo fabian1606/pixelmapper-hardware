@@ -1063,3 +1063,57 @@ fn handle_is_send_sync() {
     fn check<T: Send + Sync + Clone>() {}
     check::<SimNode>();
 }
+
+#[tokio::test]
+async fn single_value_node_pids_answer_their_default() {
+    // Every listed numeric node PID (e.g. PORTn_DMX_MBS) answers GET with the pids.toml default.
+    let ctl = Ctl::start(SimConfig::default()).await;
+    for d in pids::PIDS
+        .iter()
+        .filter(|d| d.device == pids::Device::Node && d.listed)
+    {
+        let Some(desc) = d
+            .desc
+            .filter(|x| x.data_type != 0x00 && x.data_type != 0x02)
+        else {
+            continue;
+        };
+        if d.command_class & 0x01 == 0 || d.pid == pids::PID_NODE_HW_REVISION {
+            continue;
+        }
+        let m = ctl.get(d.pid, vec![]).await;
+        assert_ack(&m);
+        let v = m
+            .parameter_data
+            .iter()
+            .fold(0u32, |a, &b| (a << 8) | u32::from(b));
+        assert_eq!(
+            m.parameter_data.len(),
+            usize::from(desc.pdl_size),
+            "{}",
+            d.name
+        );
+        assert_eq!(v, desc.default, "{}", d.name);
+    }
+}
+
+#[tokio::test]
+async fn dmx_mbs_get_set_and_range() {
+    let ctl = Ctl::start(SimConfig::default()).await;
+    let pid3 = pids::PID_PORT1_DMX_MBS + 2;
+    assert_eq!(pid3, pids::PID_PORT3_DMX_MBS);
+    assert_ack(&ctl.set(pid3, 50u16.to_be_bytes().to_vec()).await);
+    assert_eq!(ctl.get(pid3, vec![]).await.parameter_data, vec![0, 50]);
+    assert_eq!(ctl.node.snapshot().ports[2].dmx_mbs, 50);
+    assert_eq!(ctl.node.snapshot().ports[0].dmx_mbs, 0);
+    assert_nack(
+        &ctl.set(pid3, 101u16.to_be_bytes().to_vec()).await,
+        NackReason::DATA_OUT_OF_RANGE,
+    );
+    assert_eq!(
+        ctl.get(p::FACTORY_DEFAULTS, vec![]).await.parameter_data,
+        vec![0]
+    );
+    assert_ack(&ctl.set(p::FACTORY_DEFAULTS, vec![]).await);
+    assert_eq!(ctl.node.snapshot().ports[2].dmx_mbs, 0);
+}

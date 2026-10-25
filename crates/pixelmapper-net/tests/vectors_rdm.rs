@@ -1,9 +1,10 @@
 //! Checks the parameter-data (PD) level fields of `protocol/vectors/rdm/*.json` against the codecs in
 //! `pixelmapper_net::rdm::pd` and re-encodes each decoded PD. Header-level fields are covered by `vectors.rs`.
 
+use pixelmapper_net::pids;
 use pixelmapper_net::rdm::pd::{
-    decode_u16, decode_u8, BootInfo, DeviceInfo, DiscMuteResponse, DiscUniqueBranch,
-    ParameterDescription, StatusMessage,
+    decode_u16, decode_u8, BootCatchStart, BootInfo, DeviceInfo, DiscMuteResponse,
+    DiscUniqueBranch, ParameterDescription, StatusMessage,
 };
 use pixelmapper_net::rdm::{pid, RdmMessage, Uid};
 use pixelmapper_net::{parse_hex, to_hex};
@@ -217,34 +218,22 @@ fn pd_fields() {
 
         if let Some(e) = v.field("boot_info") {
             let b = BootInfo::decode(pd).unwrap_or_else(|e| panic!("{id}: {e}"));
-            // Accept both the pids.toml field names and the names used in RDM_TUBE_BOOT_INFO.json.
+            // Field names as in pids.toml BOOT_INFO get_response.
             let n = |ks: &[&str]| num(id, e, ks);
             assert_eq!(u64::from(b.version), n(&["version"]), "{id}");
             assert_eq!(u64::from(b.page_size), n(&["page_size"]), "{id}");
-            assert_eq!(
-                u64::from(b.app_end),
-                n(&["app_end", "app_space_end"]),
-                "{id}"
-            );
+            assert_eq!(u64::from(b.app_end), n(&["app_end"]), "{id}");
             assert_eq!(u64::from(b.busy), n(&["busy"]), "{id}");
             assert_eq!(u64::from(b.last_error), n(&["last_error"]), "{id}");
-            assert_eq!(
-                u64::from(b.manufacturer),
-                n(&["manufacturer", "manufacturer_id"]),
-                "{id}"
-            );
-            assert_eq!(u64::from(b.model), n(&["model", "device_model_id"]), "{id}");
+            assert_eq!(u64::from(b.manufacturer), n(&["manufacturer"]), "{id}");
+            assert_eq!(u64::from(b.model), n(&["model"]), "{id}");
             assert_eq!(
                 u64::from(b.boot_sw_version),
-                n(&["boot_sw_version", "boot_sw_version_id"]),
+                n(&["boot_sw_version"]),
                 "{id}"
             );
             assert_eq!(u64::from(b.app_valid), n(&["app_valid"]), "{id}");
-            assert_eq!(
-                u64::from(b.app_fw_version),
-                n(&["app_fw_version", "app_fw_version_id"]),
-                "{id}"
-            );
+            assert_eq!(u64::from(b.app_fw_version), n(&["app_fw_version"]), "{id}");
             assert_eq!(b.encode(), pd, "{id} re-encode");
             hit("boot_info");
         }
@@ -374,4 +363,73 @@ fn response_helpers_match_vectors() {
         n += 1;
     }
     assert!(n > 0, "no request/response pairs");
+}
+
+#[test]
+fn node_vectors_match_pids_toml() {
+    // RDM_NODE.json: what the node sends/answers, checked against the typed codecs and pids.toml.
+    let msgs: Vec<_> = messages()
+        .into_iter()
+        .filter(|(v, _)| v.id.starts_with("RDM_NODE.json:"))
+        .collect();
+    assert!(msgs.len() >= 9, "RDM_NODE.json vectors missing");
+    let by_name = |n: &str| {
+        msgs.iter()
+            .find(|(v, _)| v.id == format!("RDM_NODE.json:{n}"))
+            .map(|(_, m)| m)
+            .unwrap_or_else(|| panic!("RDM_NODE.json:{n} missing"))
+    };
+    let di = by_name("node_device_info_response");
+    let d = DeviceInfo::decode(&di.parameter_data).unwrap();
+    assert_eq!(d.device_model_id, pids::MODEL_NODE);
+    assert_eq!(d.product_category, pids::NODE_PRODUCT_CATEGORY);
+    assert_eq!((d.dmx_footprint, d.dmx_start_address), (0, 0xFFFF));
+    assert_eq!(di.src_uid.manufacturer, pids::ESTA_MANUFACTURER);
+    assert_ne!(
+        di.src_uid.device & pids::NODE_UID_DEVICE_FLAG,
+        0,
+        "node UID flag"
+    );
+
+    let req = by_name("node_boot_catch_start_request");
+    assert_eq!(req.parameter_id, pids::PID_BOOT_CATCH_START);
+    let b = BootCatchStart::decode(&req.parameter_data).unwrap();
+    assert_eq!(b.port, 1);
+    assert_eq!(b.encode(), req.parameter_data);
+    let ack = by_name("node_boot_catch_start_ack");
+    assert!(ack.is_response() && ack.message_count == 1);
+
+    let catch = by_name("node_boot_catch_get_boot_info");
+    assert_eq!(catch.parameter_id, pids::PID_BOOT_INFO);
+    assert_eq!(catch.dest_uid, b.target_uid);
+    assert_eq!(
+        catch.src_uid.device & pids::NODE_UID_DEVICE_FLAG,
+        pids::NODE_UID_DEVICE_FLAG
+    );
+    assert_eq!(
+        by_name("node_disc_un_mute_broadcast").parameter_id,
+        pid::DISC_UN_MUTE
+    );
+    assert_eq!(
+        by_name("node_dub_full_range").parameter_id,
+        pid::DISC_UNIQUE_BRANCH
+    );
+    assert_eq!(by_name("node_disc_mute_tube").parameter_id, pid::DISC_MUTE);
+}
+
+#[test]
+fn status_names_come_from_pids_toml() {
+    assert_eq!(
+        pids::status_name(pids::status::BOOT_CATCH_CAUGHT),
+        Some("BOOT_CATCH_CAUGHT")
+    );
+    assert_eq!(
+        pids::status_description(pids::status::LOCAL_RDM_SET),
+        Some("Port %d: RDM SET from panel")
+    );
+    assert_eq!(pids::status_name(0x7FFF), None);
+    for s in pids::STATUS {
+        assert!((0x8000..=0xFFDF).contains(&s.id) && (2..=4).contains(&s.status_type));
+        assert!(s.description.len() <= 32);
+    }
 }

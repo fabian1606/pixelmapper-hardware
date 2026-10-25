@@ -50,14 +50,14 @@
         "boot_info": {
           "version": 3,
           "page_size": 64,
-          "app_space_end": 6144,
+          "app_end": 6144,
           "busy": 0,
           "last_error": 0,
-          "manufacturer_id": 32752,
-          "device_model_id": 1,
-          "boot_sw_version_id": 2952790019,
+          "manufacturer": 32752,
+          "model": 1,
+          "boot_sw_version": 2952790019,
           "app_valid": 1,
-          "app_fw_version_id": 1280
+          "app_fw_version": 1280
         }
       }
     }

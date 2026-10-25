@@ -7,10 +7,7 @@ use crate::poll::node_text;
 use crate::rdm::print_response;
 use crate::Global;
 use clap::{Subcommand, ValueEnum};
-use pixelmapper_net::artnet::{
-    address_command as ac, ArtAddress, ArtIpProg, IPPROG_DHCP, IPPROG_ENABLE, IPPROG_GATEWAY,
-    IPPROG_IP, IPPROG_MASK, IPPROG_RESET,
-};
+use pixelmapper_net::artnet::{address_command as ac, ArtAddress, IpProgChange};
 use pixelmapper_net::pids::{self, Device};
 use pixelmapper_net::rdm::Uid;
 use pixelmapper_net::{Controller, Error, NodeState, Result};
@@ -305,26 +302,14 @@ async fn run(
             dhcp,
             reset,
         } => {
-            let mut p = ArtIpProg::default();
-            if reset {
-                p.command = IPPROG_ENABLE | IPPROG_RESET;
-            } else if dhcp {
-                p.command = IPPROG_ENABLE | IPPROG_DHCP;
-            } else {
-                if let Some(a) = ip {
-                    p.command |= IPPROG_ENABLE | IPPROG_IP;
-                    p.prog_ip = a;
-                }
-                if let Some(m) = mask {
-                    p.command |= IPPROG_ENABLE | IPPROG_MASK;
-                    p.prog_sm = m;
-                }
-                if let Some(gw) = gateway {
-                    p.command |= IPPROG_ENABLE | IPPROG_GATEWAY;
-                    p.prog_dg = gw;
-                }
-            }
-            let r = ctrl.ip_prog(&id, p).await?;
+            let change = IpProgChange {
+                dhcp,
+                ip,
+                mask,
+                gateway,
+                reset,
+            };
+            let r = ctrl.ip_prog_change(&id, &change).await?;
             o.emit(
                 json!({
                     "type": "ipProgReply",

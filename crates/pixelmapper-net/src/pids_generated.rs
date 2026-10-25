@@ -97,6 +97,40 @@ pub mod status {
     pub const LOCAL_RDM_SET: u16 = 0x8004;
 }
 
+/// One manufacturer status message (pids.toml `[[status]]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatusDef {
+    pub id: u16,
+    pub name: &'static str,
+    /// E1.20 status type (0x02 advisory, 0x03 warning, 0x04 error).
+    pub status_type: u8,
+    /// STATUS_ID_DESCRIPTION text (may contain %d for data1/data2).
+    pub description: &'static str,
+}
+
+/// All manufacturer status messages.
+pub static STATUS: &[StatusDef] = &[
+    StatusDef { id: 0x8001, name: "BOOT_CATCH_CAUGHT", status_type: 0x02, description: "Boot catch: port %d caught" },
+    StatusDef { id: 0x8002, name: "BOOT_CATCH_TIMEOUT", status_type: 0x03, description: "Boot catch: port %d timed out" },
+    StatusDef { id: 0x8003, name: "PANEL_UNLOCKED_LOCAL", status_type: 0x02, description: "Panel lock released at device" },
+    StatusDef { id: 0x8004, name: "LOCAL_RDM_SET", status_type: 0x02, description: "Port %d: RDM SET from panel" },
+];
+
+/// Manufacturer status message definition by id.
+pub fn status_def(id: u16) -> Option<&'static StatusDef> {
+    STATUS.iter().find(|s| s.id == id)
+}
+
+/// Name of a manufacturer status message id (e.g. `"BOOT_CATCH_CAUGHT"`).
+pub fn status_name(id: u16) -> Option<&'static str> {
+    status_def(id).map(|s| s.name)
+}
+
+/// STATUS_ID_DESCRIPTION text of a manufacturer status message id.
+pub fn status_description(id: u16) -> Option<&'static str> {
+    status_def(id).map(|s| s.description)
+}
+
 /// tube_app set: ACK, then RAM magic + watchdog reset into tube_boot_rdm. Not executed when sent to a broadcast UID.
 pub const PID_ENTER_BOOTLOADER: u16 = 0x8000;
 /// tube_boot get: Bootloader state. GET within ~200 ms after reset keeps the bootloader active (rescue).
