@@ -136,10 +136,10 @@ impl Progress {
         let mut c = self.cancel.clone();
         tokio::select! {
             _ = tokio::time::sleep(d) => self.check(),
-            r = c.wait_for(|v| *v) => match r {
-                Ok(_) => Err(Error::Cancelled),
+            r = async { c.wait_for(|v| *v).await.is_ok() } => match r {
+                true => Err(Error::Cancelled),
                 // sender gone: nobody can cancel any more
-                Err(_) => {
+                false => {
                     tokio::time::sleep(d).await;
                     Ok(())
                 }
