@@ -26,6 +26,7 @@ void pm_settings_defaults(pm_settings_t *s)
         p->dmx_break_us = 176;
         p->dmx_mab_us = 16;
         p->dmx_rate_hz = 40;
+        p->dmx_mbs_us = 0;
     }
     s->rdm_bg_interval_s = 3;
     s->display_level = 255;
@@ -56,6 +57,7 @@ bool pm_settings_sanitize(pm_settings_t *s)
         CLAMP(p->dmx_break_us, 176, 352);
         CLAMP(p->dmx_mab_us, 12, 88);
         CLAMP(p->dmx_rate_hz, 1, 44);
+        CLAMP(p->dmx_mbs_us, 0, 100);
         if (p->scene_len > 512) { p->scene_len = 512; changed = true; }
     }
     CLAMP(s->rdm_bg_interval_s, 1, 600);
@@ -68,7 +70,11 @@ pm_change_mask_t pm_settings_diff(const pm_settings_t *a, const pm_settings_t *b
 {
     pm_change_mask_t m = 0;
     if (strcmp(a->short_name, b->short_name) != 0 || strcmp(a->long_name, b->long_name) != 0) m |= PM_CHG_NAMES;
-    if (memcmp(&a->ip, &b->ip, sizeof(a->ip)) != 0) m |= PM_CHG_IP;
+    /* field by field: memcmp would also compare the padding bytes after `dhcp` */
+    if (a->ip.dhcp != b->ip.dhcp || a->ip.static_ip != b->ip.static_ip || a->ip.static_mask != b->ip.static_mask ||
+        a->ip.gateway != b->ip.gateway) {
+        m |= PM_CHG_IP;
+    }
     if (a->rdm_bg_interval_s != b->rdm_bg_interval_s) m |= PM_CHG_RDM_INTERVAL;
     if (a->display_level != b->display_level || a->display_dim_timeout_s != b->display_dim_timeout_s ||
         a->address_format != b->address_format) {
@@ -89,7 +95,8 @@ pm_change_mask_t pm_settings_diff(const pm_settings_t *a, const pm_settings_t *b
             memcmp(x->scene, y->scene, sizeof(x->scene)) != 0) {
             m |= PM_CHG_PORT(PM_CHG_P_OUTPUT, i);
         }
-        if (x->dmx_break_us != y->dmx_break_us || x->dmx_mab_us != y->dmx_mab_us || x->dmx_rate_hz != y->dmx_rate_hz) {
+        if (x->dmx_break_us != y->dmx_break_us || x->dmx_mab_us != y->dmx_mab_us || x->dmx_rate_hz != y->dmx_rate_hz ||
+            x->dmx_mbs_us != y->dmx_mbs_us) {
             m |= PM_CHG_PORT(PM_CHG_P_TIMING, i);
         }
     }

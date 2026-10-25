@@ -316,6 +316,28 @@ default = 40
 description = "Port {n} DMX refresh rate"
 
 [[pid]]
+name = "PORT{n}_DMX_MBS"
+pid = 0x811C
+repeat = 4
+device = "node"
+cc = "get_set"
+listed = true
+doc = "Extra mark between slots (inter-slot time) on port n, 0 = back to back. Realised by the UART idle time (pm_port_cfg_t.mbs_us); semantics to be confirmed on hardware (pm_port/MEASURE.md M5)."
+get_request = []
+get_response = [ { name = "mbs_us", type = "u16" } ]
+set_request = [ { name = "mbs_us", type = "u16" } ]
+set_response = []
+[pid.pd]
+pdl_size = 2
+data_type = "unsigned_word"
+unit = "second"
+prefix = "micro"
+min = 0
+max = 100
+default = 0
+description = "Port {n} DMX mark between slots"
+
+[[pid]]
 name = "PORT{n}_RDM_BG_DISCOVERY"
 pid = 0x8120
 repeat = 4

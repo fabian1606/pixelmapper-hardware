@@ -104,6 +104,10 @@ typedef enum {
 #define PM_PID_PORT2_DMX_RATE 0x8119u /* node get_set */
 #define PM_PID_PORT3_DMX_RATE 0x811Au /* node get_set */
 #define PM_PID_PORT4_DMX_RATE 0x811Bu /* node get_set */
+#define PM_PID_PORT1_DMX_MBS 0x811Cu /* node get_set */
+#define PM_PID_PORT2_DMX_MBS 0x811Du /* node get_set */
+#define PM_PID_PORT3_DMX_MBS 0x811Eu /* node get_set */
+#define PM_PID_PORT4_DMX_MBS 0x811Fu /* node get_set */
 #define PM_PID_PORT1_RDM_BG_DISCOVERY 0x8120u /* node get_set */
 #define PM_PID_PORT2_RDM_BG_DISCOVERY 0x8121u /* node get_set */
 #define PM_PID_PORT3_RDM_BG_DISCOVERY 0x8122u /* node get_set */
@@ -130,6 +134,8 @@ typedef enum {
 #define PM_PID_PORT_DMX_MAB_COUNT 4u
 #define PM_PID_PORT_DMX_RATE(port) ((uint16_t)(0x8118u + ((port) - 1u) * 1u))
 #define PM_PID_PORT_DMX_RATE_COUNT 4u
+#define PM_PID_PORT_DMX_MBS(port) ((uint16_t)(0x811Cu + ((port) - 1u) * 1u))
+#define PM_PID_PORT_DMX_MBS_COUNT 4u
 #define PM_PID_PORT_RDM_BG_DISCOVERY(port) ((uint16_t)(0x8120u + ((port) - 1u) * 1u))
 #define PM_PID_PORT_RDM_BG_DISCOVERY_COUNT 4u
 
@@ -162,6 +168,10 @@ typedef enum {
 #define PM_PDL_PORT_DMX_RATE_GET_RESPONSE 1u
 #define PM_PDL_PORT_DMX_RATE_SET_REQUEST 1u
 #define PM_PDL_PORT_DMX_RATE_SET_RESPONSE 0u
+#define PM_PDL_PORT_DMX_MBS_GET_REQUEST 0u
+#define PM_PDL_PORT_DMX_MBS_GET_RESPONSE 2u
+#define PM_PDL_PORT_DMX_MBS_SET_REQUEST 2u
+#define PM_PDL_PORT_DMX_MBS_SET_RESPONSE 0u
 #define PM_PDL_PORT_RDM_BG_DISCOVERY_GET_REQUEST 0u
 #define PM_PDL_PORT_RDM_BG_DISCOVERY_GET_RESPONSE 1u
 #define PM_PDL_PORT_RDM_BG_DISCOVERY_SET_REQUEST 1u
@@ -219,6 +229,10 @@ typedef enum {
     X(0x8119u, 1u, 0x03u, 0x03u, 0x08u, 0x00u, 1, 44, 40, "Port 2 DMX refresh rate") \
     X(0x811Au, 1u, 0x03u, 0x03u, 0x08u, 0x00u, 1, 44, 40, "Port 3 DMX refresh rate") \
     X(0x811Bu, 1u, 0x03u, 0x03u, 0x08u, 0x00u, 1, 44, 40, "Port 4 DMX refresh rate") \
+    X(0x811Cu, 2u, 0x05u, 0x03u, 0x15u, 0x04u, 0, 100, 0, "Port 1 DMX mark between slots") \
+    X(0x811Du, 2u, 0x05u, 0x03u, 0x15u, 0x04u, 0, 100, 0, "Port 2 DMX mark between slots") \
+    X(0x811Eu, 2u, 0x05u, 0x03u, 0x15u, 0x04u, 0, 100, 0, "Port 3 DMX mark between slots") \
+    X(0x811Fu, 2u, 0x05u, 0x03u, 0x15u, 0x04u, 0, 100, 0, "Port 4 DMX mark between slots") \
     X(0x8120u, 1u, 0x03u, 0x03u, 0x00u, 0x00u, 0, 1, 1, "Port 1 background discovery") \
     X(0x8121u, 1u, 0x03u, 0x03u, 0x00u, 0x00u, 0, 1, 1, "Port 2 background discovery") \
     X(0x8122u, 1u, 0x03u, 0x03u, 0x00u, 0x00u, 0, 1, 1, "Port 3 background discovery") \

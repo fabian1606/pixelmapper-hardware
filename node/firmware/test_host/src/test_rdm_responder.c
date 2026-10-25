@@ -807,6 +807,7 @@ static long setting_of(uint16_t pid)
         if (pid == PM_PID_PORT_DMX_BREAK(p)) return ps->dmx_break_us;
         if (pid == PM_PID_PORT_DMX_MAB(p)) return ps->dmx_mab_us;
         if (pid == PM_PID_PORT_DMX_RATE(p)) return ps->dmx_rate_hz;
+        if (pid == PM_PID_PORT_DMX_MBS(p)) return ps->dmx_mbs_us;
         if (pid == PM_PID_PORT_RDM_BG_DISCOVERY(p)) return ps->rdm_bg_discovery;
     }
     if (pid == PM_PID_RDM_BG_DISCOVERY_INTERVAL) return F.s.rdm_bg_interval_s;
@@ -820,7 +821,8 @@ static pm_change_mask_t mask_of(uint16_t pid)
 {
     for (unsigned p = 1; p <= PM_NUM_PORTS; p++) {
         if (pid == PM_PID_PORT_ENABLED(p)) return PM_CHG_PORT(PM_CHG_P_ENABLED, p - 1);
-        if (pid == PM_PID_PORT_DMX_BREAK(p) || pid == PM_PID_PORT_DMX_MAB(p) || pid == PM_PID_PORT_DMX_RATE(p)) {
+        if (pid == PM_PID_PORT_DMX_BREAK(p) || pid == PM_PID_PORT_DMX_MAB(p) || pid == PM_PID_PORT_DMX_RATE(p) ||
+            pid == PM_PID_PORT_DMX_MBS(p)) {
             return PM_CHG_PORT(PM_CHG_P_TIMING, p - 1);
         }
         if (pid == PM_PID_PORT_RDM_BG_DISCOVERY(p)) return PM_CHG_PORT(PM_CHG_P_RDM, p - 1);
@@ -870,7 +872,7 @@ static void test_numeric_pids(void)
         CHECK_NACK(set_val(d, d->pdl == 2 ? 0xFFFFu : 0xFFu), PM_NR_DATA_OUT_OF_RANGE);
         CHECK_ACK(set_val(d, (uint32_t)d->def));
     }
-    CHECK_EQ(tested, 4 * 5 + 4);
+    CHECK_EQ(tested, 4 * 6 + 4);
 
     /* NODE_HW_REVISION: detected value, prototype override */
     CHECK_ACK(get0(PM_PID_NODE_HW_REVISION));

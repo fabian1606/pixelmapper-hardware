@@ -55,6 +55,7 @@ typedef struct {
     uint16_t dmx_break_us;         /**< PORTn_DMX_BREAK, 176..352, default 176 */
     uint16_t dmx_mab_us;           /**< PORTn_DMX_MAB, 12..88, default 16 */
     uint8_t dmx_rate_hz;           /**< PORTn_DMX_RATE, 1..44, default 40 */
+    uint16_t dmx_mbs_us;           /**< PORTn_DMX_MBS, 0..100, default 0 (back to back) */
     uint16_t scene_len;            /**< length of the recorded failsafe scene (0 = none) */
     uint8_t scene[512];            /**< failsafe scene (ArtAddress AcFailRecord) */
 } pm_port_settings_t;
@@ -99,7 +100,7 @@ enum {
     PM_CHG_P_MERGE = 1u << 3,
     PM_CHG_P_RDM = 1u << 4, /**< rdm_enabled, rdm_bg_discovery */
     PM_CHG_P_OUTPUT = 1u << 5, /**< output_style, failsafe, scene */
-    PM_CHG_P_TIMING = 1u << 6, /**< break, mab, rate */
+    PM_CHG_P_TIMING = 1u << 6, /**< break, mab, rate, mbs */
 };
 typedef uint64_t pm_change_mask_t;
 #define PM_CHG_PORT_SHIFT(port) (8u + 7u * (unsigned)(port)) /* 4 ports -> bits 8..35 */

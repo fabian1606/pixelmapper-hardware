@@ -1,4 +1,7 @@
 /* pm_protocol: UID, checksums, settings, image description block, generated PID header. */
+#include <stddef.h>
+#include <string.h>
+
 #include "pm_fw.h"
 #include "pm_pids.h"
 #include "pm_settings.h"
@@ -46,6 +49,21 @@ static void test_settings(void)
     b.port[1].dmx_mab_us = 5;
     CHECK(pm_settings_sanitize(&b));
     CHECK_EQ(b.port[1].dmx_mab_us, 12);
+
+    /* padding bytes after `bool dhcp` in pm_ip_settings_t must not count as a change */
+    pm_settings_defaults(&b);
+    memset((uint8_t *)&b.ip + sizeof(b.ip.dhcp), 0xA5, offsetof(pm_ip_settings_t, static_ip) - sizeof(b.ip.dhcp));
+    CHECK_EQ(pm_settings_diff(&a, &b), 0);
+    b.ip.gateway = 0x0A000001u;
+    CHECK_EQ(pm_settings_diff(&a, &b), PM_CHG_IP);
+
+    /* MBS (PORTn_DMX_MBS) belongs to the timing group */
+    pm_settings_defaults(&b);
+    CHECK_EQ(b.port[0].dmx_mbs_us, 0);
+    b.port[3].dmx_mbs_us = 250;
+    CHECK(pm_settings_sanitize(&b));
+    CHECK_EQ(b.port[3].dmx_mbs_us, 100);
+    CHECK_EQ(pm_settings_diff(&a, &b), PM_CHG_PORT(PM_CHG_P_TIMING, 3));
 }
 
 static void test_image_desc(void)

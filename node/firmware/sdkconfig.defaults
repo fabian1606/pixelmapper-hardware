@@ -16,8 +16,14 @@ CONFIG_SPIRAM=y
 # FreeRTOS: 1 kHz tick for the port engine bookkeeping (DMX timing itself is hardware/timer driven)
 CONFIG_FREERTOS_HZ=1000
 
-# Ethernet: internal EMAC + IP101 PHY over RMII
+# Ethernet: internal EMAC + IP101 PHY over RMII. lwIP's tcpip task on core 0 (core 1 = pm_port only).
 CONFIG_ETH_USE_ESP32_EMAC=y
+CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU0=y
+
+# Console on UART0 only: the USB-Serial-JTAG pads (GPIO 24/25) are DMX port 1 pins (pm_board rev 0).
+# The Type-C "UART" connector of the board must be wired to UART0 (hardware check, docs/STATUS.md).
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 
 # Logging
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y

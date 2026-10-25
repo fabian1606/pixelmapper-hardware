@@ -603,6 +603,7 @@ static uint32_t num_get(const pm_rdm_responder_t *r, const pm_settings_t *s, uin
     if (in_port_range(pid, PM_PID_PORT_DMX_BREAK(1u), PM_PID_PORT_DMX_BREAK_COUNT, &p)) return s->port[p].dmx_break_us;
     if (in_port_range(pid, PM_PID_PORT_DMX_MAB(1u), PM_PID_PORT_DMX_MAB_COUNT, &p)) return s->port[p].dmx_mab_us;
     if (in_port_range(pid, PM_PID_PORT_DMX_RATE(1u), PM_PID_PORT_DMX_RATE_COUNT, &p)) return s->port[p].dmx_rate_hz;
+    if (in_port_range(pid, PM_PID_PORT_DMX_MBS(1u), PM_PID_PORT_DMX_MBS_COUNT, &p)) return s->port[p].dmx_mbs_us;
     if (in_port_range(pid, PM_PID_PORT_RDM_BG_DISCOVERY(1u), PM_PID_PORT_RDM_BG_DISCOVERY_COUNT, &p)) {
         return s->port[p].rdm_bg_discovery;
     }
@@ -634,6 +635,10 @@ static pm_change_mask_t num_set(pm_settings_t *s, uint16_t pid, uint32_t v)
     }
     if (in_port_range(pid, PM_PID_PORT_DMX_RATE(1u), PM_PID_PORT_DMX_RATE_COUNT, &p)) {
         s->port[p].dmx_rate_hz = (uint8_t)v;
+        return PM_CHG_PORT(PM_CHG_P_TIMING, p);
+    }
+    if (in_port_range(pid, PM_PID_PORT_DMX_MBS(1u), PM_PID_PORT_DMX_MBS_COUNT, &p)) {
+        s->port[p].dmx_mbs_us = (uint16_t)v;
         return PM_CHG_PORT(PM_CHG_P_TIMING, p);
     }
     if (in_port_range(pid, PM_PID_PORT_RDM_BG_DISCOVERY(1u), PM_PID_PORT_RDM_BG_DISCOVERY_COUNT, &p)) {
@@ -859,6 +864,7 @@ static const pid_entry_t PIDS[] = {
     {PM_PID_PORT_DMX_BREAK(1u), PM_PID_PORT_DMX_BREAK_COUNT, MGS(PORT_DMX_BREAK), h_num},
     {PM_PID_PORT_DMX_MAB(1u), PM_PID_PORT_DMX_MAB_COUNT, MGS(PORT_DMX_MAB), h_num},
     {PM_PID_PORT_DMX_RATE(1u), PM_PID_PORT_DMX_RATE_COUNT, MGS(PORT_DMX_RATE), h_num},
+    {PM_PID_PORT_DMX_MBS(1u), PM_PID_PORT_DMX_MBS_COUNT, MGS(PORT_DMX_MBS), h_num},
     {PM_PID_PORT_RDM_BG_DISCOVERY(1u), PM_PID_PORT_RDM_BG_DISCOVERY_COUNT, MGS(PORT_RDM_BG_DISCOVERY), h_num},
     {PM_PID_RDM_BG_DISCOVERY_INTERVAL, 1, MGS(RDM_BG_DISCOVERY_INTERVAL), h_num},
     {PM_PID_DISPLAY_DIM_TIMEOUT, 1, MGS(DISPLAY_DIM_TIMEOUT), h_num},
@@ -969,6 +975,7 @@ void pm_rdm_responder_settings_changed(pm_rdm_responder_t *r, pm_change_mask_t m
         if (a->dmx_break_us != b->dmx_break_us) pm_rdm_responder_queue_pid(r, PM_PID_PORT_DMX_BREAK(port1));
         if (a->dmx_mab_us != b->dmx_mab_us) pm_rdm_responder_queue_pid(r, PM_PID_PORT_DMX_MAB(port1));
         if (a->dmx_rate_hz != b->dmx_rate_hz) pm_rdm_responder_queue_pid(r, PM_PID_PORT_DMX_RATE(port1));
+        if (a->dmx_mbs_us != b->dmx_mbs_us) pm_rdm_responder_queue_pid(r, PM_PID_PORT_DMX_MBS(port1));
         if (a->rdm_bg_discovery != b->rdm_bg_discovery) {
             pm_rdm_responder_queue_pid(r, PM_PID_PORT_RDM_BG_DISCOVERY(port1));
         }
