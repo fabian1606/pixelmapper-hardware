@@ -3,9 +3,10 @@
 
 use pixelmapper_net::artnet::{ArtPacket, ArtTodData};
 use pixelmapper_net::rdm::pd::{
-    self, BootCatchStatus, BootInfo, DefaultSlotValue, DeviceInfo, DiscMuteResponse, DiscUniqueBranch,
-    DmxPersonality, FwInfo, FwWrite, InterfaceEntry, Ipv4CurrentAddress, LocalRdmSet, ParameterDescription,
-    PersonalityDescription, SensorDefinition, SensorValue, SlotDescription, SlotInfo, StatusMessage,
+    self, BootCatchStatus, BootInfo, DefaultSlotValue, DeviceInfo, DiscMuteResponse,
+    DiscUniqueBranch, DmxPersonality, FwInfo, FwWrite, InterfaceEntry, Ipv4CurrentAddress,
+    LocalRdmSet, ParameterDescription, PersonalityDescription, SensorDefinition, SensorValue,
+    SlotDescription, SlotInfo, StatusMessage,
 };
 use pixelmapper_net::rdm::{DubResponse, RdmMessage};
 
@@ -32,12 +33,16 @@ impl Rng {
 }
 
 const OPCODES: [u16; 17] = [
-    0x2000, 0x2100, 0x2300, 0x5000, 0x5200, 0x6000, 0x7000, 0x8000, 0x8100, 0x8200, 0x8300, 0x8400, 0xF200,
-    0xF300, 0xF800, 0xF900, 0x9900,
+    0x2000, 0x2100, 0x2300, 0x5000, 0x5200, 0x6000, 0x7000, 0x8000, 0x8100, 0x8200, 0x8300, 0x8400,
+    0xF200, 0xF300, 0xF800, 0xF900, 0x9900,
 ];
 
 fn artnet_candidate(rng: &mut Rng) -> Vec<u8> {
-    let len = if rng.below(10) < 8 { rng.below(300) } else { rng.below(1500) };
+    let len = if rng.below(10) < 8 {
+        rng.below(300)
+    } else {
+        rng.below(1500)
+    };
     let mut b = rng.bytes(len);
     if len >= 10 && rng.below(10) < 9 {
         b[..8].copy_from_slice(b"Art-Net\0");
@@ -76,10 +81,16 @@ fn rdm_candidate(rng: &mut Rng) -> Vec<u8> {
     b[23] = pdl.min(255) as u8;
     if rng.below(10) < 8 && pdl <= 231 {
         let ml = 24 + pdl;
-        let cs: u16 = b[..ml].iter().fold(0u16, |a, &x| a.wrapping_add(u16::from(x)));
+        let cs: u16 = b[..ml]
+            .iter()
+            .fold(0u16, |a, &x| a.wrapping_add(u16::from(x)));
         b[ml..ml + 2].copy_from_slice(&cs.to_be_bytes());
     }
-    let keep = if rng.below(10) == 0 { rng.below(b.len() + 1) } else { b.len() };
+    let keep = if rng.below(10) == 0 {
+        rng.below(b.len() + 1)
+    } else {
+        b.len()
+    };
     b.truncate(keep);
     b
 }
@@ -102,13 +113,17 @@ fn artnet_decoders_never_panic_and_roundtrip() {
                 ArtPacket::PollReply(_) | ArtPacket::Address(_) | ArtPacket::DiagData(_)
             );
             // the decoder is lenient with UidCount 201..255, the encoder sends at most 200 UIDs per packet
-            let long_tod = matches!(&p, ArtPacket::TodData(t) if t.uids.len() > ArtTodData::MAX_UIDS);
+            let long_tod =
+                matches!(&p, ArtPacket::TodData(t) if t.uids.len() > ArtTodData::MAX_UIDS);
             if !has_text && !long_tod {
                 assert_eq!(again, p, "roundtrip of {b:02x?}");
             }
         }
     }
-    assert!(decoded > 10_000, "generator reaches the decoders ({decoded})");
+    assert!(
+        decoded > 10_000,
+        "generator reaches the decoders ({decoded})"
+    );
 }
 
 #[test]
@@ -156,5 +171,8 @@ fn rdm_decoders_never_panic_and_roundtrip() {
         let raw = rng.bytes(n);
         let _ = DubResponse::decode(&raw);
     }
-    assert!(decoded > 10_000, "generator reaches the decoders ({decoded})");
+    assert!(
+        decoded > 10_000,
+        "generator reaches the decoders ({decoded})"
+    );
 }
