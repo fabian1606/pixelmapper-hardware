@@ -450,9 +450,15 @@ async fn dmx_merge_and_sync() {
     let r = a.wait_for(WAIT, bind1).await.unwrap();
     assert_eq!(r.good_output_a[0] & 0x08, 0x08, "merging");
     assert_eq!(a.node.last_dmx(1).unwrap().data, vec![10, 20, 30, 0]);
+    // ArtSync is ignored only while streams of *different IPs* merge (digest §3.3, spec p. 68); here both
+    // sources share the IP, so it is accepted (the firmware does the same: pm_artnet any_merging_ips)
     a.send(&ArtSync::default().encode()).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
-    assert_eq!(a.node.sync_count(), 1, "ArtSync ignored while merging");
+    assert_eq!(
+        a.node.sync_count(),
+        2,
+        "same-IP merge does not block ArtSync"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------------------------

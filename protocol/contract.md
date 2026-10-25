@@ -85,8 +85,9 @@ Was hier über das Verhalten des Nodes steht, ist das Soll; Firmware (`node/firm
 - **Port-Address 0 ist in Art-Net 4 deprecated** **[KORR]**. Werkseinstellung der Ports: Net 0, Sub-Net 0,
   Universe 1–4 (Port-Address 1–4).
 - Optional **`ArtSync`** (0x5200) nach jedem Frame-Satz. **[KORR] ArtSync muss per Broadcast gesendet werden** (Unicast
-  ist laut Spec nicht erlaubt). Der Node ignoriert ArtSync, solange er auf einem Port mergt oder wenn es nicht von der
-  IP des letzten ArtDmx kommt. Fehlt der Sync länger als 4 s, gibt der Node wieder direkt aus.
+  ist laut Spec nicht erlaubt). Der Node ignoriert ArtSync, solange er auf einem Port **Streams verschiedener IPs**
+  mergt (zwei Physicals derselben IP blockieren ArtSync nicht, digest §3.3) oder wenn es nicht von der IP des letzten
+  ArtDmx kommt **[KORR]**. Fehlt der Sync länger als 4 s, gibt der Node wieder direkt aus.
 - **Der Node sendet DMX dauerhaft** mit ca. 40 Hz (PORTn_DMX_RATE). Datenverlust: **nach 4 s ohne ArtDmx greift
   Failsafe** (unsere Festlegung, die Spec nennt keine Zeit), Standard Hold. Wer „Zero“ nutzt, sendet ≥ 1×/s.
 - **Merge:** höchstens 2 Quellen pro Port, unterschieden nach **IP + Physical** **[KORR]**. Standard HTP, LTP per
@@ -347,7 +348,7 @@ Geändert (oben mit [KORR] markiert):
 1. Input-Broadcast verboten → PID entfällt.
 2. `Physical` gehört zur Merge-Quelle (IP + Physical).
 3. ArtPollReply nur Unicast, Zufallsverzögerung bis 1 s; Controller wartet bis 3 s.
-4. ArtSync nur als Broadcast; wird beim Mergen und von fremder IP ignoriert.
+4. ArtSync nur als Broadcast; wird beim Mergen von Streams verschiedener IPs und von fremder IP ignoriert.
 5. Ein Port pro BindIndex statt 4 Ports in BindIndex 1.
 6. Aktuelle Richtung in `PortTypes[]`, nicht in GoodInput/GoodOutput; „kein Signal“ = GoodInput Bit 7 aus.
 7. ArtInput wirkt nur auf Inputs.

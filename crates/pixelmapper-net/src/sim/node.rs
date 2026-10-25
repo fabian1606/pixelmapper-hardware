@@ -412,6 +412,12 @@ impl Port {
         self.sources.len() >= 2
     }
 
+    /// Merging streams of different IPs (spec p. 68: only then ArtSync is ignored; two Physicals of one IP are
+    /// two merge sources, but not a reason to ignore ArtSync).
+    fn merging_ips(&self) -> bool {
+        self.sources.iter().any(|s| s.ip != self.sources[0].ip)
+    }
+
     /// One request on the DMX line. Broadcast/vendorcast reach every addressed responder and never get an
     /// answer.
     pub(super) fn line_transaction(
@@ -1121,7 +1127,7 @@ impl Node {
     }
 
     fn on_sync(&mut self, src: SocketAddr) {
-        if self.ports.iter().any(Port::merging) || self.last_dmx_ip != Some(src.ip()) {
+        if self.ports.iter().any(Port::merging_ips) || self.last_dmx_ip != Some(src.ip()) {
             return;
         }
         self.sync_count += 1;
