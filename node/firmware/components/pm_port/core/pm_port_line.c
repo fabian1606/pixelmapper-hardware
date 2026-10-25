@@ -281,6 +281,14 @@ uint32_t pm_port_line_rdm_budget_us(const pm_port_line_t *l)
     return pm_port_rdm_budget_us(l->timing.break_us, l->timing.mab_us, l->timing.mbs_us, l->timing.rate_hz, len);
 }
 
+bool pm_port_line_input_signal(pm_port_line_t *l, uint32_t now, uint32_t lost_us)
+{
+    if (!l->in_seen) return false;
+    if ((uint32_t)(now - l->last_in_us) < lost_us) return true;
+    l->in_seen = false; /* lost: stays lost until the next frame (no revival when the clock wraps) */
+    return false;
+}
+
 PM_PORT_IRAM void pm_port_line_poke(pm_port_line_t *l, uint32_t now)
 {
     if (l->state == PM_PORT_LINE_GAP) schedule(l, now);
