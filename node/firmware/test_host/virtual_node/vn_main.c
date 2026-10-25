@@ -462,6 +462,14 @@ static void control(char *cmd, char *out, size_t cap)
                  mode_name(d->mode), d->present, (unsigned)m->running_version, m->cached_valid,
                  (unsigned)m->pages_written, (unsigned)m->finishes, (unsigned)m->enters,
                  (unsigned)d->boot_info_gets, (unsigned)m->start_address, m->identify, m->label_len, m->label);
+    } else if (strcmp(c, "busy") == 0 && port >= 0 && argc >= 4 && parse_uid(argv[2], &uid)) {
+        sim_dev_t *d = vn_port_dev((pm_port_idx_t)port, &uid);
+        if (d == NULL || d->model == NULL) {
+            snprintf(out, cap, "err no model device");
+            return;
+        }
+        d->model->busy_requests = (uint8_t)atoi(argv[3]); /* NACK BUFFER_FULL after each page write */
+        snprintf(out, cap, "ok");
     } else if (strcmp(c, "tod") == 0 && port >= 0) {
         static pm_uid_t tod[PM_RDM_TOD_MAX];
         uint16_t n = vn_port_tod_get(NULL, (pm_port_idx_t)port, tod, PM_RDM_TOD_MAX);
