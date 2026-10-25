@@ -13,6 +13,7 @@
 
 #include <stdalign.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "pm_pids.h"
@@ -621,6 +622,31 @@ void pm_node_fw_progress(pm_node_t *n, const pm_fw_status_t *st)
         return; /* idle */
     }
     ui(n, PM_NODE_UI_FW_PROGRESS, 0, pct);
+}
+
+uint32_t pm_node_boot_version(const char *idf_ver, char *label, size_t cap)
+{
+    if (label != NULL && cap > 0) {
+        label[0] = '\0';
+        if (idf_ver != NULL && idf_ver[0] != '\0') snprintf(label, cap, "ESP-IDF %s bootloader", idf_ver);
+    }
+    if (idf_ver == NULL) return 0;
+    const char *p = idf_ver[0] == 'v' ? idf_ver + 1 : idf_ver;
+    unsigned v[3] = {0, 0, 0};
+    for (unsigned i = 0; i < 3; i++) {
+        if (*p < '0' || *p > '9') {
+            if (i < 2) return 0; /* at least major.minor */
+            break;
+        }
+        while (*p >= '0' && *p <= '9') v[i] = v[i] * 10u + (unsigned)(*p++ - '0');
+        if (v[i] > 255u) return 0;
+        if (*p != '.') {
+            if (i < 1) return 0;
+            break;
+        }
+        p++;
+    }
+    return PM_FW_VERSION_ID(v[0], v[1], v[2]);
 }
 
 bool pm_node_busy(const pm_node_t *n)

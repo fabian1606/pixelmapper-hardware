@@ -720,8 +720,31 @@ static void test_port_cfg(void)
     g_context = NULL;
 }
 
+static void test_boot_version(void)
+{
+    g_context = "node boot version";
+    char l[33];
+    CHECK_EQ(pm_node_boot_version("v5.5.6", l, sizeof(l)), 0x00050506u);
+    CHECK(strcmp(l, "ESP-IDF v5.5.6 bootloader") == 0);
+    CHECK_EQ(pm_node_boot_version("v5.5.6-dirty", l, sizeof(l)), 0x00050506u);
+    CHECK_EQ(pm_node_boot_version("v5.4", l, sizeof(l)), 0x00050400u);
+    CHECK_EQ(pm_node_boot_version("v6.0-dev-1234-gabc", l, sizeof(l)), 0x00060000u);
+    CHECK_EQ(pm_node_boot_version("5.10.2", l, sizeof(l)), 0x00050A02u);
+    CHECK_EQ(pm_node_boot_version("vX", l, sizeof(l)), 0u);
+    CHECK(strcmp(l, "ESP-IDF vX bootloader") == 0);
+    CHECK_EQ(pm_node_boot_version("v5", l, sizeof(l)), 0u);
+    CHECK_EQ(pm_node_boot_version("v300.1.1", l, sizeof(l)), 0u);
+    CHECK_EQ(pm_node_boot_version(NULL, l, sizeof(l)), 0u);
+    CHECK(strcmp(l, "") == 0);
+    char tiny[8];
+    pm_node_boot_version("v5.5.6", tiny, sizeof(tiny));
+    CHECK(strcmp(tiny, "ESP-IDF") == 0);
+    g_context = NULL;
+}
+
 void test_node(void)
 {
+    test_boot_version();
     test_port_cfg();
     test_routing();
     test_tokens();

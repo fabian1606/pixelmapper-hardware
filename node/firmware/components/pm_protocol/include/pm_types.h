@@ -89,6 +89,10 @@ pm_err_t pm_uid_parse(const char *s, pm_uid_t *out);
 /** Node UID from the Ethernet MAC: ESTA:(0x80000000 | lower 28 bits of the MAC). */
 pm_uid_t pm_uid_node_from_mac(uint16_t esta, const uint8_t mac[6]);
 
+/** Art-Net 4 fallback address 2.B.C.D (host order): B = MAC[3] + OemHi + OemLo (mod 256), C = MAC[4], D = MAC[5]
+ *  (contract §2). The address a static configuration with static_ip = 0 uses. */
+uint32_t pm_ip_artnet_fallback(const uint8_t mac[6], uint16_t oem);
+
 /* ------------------------------------------------------------------------------------------------ big-endian helpers */
 
 static inline uint16_t pm_get_be16(const uint8_t *p) { return (uint16_t)((p[0] << 8) | p[1]); }

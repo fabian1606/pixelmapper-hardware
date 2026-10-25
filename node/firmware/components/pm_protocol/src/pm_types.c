@@ -92,6 +92,13 @@ pm_err_t pm_uid_parse(const char *s, pm_uid_t *out)
     return PM_OK;
 }
 
+uint32_t pm_ip_artnet_fallback(const uint8_t mac[6], uint16_t oem)
+{
+    /* Art-Net 4 p. 13: B = MAC[3] + OemHi + OemLo; the spec does not say "mod 256", a byte can only hold that. */
+    uint8_t b = (uint8_t)(mac[3] + (oem >> 8) + (oem & 0xFFu));
+    return (2u << 24) | ((uint32_t)b << 16) | ((uint32_t)mac[4] << 8) | mac[5];
+}
+
 pm_uid_t pm_uid_node_from_mac(uint16_t esta, const uint8_t mac[6])
 {
     uint32_t low28 = ((uint32_t)(mac[2] & 0x0Fu) << 24) | ((uint32_t)mac[3] << 16) | ((uint32_t)mac[4] << 8) | mac[5];

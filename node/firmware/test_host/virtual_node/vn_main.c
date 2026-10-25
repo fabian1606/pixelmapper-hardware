@@ -208,11 +208,7 @@ static void op_net_info(void *ctx, pm_artnet_net_info_t *out)
 }
 
 /** Art-Net fallback address 2.B.C.D (contract §2). */
-static uint32_t fallback_ip(void)
-{
-    uint8_t b = (uint8_t)(S.net.mac[3] + (PM_ARTNET_OEM_NODE >> 8) + (PM_ARTNET_OEM_NODE & 0xFFu));
-    return (2u << 24) | ((uint32_t)b << 16) | ((uint32_t)S.net.mac[4] << 8) | S.net.mac[5];
-}
+static uint32_t fallback_ip(void) { return pm_ip_artnet_fallback(S.net.mac, PM_ARTNET_OEM_NODE); }
 
 static void op_net_apply_ip(void *ctx, const pm_ip_settings_t *ip)
 {
@@ -331,12 +327,16 @@ static void node_start(void)
         .boot_catch_status = vn_port_catch_status,
         .reset = op_reset, .ui_event = op_ui_event, .port_live = NULL, .fw_sink = vn_fw_sink(),
     };
+    /* bootloader identity as main.c reads it from esp_bootloader_desc_t (the build's IDF version) */
+    static char boot_label[40];
+    uint32_t boot_id = pm_node_boot_version("v5.5.6", boot_label, sizeof(boot_label));
     const pm_node_identity_t id = {
         .artnet = {.esta_man = PM_ESTA_MANUFACTURER, .oem = PM_ARTNET_OEM_NODE,
                    .vers_info = PM_FW_VERSINFO(S.fw_version), .uid = S.uid, .num_ports = PM_NUM_PORTS},
         .responder = {.uid = S.uid, .model_id = PM_MODEL_NODE, .sw_version_id = S.fw_version,
                       .sw_version_label = S.fw_label, .model_description = "Pixelmapper Node",
-                      .manufacturer_label = "Prototype", .hw_revision = 0},
+                      .manufacturer_label = "Prototype", .hw_revision = 0, .boot_sw_version_id = boot_id,
+                      .boot_sw_version_label = boot_label},
     };
     static pm_settings_t settings;
     vn_config_get(&settings);

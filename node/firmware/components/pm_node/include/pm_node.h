@@ -227,6 +227,14 @@ void pm_node_fw_progress(pm_node_t *n, const pm_fw_status_t *st);
 bool pm_node_busy(const pm_node_t *n);
 
 /**
+ * Boot software identity for the responder (BOOT_SOFTWARE_VERSION_ID/LABEL) from the ESP-IDF version string of the
+ * installed bootloader (esp_bootloader_desc_t.idf_ver, e.g. "v5.5.6" or "v5.5.6-dirty"): writes the label
+ * "ESP-IDF <ver> bootloader" into `label` (NUL-terminated, cut to `cap`) and returns 0x00MMmmpp, 0 when the string
+ * has no "major.minor[.patch]" (the label is still written; NULL/empty -> "").
+ */
+uint32_t pm_node_boot_version(const char *idf_ver, char *label, size_t cap);
+
+/**
  * Copy the fields selected by `mask` (PM_CHG_* bits, per-port bits per port) from `src` to `dst`. This is what
  * both protocol stacks' settings writes do inside ops->config_modify: only the fields they changed are written.
  */

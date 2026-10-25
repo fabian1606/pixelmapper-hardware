@@ -3,12 +3,7 @@
 
 #include <string.h>
 
-uint32_t pm_net_fallback_ip(const uint8_t mac[6], uint16_t oem)
-{
-    /* Art-Net 4 p. 13: B = MAC[3] + OemHi + OemLo; the spec does not say "mod 256", a byte can only hold that. */
-    uint8_t b = (uint8_t)(mac[3] + (oem >> 8) + (oem & 0xFFu));
-    return (2u << 24) | ((uint32_t)b << 16) | ((uint32_t)mac[4] << 8) | mac[5];
-}
+uint32_t pm_net_fallback_ip(const uint8_t mac[6], uint16_t oem) { return pm_ip_artnet_fallback(mac, oem); }
 
 void pm_net_static_addr(const pm_ip_settings_t *s, const uint8_t mac[6], uint16_t oem, pm_net_addr_t *out)
 {
