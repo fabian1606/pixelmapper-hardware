@@ -52,3 +52,21 @@ target_compile_options(pm_tests PRIVATE -Wall -Wextra -Werror)
 
 enable_testing()
 add_test(NAME pm_tests COMMAND pm_tests)
+
+# Component-owned host test projects, run in the same ctest pass (Phase 2 integration).
+add_subdirectory(${FW}/components/pm_port/test_host ${CMAKE_CURRENT_BINARY_DIR}/pm_port)   # test_pm_port
+add_subdirectory(${FW}/main/test_host ${CMAKE_CURRENT_BINARY_DIR}/pm_net)                  # pm_net_tests
+
+# Front-panel host renderer (pm_ui): smoke test, plays all scenes and writes PNG/PPM into the build dir.
+set(UI ${FW}/components/pm_ui)
+add_executable(ui_host ${UI}/host/host_main.c ${UI}/host/scenes.c
+                       ${UI}/src/ui_core.c ${UI}/src/ui_gfx.c ${UI}/src/ui_input.c ${UI}/src/ui_rdm.c
+                       ${UI}/src/ui_font_data.c)
+target_include_directories(ui_host PRIVATE ${UI}/host/stubs ${UI}/include ${UI}/src
+                           ${FW}/components/pm_board/include ${FW}/components/pm_port/include
+                           ${FW}/components/pm_rdm/include)
+target_link_libraries(ui_host PRIVATE pm_protocol)
+target_compile_options(ui_host PRIVATE -Wall -Wextra -Werror -Wshadow)
+add_test(NAME pm_ui_render COMMAND ui_host ${CMAKE_CURRENT_BINARY_DIR}/ui_out
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/ui_out)
