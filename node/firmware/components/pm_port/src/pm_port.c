@@ -100,6 +100,7 @@ typedef struct {
     pm_rdm_txn_t txn;                     /* handed to the line by pointer */
     bool signal;
     uint32_t fps_last_frames;
+    uint32_t rdm_handout_ms;              /* last pm_rdm_ctrl_next_max() hand-out (RDM gate) */
 
     /* snapshots for core 0 (under s_snap_lock) */
     pm_port_stats_t stats;
@@ -502,8 +503,10 @@ static void apply_cfg(port_t *p, const pm_port_cfg_t *c, uint32_t ms)
     rearm();
     portEXIT_CRITICAL(&s_lock);
 
-    /* hand the aborted result to the controller before it is reset */
+    /* hand the aborted result (PM_RDM_RX_TIMEOUT) to the controller before it is reset, so its discovery/queue
+     * state never waits for a transaction that will not come back */
     if (aborted) pm_rdm_ctrl_done(&p->ctrl, ms, &rx);
+    pm_rdm_ctrl_set_timing(&p->ctrl, t.break_us, t.mab_us); /* est_us of its transactions */
     if (mode_changed || rdm_on != rdm_was) {
         pm_rdm_ctrl_set_enabled(&p->ctrl, false, ms); /* flushes the TOD */
         if (rdm_on) pm_rdm_ctrl_set_enabled(&p->ctrl, true, ms); /* full discovery */
@@ -544,7 +547,7 @@ static void handle_cmd(const cmd_t *c, uint32_t ms)
         case PM_ATC_FLUSH: pm_rdm_ctrl_flush(&p->ctrl, ms); break;
         case PM_ATC_INC_ON: pm_rdm_ctrl_set_background(&p->ctrl, true, bg_interval(&p->cfg)); break;
         case PM_ATC_INC_OFF: pm_rdm_ctrl_set_background(&p->ctrl, false, bg_interval(&p->cfg)); break;
-        case PM_ATC_END: /* pm_rdm_ctrl has no "stop discovery" (interface wish in the report) */ break;
+        case PM_ATC_END: pm_rdm_ctrl_discovery_stop(&p->ctrl, ms); break;
         default: break;
         }
         break;
@@ -574,14 +577,25 @@ static void service_port(port_t *p, uint32_t ms)
     /* rx.data points into the line and stays untouched until the next offer */
     if (got) pm_rdm_ctrl_done(&p->ctrl, ms, &rx);
 
-    if (!busy && p->cfg.mode == PM_PORT_MODE_OUTPUT && pm_rdm_ctrl_next(&p->ctrl, ms, &p->txn)) {
+    if (!busy && p->cfg.mode == PM_PORT_MODE_OUTPUT) {
+        /* RDM gate: discovery/BOOT_CATCH steps only when they fit next to the DMX frame (>= 30 Hz) */
         portENTER_CRITICAL(&s_lock);
-        bool ok = pm_port_line_rdm_offer(&p->line, &p->txn, now_us());
-        rearm();
+        uint32_t budget = pm_port_line_rdm_budget_us(&p->line);
         portEXIT_CRITICAL(&s_lock);
-        if (!ok) {
-            pm_rdm_rx_t none = {.status = PM_RDM_RX_TIMEOUT};
-            pm_rdm_ctrl_done(&p->ctrl, ms, &none);
+        bool queued = pm_rdm_ctrl_queue_free(&p->ctrl) < PM_RDM_QUEUE_LEN;
+        uint32_t max_us = pm_port_rdm_max_us(budget, queued, ms - p->rdm_handout_ms);
+        if (pm_rdm_ctrl_next_max(&p->ctrl, ms, max_us, &p->txn)) {
+            p->rdm_handout_ms = ms;
+            portENTER_CRITICAL(&s_lock);
+            bool ok = pm_port_line_rdm_offer(&p->line, &p->txn, now_us());
+            rearm();
+            portEXIT_CRITICAL(&s_lock);
+            if (!ok) { /* line refused it (not an output any more): finish it as "no answer" */
+                pm_rdm_rx_t none = {.status = PM_RDM_RX_TIMEOUT};
+                pm_rdm_ctrl_done(&p->ctrl, ms, &none);
+            }
+        } else if (!pm_rdm_ctrl_discovery_running(&p->ctrl) && !queued) {
+            p->rdm_handout_ms = ms; /* idle: the starvation clock only runs while something waits */
         }
     }
     atomic_store(&p->rdm_ctrl_free, pm_rdm_ctrl_queue_free(&p->ctrl));
@@ -615,6 +629,8 @@ static void update_stats(port_t *p, uint32_t elapsed_ms)
     uint32_t fps = elapsed_ms ? ((frames - p->fps_last_frames) * 1000u + elapsed_ms / 2) / elapsed_ms : 0;
     p->fps_last_frames = frames;
     bool disc = pm_rdm_ctrl_discovery_running(&p->ctrl);
+    pm_rdm_ctrl_stats_t cs;
+    pm_rdm_ctrl_get_stats(&p->ctrl, &cs);
 
     portENTER_CRITICAL(&s_snap_lock);
     p->stats.frames_out = ls.frames_out;
@@ -628,6 +644,7 @@ static void update_stats(port_t *p, uint32_t elapsed_ms)
     p->stats.input_signal = p->signal;
     p->stats.rx_errors = ls.rx_errors;
     p->stats.events_dropped = atomic_load(&s.events_dropped);
+    p->stats.rdm = cs;
     portEXIT_CRITICAL(&s_snap_lock);
 }
 

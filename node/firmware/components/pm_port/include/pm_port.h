@@ -83,6 +83,10 @@ typedef struct {
     bool input_signal;
     uint32_t rx_errors;         /**< framing/parity/overflow events on the line */
     uint32_t events_dropped;    /**< events lost because the core-0 queue was full (whole engine) */
+    /* Phase 2 */
+    pm_rdm_ctrl_stats_t rdm;    /**< controller counters (pm_rdm_ctrl_get_stats): forwarded requests/responses/
+                                     timeouts, DUBs, collisions, full/background discoveries, TOD overflow, corrupt
+                                     runs. rdm_requests/rdm_timeouts/rdm_collisions above count line transactions */
 } pm_port_stats_t;
 
 /** Configure UARTs/pins from the board table, create the event queue. Does not start the task. */

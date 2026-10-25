@@ -59,6 +59,23 @@ PM_PORT_IRAM uint32_t pm_port_rdm_estimate_us(const pm_rdm_txn_t *t, uint16_t br
     return us;
 }
 
+uint32_t pm_port_rdm_budget_us(uint16_t break_us, uint16_t mab_us, uint16_t mbs_us, uint8_t rate_hz,
+                               uint16_t frame_len)
+{
+    uint32_t floor_period = 1000000u / PM_PORT_DMX_FLOOR_HZ;
+    uint32_t period = rate_hz ? 1000000u / rate_hz : floor_period;
+    if (period > floor_period) floor_period = period;
+    uint32_t frame = (uint32_t)break_us + mab_us + (uint32_t)frame_len * (PM_PORT_US_PER_SLOT + mbs_us) +
+                     PM_PORT_RDM_GAP_US;
+    return floor_period > frame ? floor_period - frame : 0;
+}
+
+uint32_t pm_port_rdm_max_us(uint32_t budget_us, bool request_queued, uint32_t ms_since_handout)
+{
+    if (request_queued || ms_since_handout >= PM_PORT_RDM_GATE_STARVE_MS) return UINT32_MAX;
+    return budget_us;
+}
+
 /* ------------------------------------------------------------------------------------------------ helpers */
 
 __attribute__((always_inline)) static inline uint16_t clamp16(uint16_t v, uint16_t lo, uint16_t hi)
@@ -91,6 +108,7 @@ static PM_PORT_IRAM void start_packet(pm_port_line_t *l, uint32_t now, bool rdm)
         }
         l->dmx_started = true;
         l->last_dmx_start = now;
+        l->last_dmx_len = l->cur_len;
         if (l->offer && !l->result_ready) {
             if (l->frames_since_rdm < 255u) l->frames_since_rdm++;
         }
@@ -255,6 +273,12 @@ PM_PORT_IRAM bool pm_port_line_rdm_take(pm_port_line_t *l, pm_rdm_rx_t *rx)
     l->offer = NULL;
     l->result_ready = false;
     return true;
+}
+
+uint32_t pm_port_line_rdm_budget_us(const pm_port_line_t *l)
+{
+    uint16_t len = l->dmx_started && l->last_dmx_len ? l->last_dmx_len : PM_PORT_FRAME_MAX;
+    return pm_port_rdm_budget_us(l->timing.break_us, l->timing.mab_us, l->timing.mbs_us, l->timing.rate_hz, len);
 }
 
 PM_PORT_IRAM void pm_port_line_poke(pm_port_line_t *l, uint32_t now)
