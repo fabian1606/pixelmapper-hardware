@@ -14,6 +14,10 @@
  *         }
  *     }
  *
+ * Discovery: full = TOD cleared, DISC_UN_MUTE x3, DUB binary search; background (every bg interval) = DISC_UN_MUTE
+ * x3 + presence DISC_MUTE of every TOD entry + DUB search for the rest (PM_RDM_DISC_BACKGROUND). pm_port drives it
+ * with pm_rdm_ctrl_next_max() and a per-gap time budget (pm_port_rdm_max_us) so discovery keeps DMX >= 30 Hz.
+ *
  * Priority inside next(): queued requests (ArtRdm, responder-forwarded, UI) > BOOT_CATCH tick > discovery step.
  * Discovery never starves requests; a full discovery is split into single transactions so DMX keeps >= 30 Hz.
  *
@@ -107,7 +111,10 @@ typedef struct {
 typedef enum {
     PM_RDM_DISC_IDLE,
     PM_RDM_DISC_FULL,        /**< un-mute all, binary search over the whole range */
-    PM_RDM_DISC_BACKGROUND,  /**< presence check of known UIDs + DUB without un-mute (finds new devices) */
+    PM_RDM_DISC_BACKGROUND,  /**< incremental (OLA): DISC_UN_MUTE broadcast x PM_RDM_UNMUTE_REPEATS, presence
+                                  check = DISC_MUTE to every known UID (PM_RDM_PRESENCE_MAX_MISSES misses drop it),
+                                  then the DUB binary search: only devices not muted by the presence check answer
+                                  (new ones, and dropped ones that are still connected). The TOD is not cleared */
 } pm_rdm_disc_mode_t;
 
 typedef struct {
