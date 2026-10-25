@@ -32,7 +32,8 @@ typedef struct {
 
 typedef struct {
     int8_t spi_host;   /**< SPI2_HOST/SPI3_HOST as int */
-    int8_t sclk, mosi, cs, dc, rst, backlight; /**< backlight: PWM (LEDC) */
+    int8_t sclk, mosi, cs, dc, rst, backlight; /**< backlight: PWM (LEDC). rst may be PM_BOARD_PIN_NONE (RC reset on
+                                                    the board -> use the ST7735 SWRESET command instead) */
     uint8_t rotation;  /**< mounting orientation 0..3 (landscape variants) */
     bool backlight_active_high;
 } pm_board_display_pins_t;
@@ -45,6 +46,9 @@ typedef struct {
     int8_t mdc, mdio, phy_reset;
     int8_t phy_addr;
     int8_t rmii_clk_in;    /**< 50 MHz REF_CLK from the PHY/oscillator, PM_BOARD_PIN_NONE = P4 outputs it */
+    /* RMII data pins (P4 EMAC IO MUX choices; eth_esp32_emac_config_t.emac_dataif_gpio.rmii) */
+    int8_t rmii_txd0, rmii_txd1, rmii_tx_en;
+    int8_t rmii_rxd0, rmii_rxd1, rmii_crs_dv;
 } pm_board_eth_pins_t;
 
 typedef struct {
@@ -72,6 +76,24 @@ uint8_t pm_board_revision(void);
 
 /** Bitmask of all revisions this firmware has pin tables for (-> image description hw_rev_mask). */
 uint32_t pm_board_supported_revisions(void);
+
+/* ------------------------------------------------------------------------------------------------ revision code */
+
+/** Maximum number of GPIOs of the resistor code (own PCB, rev >= 1). */
+#define PM_BOARD_REV_CODE_MAX_PINS 4u
+
+/**
+ * Decode the revision resistor code (pure function, host-tested). Each code pin is read twice, once with the
+ * internal pull-up and once with the internal pull-down enabled:
+ *   follows the pull (1 / 0)  -> pin floats       (rev 0 has no code resistors: all pins float)
+ *   1 / 1                     -> bit = 1          (strong pull-up on the PCB)
+ *   0 / 0                     -> bit = 0          (strong pull-down on the PCB)
+ *   0 / 1                     -> invalid
+ * Bit i of the code = pin i. Revision = code + 1 (code 0 = rev 1), all floating = rev 0.
+ * Returns false (invalid) for a mix of floating and driven pins or an impossible reading.
+ */
+bool pm_board_decode_rev_code(const uint8_t *level_pullup, const uint8_t *level_pulldown, uint8_t n_pins,
+                              uint8_t *revision);
 
 #ifdef __cplusplus
 }
