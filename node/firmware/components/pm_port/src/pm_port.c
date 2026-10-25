@@ -607,11 +607,8 @@ static void service_port(port_t *p, uint32_t ms)
     }
     if (p->cfg.mode == PM_PORT_MODE_INPUT) {
         portENTER_CRITICAL(&s_lock);
-        uint32_t last = p->line.last_in_us;
-        bool seen = p->line.in_seen;
-        uint32_t now = now_us();
+        bool sig = pm_port_line_input_signal(&p->line, now_us(), INPUT_LOST_US);
         portEXIT_CRITICAL(&s_lock);
-        bool sig = seen && (now - last) < INPUT_LOST_US;
         if (sig != p->signal) {
             p->signal = sig;
             pm_port_event_t ev = {.type = PM_PORT_EV_INPUT_SIGNAL, .port = p->idx, .value = sig ? 1 : 0};

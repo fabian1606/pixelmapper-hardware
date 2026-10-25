@@ -580,6 +580,13 @@ static void test_input(void)
     CHECK_EQ(S.in_frame[9], 9);
     CHECK(S.line.in_seen);
 
+    /* signal: present for 1 s after the last frame, then lost - also when the 32-bit us clock wraps around */
+    uint32_t last = S.line.last_in_us;
+    CHECK(pm_port_line_input_signal(&S.line, last + 999999u, 1000000u));
+    CHECK(!pm_port_line_input_signal(&S.line, last + 1000000u, 1000000u));
+    CHECK(!pm_port_line_input_signal(&S.line, last + 0x80000000u, 1000000u));
+    CHECK(!pm_port_line_input_signal(&S.line, last + 10u, 1000000u)); /* = last + 2^32 + 10: no stale revival */
+
     /* a framing error inside a frame drops that frame (slots would be shifted) */
     unsigned before = S.line.stats.frames_in;
     t = S.now + 100;

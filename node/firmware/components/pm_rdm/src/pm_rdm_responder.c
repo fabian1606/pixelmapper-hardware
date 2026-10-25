@@ -590,7 +590,7 @@ static int h_default_route(pm_rdm_responder_t *r, ctx_t *c)
     }
     uint32_t ifc = pm_get_be32(c->req->pd);
     if (ifc != 0 && ifc != PM_RDM_RESP_INTERFACE_ID) return PM_NR_DATA_OUT_OF_RANGE;
-    s->ip.gateway = pm_get_be32(c->req->pd + 4);
+    s->ip.gateway = ifc == 0 ? 0u : pm_get_be32(c->req->pd + 4); /* interface 0 = no default route */
     return settings_apply(r, s, PM_CHG_IP);
 }
 

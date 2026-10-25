@@ -95,3 +95,26 @@ target_compile_options(ui_host PRIVATE -Wall -Wextra -Werror -Wshadow)
 add_test(NAME pm_ui_render COMMAND ui_host ${CMAKE_CURRENT_BINARY_DIR}/ui_out
          WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/ui_out)
+
+# Random/mutation test of the network-facing parsers (fuzz/fuzz_main.c): own copies of the component sources, built
+# with AddressSanitizer + UndefinedBehaviorSanitizer where the compiler supports them (AppleClang, Clang, GCC).
+option(PM_FUZZ_SANITIZE "build pm_fuzz with -fsanitize=address,undefined" ON)
+set(PM_FUZZ_SOURCES fuzz/fuzz_main.c virtual_node/vn_fw.c
+    ${FW}/components/pm_protocol/src/pm_types.c ${FW}/components/pm_protocol/src/pm_settings.c
+    ${FW}/components/pm_protocol/src/pm_fw.c
+    ${FW}/components/pm_artnet/src/pm_artnet_packets.c ${FW}/components/pm_artnet/src/pm_artnet_node.c
+    ${FW}/components/pm_rdm/src/pm_rdm.c ${FW}/components/pm_rdm/src/pm_rdm_ctrl.c
+    ${FW}/components/pm_rdm/src/pm_rdm_responder.c ${FW}/components/pm_node/src/pm_node.c
+    ${FW}/components/pm_ota/src/pm_ota_session.c)
+add_executable(pm_fuzz ${PM_FUZZ_SOURCES})
+target_include_directories(pm_fuzz PRIVATE virtual_node sim ${FW}/components/pm_protocol/include
+                           ${FW}/components/pm_artnet/include ${FW}/components/pm_rdm/include
+                           ${FW}/components/pm_node/include ${FW}/components/pm_ota/src)
+target_compile_definitions(pm_fuzz PRIVATE _DEFAULT_SOURCE)
+target_compile_options(pm_fuzz PRIVATE ${PM_WARN} -g -O1)
+if(PM_FUZZ_SANITIZE AND CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(pm_fuzz PRIVATE -fsanitize=address,undefined -fno-sanitize-recover=all
+                           -fno-omit-frame-pointer)
+    target_link_options(pm_fuzz PRIVATE -fsanitize=address,undefined)
+endif()
+add_test(NAME pm_fuzz COMMAND pm_fuzz 100000 1)

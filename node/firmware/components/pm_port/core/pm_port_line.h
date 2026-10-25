@@ -239,6 +239,13 @@ uint32_t pm_port_line_rdm_budget_us(const pm_port_line_t *l);
 /** Re-run the scheduler now (call after new output data in delta mode or other external changes). */
 void pm_port_line_poke(pm_port_line_t *l, uint32_t now);
 
+/**
+ * Input signal present: a valid frame within `lost_us` before `now`. Once lost, the "seen" state is cleared, so the
+ * 32-bit microsecond clock cannot revive an old frame when it wraps (every 71.6 min). Call regularly (pm_port: every
+ * engine loop) - the wrap protection needs one call within 2^32 - lost_us after the last frame.
+ */
+bool pm_port_line_input_signal(pm_port_line_t *l, uint32_t now, uint32_t lost_us);
+
 void pm_port_line_timer(pm_port_line_t *l, uint32_t now);
 void pm_port_line_tx_done(pm_port_line_t *l, uint32_t now);
 void pm_port_line_rx_bytes(pm_port_line_t *l, uint32_t now, const uint8_t *data, uint16_t len);
