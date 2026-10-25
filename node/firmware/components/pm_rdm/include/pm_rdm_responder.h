@@ -134,6 +134,17 @@ void pm_rdm_responder_boot_catch_event(pm_rdm_responder_t *r, pm_port_idx_t port
  */
 uint8_t pm_rdm_responder_message_count(const pm_rdm_responder_t *r);
 
+/* ------------------------------------------------------------------------------------------------ Phase 2 additions */
+
+/**
+ * Identify state changed elsewhere (ArtAddress LED Locate/Normal, front panel): set the IDENTIFY_DEVICE state
+ * without calling ops->identify (no loop). A real change queues IDENTIFY_DEVICE as a queued message.
+ */
+void pm_rdm_responder_set_identify(pm_rdm_responder_t *r, bool on);
+
+/** Current IDENTIFY_DEVICE state. */
+bool pm_rdm_responder_identify(const pm_rdm_responder_t *r);
+
 #ifdef __cplusplus
 }
 #endif

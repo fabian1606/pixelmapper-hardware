@@ -1038,3 +1038,15 @@ void pm_rdm_responder_poll(pm_rdm_responder_t *r)
         if (k && k->abort) k->abort(k->ctx, PM_FW_ERROR_TIMEOUT);
     }
 }
+
+void pm_rdm_responder_set_identify(pm_rdm_responder_t *r, bool on)
+{
+    if (r == NULL || r->identify == on) return;
+    r->identify = on;
+    pm_rdm_responder_queue_pid(r, PM_RDM_PID_IDENTIFY_DEVICE);
+}
+
+bool pm_rdm_responder_identify(const pm_rdm_responder_t *r)
+{
+    return r != NULL && r->identify;
+}

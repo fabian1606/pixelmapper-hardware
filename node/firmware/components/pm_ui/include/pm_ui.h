@@ -24,6 +24,23 @@
 extern "C" {
 #endif
 
+/** Network facts for the status bar / Network info page (Phase 2). */
+typedef struct {
+    uint32_t ip, mask, gateway; /**< host byte order */
+    uint8_t mode;               /**< pm_net_addr_mode_t */
+    bool link_up;
+} pm_ui_net_info_t;
+
+/** Live Art-Net state of one port (Phase 2; main keeps a thread-safe snapshot taken in the network task). */
+typedef struct {
+    bool rx_active;        /**< ArtDmx for this port received within the last ~2 s (output) */
+    uint8_t rx_fps;        /**< ArtDmx frames per second received for this port (output), 0 = none */
+    uint8_t merge_sources; /**< 0..2 active sources (IP + Physical) */
+    bool data_loss;        /**< no ArtDmx for > 4 s, failsafe active */
+    bool merging;          /**< two sources active */
+    bool synced;           /**< ArtSync mode active */
+} pm_ui_port_live_t;
+
 /** Read-only live data the UI shows (implemented by main). All callbacks must be fast and thread-safe. */
 typedef struct {
     void *ctx;
@@ -35,6 +52,12 @@ typedef struct {
     /** RDM request from the panel to a device (identify, address, personality, label). The response arrives via
      *  pm_ui_notify(PM_UI_EV_RDM_RESPONSE). main also records SETs with pm_rdm_responder_local_set(). */
     esp_err_t (*rdm_request)(void *ctx, pm_port_idx_t port, uint32_t token, const uint8_t *data, uint16_t len);
+    /* Phase 2 (NULL allowed while a caller does not provide them) */
+    void (*net_info)(void *ctx, pm_ui_net_info_t *out);                         /**< replaces net_status */
+    void (*port_live)(void *ctx, pm_port_idx_t port, pm_ui_port_live_t *out);   /**< replaces port_flags */
+    /** Identify of the node toggled on the panel: main mirrors it to the RDM responder (IDENTIFY_DEVICE) and the
+     *  ArtPollReply indicator (Locate/Normal). Not called for PM_UI_EV_IDENTIFY coming from main. */
+    void (*identify)(void *ctx, bool on);
 } pm_ui_model_t;
 
 typedef enum {
