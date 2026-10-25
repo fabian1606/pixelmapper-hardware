@@ -1,6 +1,6 @@
 idf_component_register(SRCS "main.c"
                        INCLUDE_DIRS "."
-                       REQUIRES pm_protocol pm_artnet pm_rdm pm_board pm_port pm_net pm_config pm_ota pm_ui
+                       REQUIRES pm_protocol pm_artnet pm_rdm pm_node pm_board pm_port pm_net pm_config pm_ota pm_ui
                                 nvs_flash esp_timer esp_system heap freertos log)
 
 # Post-build: the PMIM block must sit at image offset 288 and the app must fit into one OTA slot

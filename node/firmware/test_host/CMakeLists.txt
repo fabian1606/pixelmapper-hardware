@@ -35,6 +35,11 @@ target_include_directories(pm_rdm PUBLIC ${FW}/components/pm_rdm/include)
 target_link_libraries(pm_rdm PUBLIC pm_protocol)
 target_compile_options(pm_rdm PRIVATE ${PM_WARN})
 
+add_library(pm_node STATIC ${FW}/components/pm_node/src/pm_node.c)
+target_include_directories(pm_node PUBLIC ${FW}/components/pm_node/include)
+target_link_libraries(pm_node PUBLIC pm_artnet pm_rdm pm_protocol)
+target_compile_options(pm_node PRIVATE ${PM_WARN})
+
 file(GLOB_RECURSE VECTOR_FILES CONFIGURE_DEPENDS ${VECTORS}/*.json)
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/vectors_gen.c
@@ -47,7 +52,7 @@ file(GLOB TEST_SOURCES CONFIGURE_DEPENDS src/*.c)  # test_<component>*.c, see CL
 add_executable(pm_tests ${TEST_SOURCES}
                         ${CMAKE_CURRENT_BINARY_DIR}/vectors_gen.c)
 target_include_directories(pm_tests PRIVATE src)
-target_link_libraries(pm_tests PRIVATE pm_artnet pm_rdm pm_protocol)
+target_link_libraries(pm_tests PRIVATE pm_node pm_artnet pm_rdm pm_protocol)
 target_compile_options(pm_tests PRIVATE -Wall -Wextra -Werror)
 
 enable_testing()

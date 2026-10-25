@@ -2,9 +2,10 @@
  * pm_net.h - Ethernet (internal EMAC + IP101 over RMII), IPv4 (DHCP with 5 s fallback to the Art-Net address
  * 2.B.C.D/8, B = MAC[3] + OemHi + OemLo), UDP socket 6454 and the network task that drives pm_artnet.
  *
- * The network task (core 0) is the single thread of pm_artnet and of the RDM responder: it receives UDP, calls
- * pm_artnet_handle_packet(), pm_artnet_tick() every ~10 ms, and drains pm_port events and pm_config change
- * notifications (posted via pm_net_post()). It also implements the pm_artnet_ops_t UDP/net functions.
+ * The network task (core 0) is the single thread of pm_node (pm_artnet + RDM responder): it receives UDP (with the
+ * destination address from IP_PKTINFO) and hands it to the rx callback, calls the tick callback every period
+ * (10 ms, shorter on request: pm_net_set_tick_period) and runs work posted with pm_net_post() (pm_config change
+ * notifications, panel requests). main.c drains the pm_port events in the tick.
  */
 #pragma once
 
@@ -48,8 +49,10 @@ typedef void (*pm_net_work_fn)(void *arg);
 /** Run `fn(arg)` in the network task. Thread-safe, never blocks (ESP_ERR_NO_MEM if the queue is full). */
 esp_err_t pm_net_post(pm_net_work_fn fn, void *arg);
 
-/** Called in the network task for every received datagram on 6454. */
-typedef void (*pm_net_rx_fn)(void *ctx, uint32_t src_ip, uint16_t src_port, const uint8_t *data, size_t len);
+/** Called in the network task for every received datagram on 6454. `dst_ip` = destination address of the datagram
+ *  (IP_PKTINFO; broadcast or our unicast address), 0 = unknown. All addresses in host byte order. */
+typedef void (*pm_net_rx_fn)(void *ctx, uint32_t src_ip, uint16_t src_port, uint32_t dst_ip, const uint8_t *data,
+                             size_t len);
 /** Called in the network task every `period_ms` and after every received datagram batch. */
 typedef void (*pm_net_tick_fn)(void *ctx);
 
@@ -63,6 +66,10 @@ void pm_net_set_change_cb(pm_net_change_fn fn, void *ctx);
 
 /** True when called from the network task (for asserting the single-thread rule of pm_artnet). */
 bool pm_net_in_task(void);
+
+/** Change the tick period (network task only, e.g. from the tick callback): a short period while RDM responses are
+ *  expected from the port engine, the normal one otherwise. Posted work waits at most one period. */
+void pm_net_set_tick_period(uint32_t period_ms);
 
 #ifdef __cplusplus
 }

@@ -11,11 +11,13 @@ const char *g_context;
 void test_protocol(void);
 void test_artnet(void);
 void test_rdm(void);
+void test_node(void);
 
 static const test_case_t TESTS[] = {
     {"protocol (uid, crc, settings, image desc, pids)", test_protocol},
     {"artnet vectors", test_artnet},
     {"rdm vectors", test_rdm},
+    {"node glue (pm_node)", test_node},
 };
 
 const pm_vec_field_t *vec_field(const pm_vec_t *v, const char *key)
