@@ -338,11 +338,14 @@ impl FwUpdate {
         let desc = d
             .get(ALF_DESC_OFFSET..ALF_DESC_OFFSET + DESC_LEN)
             .ok_or(fw_error::DESC_MAGIC)?;
-        self.open(source, desc, target, now)?;
-        let image_words = self.total.div_ceil(2);
-        if pkt.firmware_length != ALF_HEADER_WORDS + image_words {
-            return Err(fw_error::IMAGE_INVALID);
+        // Like pm_artnet_node.c fw_first: FirmwareLength must match image_length of the copy, before step 1-5.
+        let image_len = NodeImageDesc::decode(desc)
+            .map_err(|_| fw_error::DESC_MAGIC)?
+            .image_length;
+        if pkt.firmware_length != ALF_HEADER_WORDS + image_len.div_ceil(2) {
+            return Err(fw_error::DESC_MISMATCH);
         }
+        self.open(source, desc, target, now)?;
         if let Some(s) = self.session.as_mut() {
             s.file_pos = pkt.data.len();
             s.next_block = pkt.block_id.wrapping_add(1);

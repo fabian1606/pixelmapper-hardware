@@ -81,7 +81,7 @@ DESC_MODEL = 3        # DEVICE_MODEL_ID is not MODEL_NODE
 DESC_HW_REV = 4       # this hardware revision is not in hw_rev_mask
 TOO_LARGE = 5         # image_length > OTA partition
 SEQUENCE = 6          # FW_WRITE offset beyond received bytes / write without FW_BEGIN
-DESC_MISMATCH = 7     # description block inside the image differs from the announced one
+DESC_MISMATCH = 7     # description block inside the image differs from the announced one; .alf FirmwareLength/Length != image_length
 CRC = 8               # CRC-32 over the image wrong
 IMAGE_INVALID = 9     # esp_ota_end rejected the image (ESP-IDF image verification)
 FLASH = 10            # flash write/erase error

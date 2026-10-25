@@ -357,7 +357,7 @@ impl Node {
                 }
             }
             p::SOFTWARE_VERSION_LABEL => ack(encode_label(&self.version_label)),
-            p::IDENTIFY_DEVICE => ack(vec![u8::from(self.indicators == SimIndicators::Locate)]),
+            p::IDENTIFY_DEVICE => ack(vec![self.identify_value()]),
             p::QUEUED_MESSAGE => self.queued_message(pd[0]),
             p::STATUS_MESSAGES => self.status_messages(pd[0]),
             p::STATUS_ID_DESCRIPTION => {
@@ -467,6 +467,11 @@ impl Node {
         }
     }
 
+    /// IDENTIFY_DEVICE value: 1 while the indicators are on Locate.
+    fn identify_value(&self) -> u8 {
+        u8::from(self.indicators == SimIndicators::Locate)
+    }
+
     /// Current GET responses of every setting whose change is reported as a queued message.
     pub(super) fn rdm_setting_values(&self) -> Vec<(u16, Vec<u8>)> {
         let mut v: Vec<(u16, Vec<u8>)> = pids::PIDS
@@ -475,6 +480,8 @@ impl Node {
             .filter_map(|d| self.setting_value(d.pid).map(|x| (d.pid, x)))
             .collect();
         v.push((p::DISPLAY_LEVEL, vec![self.settings.display_level]));
+        // Identify mirror (ArtAddress Locate / panel -> IDENTIFY_DEVICE), like pm_rdm_responder_set_identify
+        v.push((p::IDENTIFY_DEVICE, vec![self.identify_value()]));
         v.push((p::IPV4_DHCP_MODE, self.ipv4_dhcp_mode()));
         v.push((p::IPV4_STATIC_ADDRESS, self.ipv4_static()));
         v.push((p::IPV4_DEFAULT_ROUTE, self.ipv4_route()));
@@ -534,19 +541,27 @@ impl Node {
         let dor = Answer::Nack(NackReason::DATA_OUT_OF_RANGE);
         let iface_ok = u32_at(pd, 0) == IFACE;
         match pid {
-            p::IDENTIFY_DEVICE => match pd[0] {
-                0 => {
-                    if self.indicators == SimIndicators::Locate {
-                        self.indicators = SimIndicators::Normal;
+            p::IDENTIFY_DEVICE => {
+                match pd[0] {
+                    0 if self.indicators == SimIndicators::Locate => {
+                        self.indicators = SimIndicators::Normal
                     }
-                    ok
+                    0 => {}
+                    1 => self.indicators = SimIndicators::Locate,
+                    _ => return dor,
                 }
-                1 => {
-                    self.indicators = SimIndicators::Locate;
-                    ok
+                // An RDM SET is not reported back as a queued message (firmware: h_identify does not queue);
+                // ArtAddress Locate/Normal and the panel are (pm_rdm_responder_set_identify).
+                let v = vec![self.identify_value()];
+                if let Some(e) = self
+                    .reported_settings
+                    .iter_mut()
+                    .find(|(pid, _)| *pid == p::IDENTIFY_DEVICE)
+                {
+                    e.1 = v;
                 }
-                _ => dor,
-            },
+                ok
+            }
             p::CLEAR_STATUS_ID => {
                 self.queue.statuses.clear();
                 ok

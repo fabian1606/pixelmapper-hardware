@@ -1006,6 +1006,15 @@ async fn art_firmware_master_update() {
         (fw_state::FAILED, fw_error::OEM)
     );
 
+    // FirmwareLength does not match image_length -> DESC_MISMATCH already in the first block
+    let kinds = send_alf(&ctl, &img.to_alf(), img.alf_firmware_length() + 1).await;
+    assert_eq!(kinds, vec![ArtFirmwareReply::FIRM_FAIL]);
+    let info = fw_info(&ctl).await;
+    assert_eq!(
+        (info.state, info.last_error),
+        (fw_state::FAILED, fw_error::DESC_MISMATCH)
+    );
+
     // wrong BlockId
     let alf = img.to_alf();
     let words = img.alf_firmware_length();
@@ -1116,4 +1125,26 @@ async fn dmx_mbs_get_set_and_range() {
     );
     assert_ack(&ctl.set(p::FACTORY_DEFAULTS, vec![]).await);
     assert_eq!(ctl.node.snapshot().ports[2].dmx_mbs, 0);
+}
+
+#[tokio::test]
+async fn identify_mirrors_art_address_locate() {
+    let ctl = Ctl::start(SimConfig::default()).await;
+    // RDM SET IDENTIFY_DEVICE: Locate in ArtPollReply, no queued message for the setter
+    let m = ctl.set(p::IDENTIFY_DEVICE, vec![1]).await;
+    assert_ack(&m);
+    assert_eq!(m.message_count, 0);
+    let rs = ctl.poll_replies(ArtPoll::default()).await;
+    assert!(rs.iter().all(|r| r.status1 & 0xC0 == 0x40), "Locate");
+    // ArtAddress LED Normal -> IDENTIFY_DEVICE off, queued for RDM controllers
+    ctl.send(&ArtAddress::command(1, ac::AC_LED_NORMAL).encode())
+        .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let m = ctl.get(p::IDENTIFY_DEVICE, vec![]).await;
+    assert_eq!((m.parameter_data.clone(), m.message_count), (vec![0], 1));
+    let q = ctl.queued().await;
+    assert_eq!(
+        (q.parameter_id, q.parameter_data),
+        (p::IDENTIFY_DEVICE, vec![0])
+    );
 }

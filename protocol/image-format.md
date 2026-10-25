@@ -108,6 +108,10 @@ Reihenfolge, Abbruch beim ersten Fehler (Fehlercode = `fw_error` in `pids.toml`,
 Schritte 1–5 laufen **vor dem ersten Schreibzugriff**: bei RDM in FW_BEGIN, bei Art-Net im ersten
 ArtFirmwareMaster-Block (FirmFirst).
 
+**Fehler im ersten Block erscheinen in FW_INFO.last_error** (Phase 2): Scheitert FW_BEGIN bzw. FirmFirst, gibt es
+noch keine laufende Sitzung; der Node setzt trotzdem `state = FAILED` und `last_error` (Firmware:
+`sink->abort(reason)` auch im Leerlauf). Pixelmapper liest nach FirmFail/NACK also immer FW_INFO für den Grund.
+
 ### 2.4 Weg B: RDM (FW_INFO/FW_BEGIN/FW_WRITE/FW_FINISH, 0x8180–0x8183)
 
 PDL-Aufbau in `pids.toml`. Ablauf für `pmnet`/Pixelmapper:
@@ -137,7 +141,10 @@ Art-Net 4 (Rev 1.4dp, S. 77–82, siehe `artnet4-digest.md` §6) schreibt für A
 Ablauf im Node:
 - **FirmFirst** (BlockId 0): Data = Datei-Bytes 0…1023 → enthält Oem-Liste und die Block-Kopie (546…609).
   Prüfung: eigener OEM-Code in der Liste (sonst `OEM`), dann Schritte 1–5 aus 2.3. Fehler → `ArtFirmwareReply`
-  FirmFail, sonst FirmBlockGood. `FirmwareLength` (Worte, inkl. 530-Wort-Header) muss zu `image_length` passen.
+  FirmFail, sonst FirmBlockGood. `FirmwareLength` (Worte, inkl. 530-Wort-Header) muss zu `image_length` passen:
+  `FirmwareLength = 530 + ceil(image_length / 2)`, sonst FirmFail mit **`DESC_MISMATCH`** (geprüft vor den
+  Schritten 1–5, nach der OEM-Liste und `magic`; `pm_artnet_node.c` `fw_first`). Dasselbe gilt für das
+  `.alf`-Feld Length (Offset 1056): ≠ ceil(image_length / 2) → `DESC_MISMATCH` (beim Verarbeiten von Block 1).
 - **FirmCont/FirmLast**: 1024 Byte Datei-Daten pro Block (512 Worte, Spec-Auslegung digest §6.1). Ab Datei-Offset
   1060 werden die Bytes in die OTA-Partition geschrieben. BlockId zählt modulo 256 (Spec schweigt, digest §6.1);
   ein Block mit falscher BlockId → FirmFail.

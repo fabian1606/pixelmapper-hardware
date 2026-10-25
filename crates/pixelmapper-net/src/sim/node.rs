@@ -615,7 +615,7 @@ pub(super) struct Node {
     report_counter: u16,
     outbox: Vec<Outgoing>,
     reported_replies: Vec<Vec<u8>>,
-    reported_settings: Vec<(u16, Vec<u8>)>,
+    pub(super) reported_settings: Vec<(u16, Vec<u8>)>,
     sync_count: u64,
     last_dmx_ip: Option<IpAddr>,
     next_discovery: Instant,
