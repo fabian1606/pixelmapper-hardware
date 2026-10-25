@@ -6,8 +6,9 @@
  * task on core 0. Reads state through pm_ui_model_t callbacks and pm_config, writes settings with
  * pm_config_update(PM_SRC_LOCAL_UI). Never blocks other tasks; events from elsewhere arrive via pm_ui_notify().
  *
- * Sub-modules (Phase 1, inside this component): st7735 driver (pm_ui_lcd_*), fonts (F-M 6x12, F-N 8x16, F-L 16x24),
- * input debouncing/acceleration (pm_ui_input_*), screens/menus (pm_ui_screen_*).
+ * Sub-modules (inside this component, src/): lcd_st7735 (SPI + DMA driver), ui_font (8x16 bold, 6x8), ui_gfx
+ * (display list + 5 KB strip renderer, dirty tiles only), ui_input (encoder acceleration, BACK short/long, lock combo),
+ * ui_rdm (device cache), ui_core (screens/menus, pure C - also built by the host renderer in host/).
  */
 #pragma once
 
@@ -45,6 +46,8 @@ typedef enum {
     PM_UI_EV_FW_PROGRESS,       /**< value = percent, -1 = failed; full-screen during a node update */
     PM_UI_EV_BOOT_CATCH,        /**< port + value = pm_boot_catch_state_t */
     PM_UI_EV_ERROR,             /**< value = code, shown as toast */
+    PM_UI_EV_TUBE_UPDATE,       /**< port + value = percent of a tube update seen on that port (display only),
+                                     -1 = finished/aborted. Optional: main may derive it from forwarded ArtRdm. */
 } pm_ui_event_type_t;
 
 typedef struct {
@@ -62,6 +65,15 @@ esp_err_t pm_ui_init(const pm_board_t *board, const pm_ui_model_t *model);
 esp_err_t pm_ui_start(void);
 /** Post an event (any task, never blocks; dropped when the queue is full). */
 void pm_ui_notify(const pm_ui_event_t *ev);
+
+/** Static facts for the info pages and as RDM source UID of panel requests (call after pm_net_init, any time).
+ *  `fw_version` = version label, copied. */
+void pm_ui_set_node_info(const pm_uid_t *uid, const uint8_t mac[6], const char *fw_version, uint8_t hw_revision);
+
+/** Token range of panel RDM requests: (token & PM_UI_RDM_TOKEN_MASK) == PM_UI_RDM_TOKEN_TAG. main routes
+ *  PM_PORT_EV_RDM_RESPONSE with such a token to pm_ui_notify(PM_UI_EV_RDM_RESPONSE). */
+#define PM_UI_RDM_TOKEN_MASK 0xFFFF0000u
+#define PM_UI_RDM_TOKEN_TAG 0x55490000u
 
 /** True when BACK + push were held at power-on for the factory reset (checked in pm_ui_init). */
 bool pm_ui_factory_reset_requested(void);
