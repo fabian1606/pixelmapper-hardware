@@ -1,0 +1,38 @@
+{
+  "$schema": "../schema.json",
+  "protocol": "artnet",
+  "packet": "ArtDiagData",
+  "vectors": [
+    {
+      "name": "low_general_hello",
+      "description": "DpLow (0x10) diagnostic for LogicalPort 0 (general) with text 'hello'; Length 6 includes the NUL",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtDiagData packet definition p.52-53, DiagPriority Table 5",
+      "hex": "4172742d4e6574000023000e00100000000668656c6c6f00",
+      "valid": true,
+      "fields": {
+        "op_code": 8960,
+        "prot_ver": 14,
+        "diag_priority": 16,
+        "logical_port": 0,
+        "length": 6,
+        "data": "hello"
+      }
+    },
+    {
+      "name": "high_port2_merge",
+      "description": "DpHigh (0x80) diagnostic for LogicalPort 2, longer ASCII text, NUL-terminated",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtDiagData packet definition p.52-53, DiagPriority Table 5",
+      "hex": "4172742d4e6574000023000e008002000027506f727420333a206d65726765207374617274656420283220736f75726365732c204854502900",
+      "valid": true,
+      "fields": {
+        "op_code": 8960,
+        "prot_ver": 14,
+        "diag_priority": 128,
+        "logical_port": 2,
+        "length": 39,
+        "data": "Port 3: merge started (2 sources, HTP)"
+      },
+      "notes": "Length counts the terminating NUL (Data is 'null terminated', max 512 bytes incl. NUL)."
+    }
+  ]
+}

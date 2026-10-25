@@ -1,0 +1,155 @@
+{
+  "$schema": "../schema.json",
+  "protocol": "artnet",
+  "packet": "ArtPollReply",
+  "vectors": [
+    {
+      "name": "bind2_output_pa_0102_merging",
+      "description": "Reply page BindIndex 2: one DMX output port (PortTypes[0] 0x80), Port-Address 0x0102 (Net 1, Sub-Net 0, Universe 2), currently outputting and merging HTP",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtPollReply packet definition p.25-33; protocol/contract.md section 3 (one port per BindIndex)",
+      "hex": "4172742d4e6574000021c0a8013236190001010000ff00e2f07f504d204e6f64650000000000000000000000506978656c6d6170706572204e6f64650000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002330303031205b303030355d20506f776572204f6e205465737473207375636365737366756c00000000000000000000000000000000000000000000000000000001800000000000000088000000000000000200000000000000000000020000123456c0a8013202ce60000000287ff0801234560000002c0000000000000000000000",
+      "valid": true,
+      "fields": {
+        "op_code": 8448,
+        "ip": "192.168.1.50",
+        "port": 6454,
+        "vers_info": 1,
+        "net_switch": 1,
+        "sub_switch": 0,
+        "oem": 255,
+        "ubea_version": 0,
+        "status1": 226,
+        "esta_man": 32752,
+        "short_name": "PM Node",
+        "long_name": "Pixelmapper Node",
+        "node_report": "#0001 [0005] Power On Tests successful",
+        "num_ports": 1,
+        "port_types": [
+          128,
+          0,
+          0,
+          0
+        ],
+        "good_input": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "good_output_a": [
+          136,
+          0,
+          0,
+          0
+        ],
+        "sw_in": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "sw_out": [
+          2,
+          0,
+          0,
+          0
+        ],
+        "acn_priority": 0,
+        "sw_macro": 0,
+        "sw_remote": 0,
+        "style": 0,
+        "mac": "02:00:00:12:34:56",
+        "bind_ip": "192.168.1.50",
+        "bind_index": 2,
+        "status2": 206,
+        "good_output_b": [
+          96,
+          0,
+          0,
+          0
+        ],
+        "status3": 40,
+        "default_resp_uid": "7FF0:80123456",
+        "user": 0,
+        "refresh_rate": 44,
+        "background_queue_policy": 0,
+        "port_address": 258
+      },
+      "notes": "GoodOutputA 0x88 = data output + merging (bit 1 clear = HTP). Status1 0xE2 = indicators normal, Port-Address by network, RDM capable. Status2 0xCE = RDM via ArtAddress, style switchable, 15-bit Port-Address, DHCP capable, IP from DHCP. GoodOutputB 0x60 = RDM enabled, continuous, discovery not running. Status3 0x28 = failsafe hold, programmable failsafe, direction switchable. EstaMan Lo byte first, Port 0x1936 Lo byte first."
+    },
+    {
+      "name": "bind4_input_pa4",
+      "description": "Reply page BindIndex 4: one DMX input port (PortTypes[0] 0x40), Port-Address 4 in SwIn[0], data received",
+      "source": "Art-Net 4 rev 1.4dp (23/10/2025), ArtPollReply packet definition p.25-33; protocol/contract.md section 3 (one port per BindIndex)",
+      "hex": "4172742d4e6574000021c0a8013236190001000000ff00e2f07f504d204e6f64650000000000000000000000506978656c6d6170706572204e6f64650000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002330303031205b303030355d20506f776572204f6e205465737473207375636365737366756c00000000000000000000000000000000000000000000000000000001400000008000000000000000040000000000000000000000000000020000123456c0a8013204cee0000000e87ff0801234560000002c0000000000000000000000",
+      "valid": true,
+      "fields": {
+        "op_code": 8448,
+        "ip": "192.168.1.50",
+        "port": 6454,
+        "vers_info": 1,
+        "net_switch": 0,
+        "sub_switch": 0,
+        "oem": 255,
+        "ubea_version": 0,
+        "status1": 226,
+        "esta_man": 32752,
+        "short_name": "PM Node",
+        "long_name": "Pixelmapper Node",
+        "node_report": "#0001 [0005] Power On Tests successful",
+        "num_ports": 1,
+        "port_types": [
+          64,
+          0,
+          0,
+          0
+        ],
+        "good_input": [
+          128,
+          0,
+          0,
+          0
+        ],
+        "good_output_a": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "sw_in": [
+          4,
+          0,
+          0,
+          0
+        ],
+        "sw_out": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "acn_priority": 0,
+        "sw_macro": 0,
+        "sw_remote": 0,
+        "style": 0,
+        "mac": "02:00:00:12:34:56",
+        "bind_ip": "192.168.1.50",
+        "bind_index": 4,
+        "status2": 206,
+        "good_output_b": [
+          224,
+          0,
+          0,
+          0
+        ],
+        "status3": 232,
+        "default_resp_uid": "7FF0:80123456",
+        "user": 0,
+        "refresh_rate": 44,
+        "background_queue_policy": 0,
+        "port_address": 4
+      },
+      "notes": "GoodInput[0] 0x80 = data received. GoodOutputB[0] 0xE0 = RDM disabled (no RDM on inputs), continuous, discovery not running. Status3 0xE8 = failsafe scene (11), programmable failsafe, direction switchable."
+    }
+  ]
+}
