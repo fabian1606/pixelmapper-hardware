@@ -40,7 +40,10 @@ use crate::image::{NodeImage, TubeImage};
 use crate::link::RdmOptions;
 use crate::pids;
 use crate::rdm::{cc, Uid};
-use crate::state::{merge_replies, reply_node_id, NodeId, NodeState, PortDirection};
+use crate::state::{
+    merge_replies, reply_node_id, report_counter, report_counter_restarted, NodeId, NodeState,
+    PortDirection,
+};
 use rdm_engine::RdmEngine;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -212,6 +215,8 @@ struct State {
     ipprog_waiters: Vec<(SocketAddr, oneshot::Sender<ArtIpProgReply>)>,
     fw_waiters: Vec<(SocketAddr, oneshot::Sender<ArtFirmwareReply>)>,
     tod_waiters: Vec<(TodKey, oneshot::Sender<Vec<Uid>>)>,
+    /// Last NodeReport counter per node (restart detection, contract §6.1).
+    report_counts: HashMap<NodeId, u16>,
 }
 
 pub(crate) struct Inner {
@@ -943,11 +948,21 @@ impl Inner {
         let id = reply_node_id(&r, src);
         let now = Instant::now();
         let mut st = lock(&self.state);
-        // New node, or one that rebooted into other firmware: (re-)subscribe to its TODs.
-        let is_new = st
-            .nodes
-            .get(&id)
-            .is_none_or(|n| n.state.firmware_version != r.vers_info);
+        // New node, one that rebooted into other firmware, or one that restarted (its NodeReport counter went
+        // back; it forgot who requested its TODs, contract §6.1): (re-)subscribe to its TODs.
+        let count = report_counter(&r.node_report);
+        let restarted = match (count, st.report_counts.get(&id)) {
+            (Some(c), Some(&prev)) => report_counter_restarted(prev, c),
+            _ => false,
+        };
+        if let Some(c) = count {
+            st.report_counts.insert(id, c);
+        }
+        let is_new = restarted
+            || st
+                .nodes
+                .get(&id)
+                .is_none_or(|n| n.state.firmware_version != r.vers_info);
         // IP/port change: drop pages of this node from other addresses.
         st.binds.retain(|(a, _), b| !(b.id == id && *a != src));
         // A different node at this address (e.g. replaced device): drop its pages.

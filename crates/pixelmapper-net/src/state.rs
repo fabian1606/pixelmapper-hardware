@@ -373,6 +373,22 @@ pub fn reply_node_id(r: &ArtPollReply, src: SocketAddr) -> NodeId {
     }
 }
 
+/// The ArtPollReply counter of a NodeReport `"#xxxx [yyyy] text"` (Art-Net 4: decimal, counts every
+/// ArtPollReply the node sends, restarts with the node). `None` if the text has no counter.
+pub fn report_counter(node_report: &str) -> Option<u16> {
+    let rest = node_report.strip_prefix('#')?;
+    let open = rest.find('[')?;
+    let close = rest[open..].find(']')? + open;
+    rest[open + 1..close].trim().parse().ok()
+}
+
+/// Whether the NodeReport counter going from `prev` to `now` means the node restarted: it went down, and not
+/// by the wrap-around 9999 -> 1 (a restart close to the wrap is not detected; a reordered reply only causes a
+/// harmless extra ArtTodRequest).
+pub fn report_counter_restarted(prev: u16, now: u16) -> bool {
+    now < prev && !(prev >= 9900 && now <= 100)
+}
+
 /// Ports described by one reply (`NumPorts` ≤ 4 entries).
 pub fn reply_ports(r: &ArtPollReply) -> Vec<PortState> {
     let n = usize::from(r.num_ports.min(4));
@@ -465,6 +481,21 @@ pub fn merge_replies(id: NodeId, replies: &[(SocketAddr, ArtPollReply)]) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_report_counter() {
+        assert_eq!(
+            report_counter("#0001 [0042] Power On Tests successful"),
+            Some(42)
+        );
+        assert_eq!(report_counter("#0001 [9999] x"), Some(9999));
+        assert_eq!(report_counter("no counter"), None);
+        assert_eq!(report_counter(""), None);
+        assert!(report_counter_restarted(57, 1));
+        assert!(!report_counter_restarted(57, 58));
+        assert!(!report_counter_restarted(57, 57));
+        assert!(!report_counter_restarted(9998, 3), "wrap-around");
+    }
 
     fn reply(bind: u8, uni: u8) -> ArtPollReply {
         ArtPollReply {
