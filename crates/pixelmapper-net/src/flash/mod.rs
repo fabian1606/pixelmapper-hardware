@@ -136,7 +136,14 @@ impl Progress {
         let mut c = self.cancel.clone();
         tokio::select! {
             _ = tokio::time::sleep(d) => self.check(),
-            _ = c.wait_for(|v| *v) => Err(Error::Cancelled),
+            r = c.wait_for(|v| *v) => match r {
+                Ok(_) => Err(Error::Cancelled),
+                // sender gone: nobody can cancel any more
+                Err(_) => {
+                    tokio::time::sleep(d).await;
+                    Ok(())
+                }
+            },
         }
     }
 
@@ -201,7 +208,11 @@ impl FlashJob {
                 },
                 Err(Error::Cancelled) => FlashProgress {
                     phase: FlashPhase::Cancelled,
-                    message: "cancelled".into(),
+                    message: if last.message.is_empty() {
+                        "cancelled".into()
+                    } else {
+                        format!("cancelled: {}", last.message)
+                    },
                     error: Some(Error::Cancelled),
                     ..last
                 },
