@@ -1,6 +1,6 @@
 [package]
 name = "pmnet-bridge"
-description = "WebSocket bridge between the Pixelmapper web app and Art-Net 4 / RDM (`pmnet serve`)"
+description = "WebSocket bridge between the Pixelmapper web app and Art-Net 4 / RDM (`pmnet-bridge serve`)"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -16,6 +16,7 @@ path = "src/main.rs"
 bytes = "1"
 clap.workspace = true
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+pixelmapper-net = { path = "../pixelmapper-net" }
 serde.workspace = true
 serde_json.workspace = true
 serde_path_to_error = "0.1"

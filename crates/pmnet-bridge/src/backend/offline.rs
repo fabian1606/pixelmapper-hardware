@@ -1,5 +1,5 @@
-//! A backend without network access: no interfaces, the UDP socket reported as unbound, no nodes. `serve` runs
-//! with it until the `pixelmapper-net` adapter exists, so the app can already connect and handshake.
+//! A backend without network access: no interfaces, the UDP socket reported as unbound, no nodes
+//! (`pmnet-bridge serve --offline`), so the app can connect and handshake without touching the network.
 
 use super::{
     BackendError, DmxFrame, FlashRequest, NetBackend, RdmAddress, RdmRequest, RdmResponse, Snapshot,
@@ -12,8 +12,7 @@ use std::net::Ipv4Addr;
 use tokio::sync::broadcast;
 
 /// Reason reported in `udp.error`.
-pub const OFFLINE_REASON: &str =
-    "no Art-Net backend in this build (pixelmapper-net adapter pending)";
+pub const OFFLINE_REASON: &str = "offline mode (--offline): no Art-Net network access";
 
 /// Backend that never talks to the network.
 #[derive(Debug)]

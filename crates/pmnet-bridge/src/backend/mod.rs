@@ -5,9 +5,10 @@
 //! event fan-out, argument validation against the node table it mirrors from the backend's events).
 //!
 //! Implementations:
+//! - [`pixelmapper_net::PixelmapperNetBackend`]: the real Art-Net 4 / RDM backend on `crates/pixelmapper-net`;
+//!   what `pmnet-bridge serve` runs by default.
 //! - [`mock::MockBackend`]: scriptable, records every call; used by the tests and by `pmnet-bridge serve --mock`.
-//! - [`offline::OfflineBackend`]: no network; what `serve` runs until the real adapter exists.
-//! - [`pixelmapper_net`]: the adapter onto `crates/pixelmapper-net` (TODO, waits for its final API).
+//! - [`offline::OfflineBackend`]: no network (`pmnet-bridge serve --offline`).
 
 use crate::protocol::{
     ArtAddressArgs, BridgeStatus, CommandError, ErrorCode, Event, FirmwareImageInfo, FlashJob,
