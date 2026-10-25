@@ -74,7 +74,7 @@ static void sc_port(void)
     snap("6.3-port-detail-scrolled");
     keys("P");
     snap("6.3-port-advanced");
-    keys("L R1 R1 P");
+    keys("L R1 P");
     F.loss[1] = true;
     F.stats[1].fps = 0;
     sim_run(200);
@@ -143,7 +143,7 @@ static void sc_network(void)
     snap("6.5-network-staged-ip");
     keys("R1 P R-14 P");
     snap("6.5-network-staged-mask");
-    keys("R3 P");
+    keys("R2 P");
     snap("6.8-confirm-network");
     keys("R1 P");
     snap("6.5-network-applied");
@@ -319,6 +319,7 @@ static void sc_update(void)
     snap("6.10-node-firmware-update");
     pm_ui_event_t t = {.type = PM_UI_EV_FW_PROGRESS, .value = -1};
     post_event(t);
+    sim_run(3200); /* let the "failed" toast expire */
     pm_ui_event_t tu = {.type = PM_UI_EV_TUBE_UPDATE, .port = 0, .value = 41};
     post_event(tu);
     sim_run(100);
@@ -397,6 +398,25 @@ static void sc_mute(void)
     snap("display-dimmed-content");
 }
 
+static void sc_regress(void)
+{
+    /* brightness at 5 % must not swallow keys (live preview == dim level) */
+    keys("P R3 P P F-30 W100");
+    snap("regress-brightness-5pct");
+    keys("B");
+    snap("regress-brightness-cancelled");
+    /* locking with the combo closes an open editor */
+    keys("L R1 P P R2");
+    key_combo(3200, false);
+    sim_run(200);
+    snap("regress-lock-closes-editor");
+    printf("    port 1 address after lock: %u (must stay 0)\n", (unsigned)F.settings.port[0].address);
+    /* BACK long on an identifying device page switches identify off */
+    key_combo(3200, false);
+    keys("L R1 P R2 P W800 R1 P W600 P R1 P W300 L W300");
+    printf("    device identify after BACK long: %d (must be 0)\n", F.dev[0][0].identify);
+}
+
 const scene_t g_scenes[] = {
     {"home", "Home: short name, IP + mode, 4 ports (6.1), also in 15-bit address format.", sc_home},
     {"home_cursor", "Home cursor after the first detents, port 2 lost its data (yellow, blinking).", sc_home_cursor},
@@ -427,6 +447,7 @@ const scene_t g_scenes[] = {
     {"lock", "Panel locked by Pixelmapper, edit attempt, unlock with BACK + push 3 s (6.11).", sc_lock},
     {"identify", "Identify / Art-Net Locate: the status bar blinks (6.12).", sc_identify},
     {"menus", "Main menu, display, node, system, info and event pages (4.2).", sc_menus},
+    {"regress", "Review regressions: 5 % brightness, lock closes editors, identify off on BACK long.", sc_regress},
     {"mute", "Art-Net LED Mute switches the display off; dimming after the timeout.", sc_mute},
 };
 const int g_num_scenes = (int)(sizeof(g_scenes) / sizeof(g_scenes[0]));

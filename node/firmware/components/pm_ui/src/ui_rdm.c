@@ -75,6 +75,16 @@ static bool queued(uint8_t port, const pm_uid_t *uid, uint8_t cc, uint16_t pid)
 static void enqueue(uint8_t port, const pm_uid_t *uid, uint8_t cc, uint16_t pid, const void *pd, uint8_t pdl)
 {
     if (cc == PM_RDM_CC_GET && queued(port, uid, cc, pid) && pdl == 0) return;
+    if (R.q_n >= QLEN && cc == PM_RDM_CC_SET) {
+        /* SETs from the operator win over background GETs: drop the oldest GET */
+        for (int i = 0; i < R.q_n; i++) {
+            if (R.q[i].cc == PM_RDM_CC_GET) {
+                memmove(&R.q[i], &R.q[i + 1], sizeof(req_t) * (size_t)(R.q_n - i - 1));
+                R.q_n--;
+                break;
+            }
+        }
+    }
     if (R.q_n >= QLEN) return;
     req_t *r = &R.q[R.q_n++];
     r->port = port;
@@ -113,6 +123,9 @@ ui_rdm_dev_t *ui_rdm_dev(uint8_t port, const pm_uid_t *uid)
 void ui_rdm_set_identify(ui_rdm_dev_t *d, bool on)
 {
     uint8_t v = on ? 1 : 0;
+    /* requested state counts (so leaving the page always sends OFF, even while the ON is still in flight) */
+    if (on) d->flags |= UI_RDM_IDENTIFY;
+    else d->flags &= (uint8_t)~UI_RDM_IDENTIFY;
     enqueue(d->port, &d->uid, PM_RDM_CC_SET, PM_RDM_PID_IDENTIFY_DEVICE, &v, 1);
 }
 
@@ -164,14 +177,19 @@ bool ui_rdm_busy(const ui_rdm_dev_t *d, uint16_t pid)
 
 void ui_rdm_forget(uint8_t port)
 {
-    for (int i = 0; i < UI_RDM_CACHE; i++) {
-        if (port == 0xFF || R.dev[i].port == port) memset(&R.dev[i], 0, sizeof(R.dev[i]));
-    }
     uint8_t k = 0;
     for (uint8_t i = 0; i < R.q_n; i++) {
         if (port != 0xFF && R.q[i].port != port) R.q[k++] = R.q[i];
     }
     R.q_n = k;
+    for (int i = 0; i < UI_RDM_CACHE; i++) {
+        if (R.dev[i].used && (port == 0xFF || R.dev[i].port == port) && (R.dev[i].flags & UI_RDM_IDENTIFY)) {
+            ui_rdm_set_identify(&R.dev[i], false); /* still sent after the cache entry is gone */
+        }
+    }
+    for (int i = 0; i < UI_RDM_CACHE; i++) {
+        if (port == 0xFF || R.dev[i].port == port) memset(&R.dev[i], 0, sizeof(R.dev[i]));
+    }
 }
 
 ui_rdm_res_t ui_rdm_take_result(uint16_t *pid)
@@ -211,18 +229,18 @@ static void finish(ui_rdm_res_t res)
 {
     R.inflight = false;
     ui_rdm_dev_t *d = ui_rdm_find(R.cur.port, &R.cur.uid);
-    if (res != UI_RDM_RES_OK && d) {
+    if (res == UI_RDM_RES_TIMEOUT && d) { /* NACK = the device answers: not "failed" */
         d->flags |= UI_RDM_FAILED;
         if (!d->fetched_ms) d->fetched_ms = R.now ? R.now : 1;
     }
     if (R.cur.cc == PM_RDM_CC_SET) {
         R.result = res;
         R.result_pid = R.cur.pid;
+        if (res != UI_RDM_RES_OK && d && R.cur.pid != PM_RDM_PID_IDENTIFY_DEVICE) {
+            /* the optimistic value shown by the panel may be wrong now */
+            enqueue(d->port, &d->uid, PM_RDM_CC_GET, PM_RDM_PID_DEVICE_INFO, NULL, 0);
+        }
         if (res == UI_RDM_RES_OK && d) {
-            if (R.cur.pid == PM_RDM_PID_IDENTIFY_DEVICE) {
-                if (R.cur.pd[0]) d->flags |= UI_RDM_IDENTIFY;
-                else d->flags &= (uint8_t)~UI_RDM_IDENTIFY;
-            }
             if (R.cur.pid == PM_RDM_PID_DMX_START_ADDRESS || R.cur.pid == PM_RDM_PID_DMX_PERSONALITY) {
                 enqueue(d->port, &d->uid, PM_RDM_CC_GET, PM_RDM_PID_DEVICE_INFO, NULL, 0);
             }
@@ -262,7 +280,12 @@ void ui_rdm_on_response(uint32_t token, const uint8_t *buf, uint16_t len)
     uint8_t resp = buf[16], pdl = buf[23];
     uint16_t pid = pm_get_be16(&buf[21]);
     const uint8_t *pd = &buf[24];
-    if (pdl + 24u > mlen || pid != R.cur.pid || resp != PM_RDM_RESP_ACK) {
+    if (pdl + 24u > mlen || pid != R.cur.pid || buf[20] != R.cur.cc + 1u || resp != PM_RDM_RESP_ACK) {
+        ui_rdm_dev_t *dn = ui_rdm_find(R.cur.port, &R.cur.uid);
+        if (dn && R.cur.cc == PM_RDM_CC_GET && R.cur.pid == PM_RDM_PID_DEVICE_LABEL) {
+            dn->label[0] = '\0'; /* DEVICE_LABEL is optional: NACK = no label */
+            dn->flags |= UI_RDM_HAVE_LABEL;
+        }
         finish(UI_RDM_RES_NACK);
         return;
     }

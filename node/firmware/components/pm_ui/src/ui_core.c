@@ -200,7 +200,8 @@ static struct {
 
     /* display */
     uint32_t last_input, wake_t, edit_t;
-    bool muted, locate, identify, lock_remote, woke_once;
+    bool muted, locate, identify, lock_remote, dimmed;
+    uint32_t restart_t;
     uint8_t backlight;
     bool panel_on;
     bool force;
@@ -614,8 +615,18 @@ static void open_dialog(uint8_t action, const char *title, bool danger)
     push_frame(S_CONFIRM, 0, 0);
 }
 
+/** Switch off every RDM identify the panel started (leaving the device page in any way ends it). */
+static void identify_devices_off(void)
+{
+    for (int i = 0; i < UI_RDM_CACHE; i++) {
+        const ui_rdm_dev_t *d = ui_rdm_cache_at(i);
+        if (d && (d->flags & UI_RDM_IDENTIFY)) ui_rdm_set_identify((ui_rdm_dev_t *)d, false);
+    }
+}
+
 static void go_home(void)
 {
+    identify_devices_off();
     U.depth = 0;
     U.ed.active = false;
     U.home_cur = -1;
@@ -643,10 +654,17 @@ static void net_apply(void)
     log_add("Network applied");
 }
 
+static void close_editors(void);
+
 static void dialog_execute(void)
 {
     dialog_t *d = &U.dlg;
     uint8_t action = d->action;
+    if (locked() && action != A_NET_LEAVE) {
+        close_editors();
+        show_lock();
+        return;
+    }
     pop_frame(); /* the dialog */
     switch (action) {
     case A_APPLY_FIELD:
@@ -664,7 +682,8 @@ static void dialog_execute(void)
         toast(UI_C_WHITE, "P%u scene recorded", d->port + 1u);
         break;
     case A_RESET_PORT: {
-        pm_settings_t *s = &U.tmp, def;
+        static pm_settings_t def; /* 2.4 KB: not on the UI task stack */
+        pm_settings_t *s = &U.tmp;
         settings_fresh(s);
         pm_settings_defaults(&def);
         s->port[d->port] = def.port[d->port];
@@ -674,8 +693,8 @@ static void dialog_execute(void)
         break;
     }
     case A_RESTART:
-        if (U.plat.restart) U.plat.restart(U.plat.ctx);
         toast(UI_C_WHITE, "Restarting" UI_G_ELLIPSIS);
+        U.restart_t = U.now ? U.now : 1; /* restart after this frame reached the panel (tick) */
         break;
     case A_FACTORY_DO:
         if (U.plat.factory_reset) U.plat.factory_reset(U.plat.ctx, d->value != 0);
@@ -1020,6 +1039,7 @@ static void build(const frame_t *f)
         break;
     }
     case L_EVENTS:
+        U.sys_error = false; /* the event list has been seen */
         if (!U.log_n) add_info("No events", NULL, UI_C_GRAY);
         for (int i = 0; i < U.log_n; i++) {
             int k = (U.log_head - 1 - i + LOG_N) % LOG_N;
@@ -1791,6 +1811,10 @@ static void inline_key(const ui_key_t *k)
         U.edit_t = U.now;
     } else if (k->type == UI_KEY_PUSH) {
         U.ed.active = false;
+        if (locked()) {
+            show_lock();
+            return;
+        }
         if (e->value != e->orig || e->value != fget(e->field, e->port)) fapply_confirm(e->field, e->port, e->value, 0);
         else U.flash_t = U.now;
     } else if (k->type == UI_KEY_BACK) {
@@ -1928,10 +1952,7 @@ static void list_rot(frame_t *f, int steps)
 static void leave_frame(void)
 {
     frame_t *f = top();
-    if (f->scr == S_LIST && f->list == L_DEV) {
-        ui_rdm_dev_t *d = ui_rdm_find(f->port, &f->uid);
-        if (d && (d->flags & UI_RDM_IDENTIFY)) ui_rdm_set_identify(d, false); /* identify ends with the page */
-    }
+    if (f->scr == S_LIST && f->list == L_DEV) identify_devices_off(); /* identify ends with the page */
     if (f->scr == S_LIST && f->list == L_NET && U.net_staged) {
         open_dialog(A_NET_LEAVE, "Network changes", false);
         snprintf(U.dlg.line[0], sizeof(U.dlg.line[0]), "Network settings");
@@ -1971,6 +1992,11 @@ static void addr_key(const ui_key_t *k)
                 pop_frame();
                 return;
             }
+            if (locked()) {
+                close_editors();
+                show_lock();
+                return;
+            }
             fapply_confirm(F_P_ADDR, e->port, e->pa, 1);
         } else if (e->mode == AE_SELECT) {
             e->mode = AE_FIELD;
@@ -2007,6 +2033,11 @@ static void ip_key(const ui_key_t *k)
                 return;
             }
             uint32_t v = ((uint32_t)e->oct[0] << 24) | ((uint32_t)e->oct[1] << 16) | ((uint32_t)e->oct[2] << 8) | e->oct[3];
+            if (locked()) {
+                close_editors();
+                show_lock();
+                return;
+            }
             fapply(e->field, 0, (int32_t)v);
             pop_frame();
         } else if (e->mode == AE_SELECT) {
@@ -2024,6 +2055,11 @@ static void ip_key(const ui_key_t *k)
 static void text_apply(void)
 {
     text_edit_t *e = &U.te;
+    if (locked()) {
+        close_editors();
+        show_lock();
+        return;
+    }
     if (strcmp(e->text, e->orig) != 0) {
         if (e->field == F_D_LABEL) {
             ui_rdm_dev_t *d = frame_dev(&U.stack[U.depth - 1]);
@@ -2121,6 +2157,13 @@ static bool editing_open(void)
     return U.ed.active || s == S_ADDR || s == S_IP || s == S_TEXT;
 }
 
+/** Close inline edits, full-screen editors and dialogs (panel locked): back to the list below them. */
+static void close_editors(void)
+{
+    inline_cancel();
+    while (U.depth > 0 && top()->scr != S_LIST) pop_frame();
+}
+
 static void handle_key(const ui_key_t *k)
 {
     U.last_input = U.now;
@@ -2129,7 +2172,7 @@ static void handle_key(const ui_key_t *k)
         U.muted = false;
         return;
     }
-    if (U.backlight < U.s.display_level && U.backlight <= DIM_LEVEL && U.s.display_dim_timeout_s) {
+    if (U.dimmed) {
         if (k->type != UI_KEY_COMBO) {
             U.wake_t = U.now;
             return;
@@ -2148,7 +2191,7 @@ static void handle_key(const ui_key_t *k)
         U.lock_remote = false;
         U.lock_overlay_t = 0;
         if (s->panel_lock) {
-            inline_cancel();
+            close_editors();
             toast(UI_C_WHITE, UI_G_LOCK " Panel locked");
             log_add("Panel locked");
         } else {
@@ -2252,7 +2295,7 @@ static void check_conflict(pm_change_mask_t m)
         fmt_pa(v, sizeof(v), U.s.port[U.ae.port].address, U.s.address_format);
     } else if (f->scr == S_TEXT && U.te.field != F_D_LABEL && (m & PM_CHG_NAMES)) {
         snprintf(v, sizeof(v), "%.17s", U.te.field == F_SHORT ? U.s.short_name : U.s.long_name);
-    } else if (U.net_staged && (m & PM_CHG_IP)) {
+    } else if ((U.net_staged || f->scr == S_IP) && (m & PM_CHG_IP)) {
         if (U.s.ip.dhcp) snprintf(v, sizeof(v), "DHCP");
         else fmt_ip(v, sizeof(v), U.s.ip.static_ip);
     } else {
@@ -2272,10 +2315,7 @@ static void on_settings_changed(int32_t src)
     if (m & PM_CHG_PANEL_LOCK) {
         U.lock_remote = n->panel_lock && remote;
         if (n->panel_lock && remote) {
-            inline_cancel();
-            if (editing_open()) {
-                while (U.depth > 0 && editing_open()) pop_frame();
-            }
+            close_editors();
             log_add("Locked by Pixelmapper");
         }
     }
@@ -2376,6 +2416,7 @@ static void update_backlight(void)
     uint32_t idle = U.now - U.last_input;
     bool dim = U.s.display_dim_timeout_s && idle > (uint32_t)U.s.display_dim_timeout_s * 1000u &&
                !since(U.wake_t, WAKE_MS) && U.fw_pct < 0;
+    U.dimmed = dim;
     if (dim && lvl > DIM_LEVEL) lvl = DIM_LEVEL;
     bool on = !U.muted;
     if (!on) lvl = 0;
@@ -2450,6 +2491,10 @@ uint32_t ui_core_tick(void)
         dialog_execute();
     }
     if (ui_input_combo_ms(&U.in, U.now)) U.last_input = U.now;
+    if (U.restart_t && U.now - U.restart_t > 300 && U.plat.restart) {
+        U.restart_t = 0;
+        U.plat.restart(U.plat.ctx);
+    }
     ui_rdm_tick(U.now);
     uint16_t pid;
     ui_rdm_res_t r = ui_rdm_take_result(&pid);

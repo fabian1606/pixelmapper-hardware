@@ -59,6 +59,7 @@ static struct {
     uint8_t push_cnt, back_cnt;
     bool push, back;
     bool factory_reset;
+    uint32_t settings_flags; /* SETTINGS_CHANGED never gets lost in a full queue: bit 0 local, bit 1 remote */
     portMUX_TYPE info_lock;
     ui_node_info_t info;
     bool info_dirty;
@@ -102,8 +103,7 @@ static void p_restart(void *ctx)
 {
     (void)ctx;
     pm_config_flush();
-    vTaskDelay(pdMS_TO_TICKS(300)); /* let the "Restarting" frame reach the panel */
-    esp_restart();
+    esp_restart(); /* ui_core calls this ~300 ms after the "Restarting" frame */
 }
 
 static void p_factory(void *ctx, bool keep_network)
@@ -257,6 +257,12 @@ static void ui_task(void *arg)
             taskEXIT_CRITICAL(&S.info_lock);
             ui_core_set_info(&info);
         }
+        uint32_t sf = __atomic_exchange_n(&S.settings_flags, 0u, __ATOMIC_ACQ_REL);
+        if (sf) {
+            pm_ui_event_t ev = {.type = PM_UI_EV_SETTINGS_CHANGED,
+                                .value = (sf & 2u) ? PM_SRC_ARTNET /* any remote source */ : PM_SRC_LOCAL_UI};
+            ui_core_event(&ev);
+        }
         while (xQueueReceive(S.q, &msg, 0) == pdTRUE) {
             if (msg.ev.len) msg.ev.data = msg.data; /* the copy in the queue item */
             ui_core_event(&msg.ev);
@@ -273,7 +279,8 @@ esp_err_t pm_ui_init(const pm_board_t *board, const pm_ui_model_t *model)
     if (model) S.model = *model;
     S.q = xQueueCreate(UI_QUEUE_LEN, sizeof(ui_msg_t));
     if (!S.q) return ESP_ERR_NO_MEM;
-    S.strip = heap_caps_malloc(sizeof(uint16_t) * UI_W * UI_STRIP_H, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    /* cache-line aligned so spi_master can DMA from it without a bounce buffer */
+    S.strip = heap_caps_aligned_alloc(64, sizeof(uint16_t) * UI_W * UI_STRIP_H, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
     if (!S.strip) return ESP_ERR_NO_MEM;
 
     const pm_board_display_pins_t *d = &board->display;
@@ -301,7 +308,10 @@ esp_err_t pm_ui_init(const pm_board_t *board, const pm_ui_model_t *model)
             }
             vTaskDelay(pdMS_TO_TICKS(20));
         }
-        while (read_btn(board->input.back) || read_btn(board->input.enc_push)) vTaskDelay(pdMS_TO_TICKS(20));
+        /* wait for the release, but never hang on a stuck/shorted button */
+        for (int i = 0; i < 250 && (read_btn(board->input.back) || read_btn(board->input.enc_push)); i++) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
     }
 
     static ui_node_info_t info;
@@ -324,7 +334,12 @@ esp_err_t pm_ui_start(void)
 
 void pm_ui_notify(const pm_ui_event_t *ev)
 {
-    if (!S.q || !ev) return;
+    if (!ev) return;
+    if (ev->type == PM_UI_EV_SETTINGS_CHANGED) {
+        __atomic_fetch_or(&S.settings_flags, ev->value == PM_SRC_LOCAL_UI ? 1u : 2u, __ATOMIC_ACQ_REL);
+        return;
+    }
+    if (!S.q) return;
     ui_msg_t m; /* ~290 B on the caller's stack; the queue copies it */
     m.ev = *ev;
     m.ev.data = NULL;

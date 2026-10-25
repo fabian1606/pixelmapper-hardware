@@ -282,6 +282,16 @@ Main menu, display, node, system, info and event pages (4.2).
 | `4.2-events.png` | ![](4.2-events.png) |
 | `4.2-network-info.png` | ![](4.2-network-info.png) |
 
+## regress
+
+Review regressions: 5 % brightness, lock closes editors, identify off on BACK long.
+
+| file | screen |
+|---|---|
+| `regress-brightness-5pct.png` | ![](regress-brightness-5pct.png) |
+| `regress-brightness-cancelled.png` | ![](regress-brightness-cancelled.png) |
+| `regress-lock-closes-editor.png` | ![](regress-lock-closes-editor.png) |
+
 ## mute
 
 Art-Net LED Mute switches the display off; dimming after the timeout.
