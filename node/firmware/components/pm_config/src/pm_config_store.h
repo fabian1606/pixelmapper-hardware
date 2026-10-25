@@ -41,7 +41,7 @@
  * Schema history:
  *   v0  pre-release prototype builds: DISPLAY_LEVEL stored in percent (0..100), one node-wide failsafe mode
  *       (tag 0x0030) instead of per port.
- *   v1  current.
+ *   v1  current. Phase 2 added the port tag PM_CFG_PTAG_DMX_MBS (new tag, no bump: older blobs read as 0 us).
  */
 #pragma once
 
@@ -89,6 +89,7 @@ enum {
     PM_CFG_PTAG_DMX_BREAK = 0x09,
     PM_CFG_PTAG_DMX_MAB = 0x0A,
     PM_CFG_PTAG_DMX_RATE = 0x0B,
+    PM_CFG_PTAG_DMX_MBS = 0x0C,     /**< u16 us; missing in blobs before Phase 2 -> default 0 (no schema bump) */
 
     PM_CFG_TAG_SCENE_DATA = 0x0001, /**< scene blob: the scene_len bytes of the failsafe scene */
 };
@@ -100,7 +101,7 @@ enum {
     (PM_CONFIG_STORE_HDR_LEN + 2u * PM_CONFIG_STORE_REC_HDR_LEN + (PM_SHORT_NAME_LEN - 1u) +           \
      (PM_LONG_NAME_LEN - 1u) + 4u * PM_CONFIG_STORE_REC_HDR_LEN + 1u + 3u * 4u +                        \
      6u * PM_CONFIG_STORE_REC_HDR_LEN + 2u + 1u + 2u + 1u + 1u + 1u +                                   \
-     PM_NUM_PORTS * (11u * PM_CONFIG_STORE_REC_HDR_LEN + 8u * 1u + 3u * 2u))
+     PM_NUM_PORTS * (12u * PM_CONFIG_STORE_REC_HDR_LEN + 8u * 1u + 4u * 2u))
 /** Upper bound of an encoded scene blob. */
 #define PM_CONFIG_STORE_SCENE_MAX (PM_CONFIG_STORE_HDR_LEN + PM_CONFIG_STORE_REC_HDR_LEN + 512u)
 
@@ -136,6 +137,16 @@ pm_err_t pm_config_store_decode_scene(const uint8_t *buf, size_t len, pm_port_se
  * @return true when found; *val / *val_len point into `payload`.
  */
 bool pm_config_store_find(const uint8_t *payload, size_t len, uint16_t tag, const uint8_t **val, uint16_t *val_len);
+
+/**
+ * Prepare `next` for becoming the current settings: sanitize, normalize (zero the scene tail beyond scene_len and
+ * the IP struct padding, so equal settings compare equal), set the layout version. Returns the change mask against
+ * `cur` (pm_settings_diff, 0 = nothing changed). Used by pm_config_update()/pm_config_modify().
+ */
+pm_change_mask_t pm_config_store_prepare(pm_settings_t *next, const pm_settings_t *cur);
+
+/** Zero the scene tail beyond scene_len and the padding of pm_ip_settings_t (part of prepare, also used at load). */
+void pm_config_store_normalize(pm_settings_t *s);
 
 /** Read a 1..4 byte little-endian unsigned record value. Returns false for other lengths. */
 bool pm_config_store_get_uint(const uint8_t *val, uint16_t val_len, uint32_t *out);

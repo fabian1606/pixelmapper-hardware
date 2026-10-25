@@ -68,7 +68,12 @@ typedef struct {
  *   write(off)   -> sequential bytes of the ESP-IDF binary; off < received is accepted as retransmission
  *   finish()     -> length/CRC/esp_ota_end/set boot partition; on success the caller answers and then calls
  *                   reboot() ~500 ms later
- *   abort()      -> drop the session (timeout, new session)
+ *   abort(r)     -> drop the session (timeout, new session): RECEIVING -> FAILED with last_error = r (IDLE when
+ *                   r = NONE). Also allowed while no session runs (IDLE/FAILED): with r != NONE it only sets
+ *                   FAILED + last_error = r, so an update rejected before begin() (e.g. .alf OEM list, FirmwareLength,
+ *                   description block in the first ArtFirmwareMaster block) shows up in FW_INFO. Ignored in
+ *                   VERIFYING/READY. Callers must not use it to report their own rejection while another source's
+ *                   session is RECEIVING (check status() first).
  */
 typedef struct pm_fw_sink {
     void *ctx;

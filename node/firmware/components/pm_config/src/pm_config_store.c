@@ -102,6 +102,7 @@ size_t pm_config_store_encode_main(const pm_settings_t *s, uint8_t *buf, size_t 
         put_u16(&w, PM_CFG_TAG_PORT(i, PM_CFG_PTAG_DMX_BREAK), p->dmx_break_us);
         put_u16(&w, PM_CFG_TAG_PORT(i, PM_CFG_PTAG_DMX_MAB), p->dmx_mab_us);
         put_u8(&w, PM_CFG_TAG_PORT(i, PM_CFG_PTAG_DMX_RATE), p->dmx_rate_hz);
+        put_u16(&w, PM_CFG_TAG_PORT(i, PM_CFG_PTAG_DMX_MBS), p->dmx_mbs_us);
     }
     return finish(&w, PM_CONFIG_STORE_MAGIC_MAIN);
 }
@@ -224,6 +225,7 @@ static void apply_main(void *ctx, uint16_t tag, const uint8_t *val, uint16_t len
         case PM_CFG_PTAG_DMX_BREAK: SET_UINT(p->dmx_break_us, 0xFFFFu); break;
         case PM_CFG_PTAG_DMX_MAB: SET_UINT(p->dmx_mab_us, 0xFFFFu); break;
         case PM_CFG_PTAG_DMX_RATE: SET_UINT(p->dmx_rate_hz, 0xFFu); break;
+        case PM_CFG_PTAG_DMX_MBS: SET_UINT(p->dmx_mbs_us, 0xFFFFu); break;
         default: break; /* unknown port field: skip */
         }
         return;
@@ -318,4 +320,30 @@ pm_err_t pm_config_store_decode_scene(const uint8_t *buf, size_t len, pm_port_se
     if (err != PM_OK) return err;
     walk(payload, n, apply_scene, p);
     return PM_OK;
+}
+
+/* ------------------------------------------------------------------------------------------------ update helpers */
+
+void pm_config_store_normalize(pm_settings_t *s)
+{
+    pm_ip_settings_t ip;
+    memset(&ip, 0, sizeof(ip));
+    ip.dhcp = s->ip.dhcp;
+    ip.static_ip = s->ip.static_ip;
+    ip.static_mask = s->ip.static_mask;
+    ip.gateway = s->ip.gateway;
+    s->ip = ip;
+    for (unsigned i = 0; i < PM_NUM_PORTS; i++) {
+        pm_port_settings_t *p = &s->port[i];
+        if (p->scene_len > sizeof(p->scene)) p->scene_len = (uint16_t)sizeof(p->scene);
+        memset(&p->scene[p->scene_len], 0, sizeof(p->scene) - p->scene_len);
+    }
+}
+
+pm_change_mask_t pm_config_store_prepare(pm_settings_t *next, const pm_settings_t *cur)
+{
+    pm_settings_sanitize(next);
+    pm_config_store_normalize(next);
+    next->version = PM_SETTINGS_VERSION;
+    return pm_settings_diff(cur, next);
 }

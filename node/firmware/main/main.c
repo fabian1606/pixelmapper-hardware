@@ -1,22 +1,33 @@
 /*
- * main.c - wiring of the Pixelmapper Node.
+ * main.c - ESP-IDF adapter of the Pixelmapper Node: boots the components and implements pm_node_ops_t on top of
+ * pm_config / pm_port / pm_net / pm_ota / pm_ui. The platform-independent wiring (RDM routing, event dispatch,
+ * settings fan-out, identify mirroring, tube-update display, live port state) lives in components/pm_node.
  *
  * Core assignment (docs/plan.md "Firmware-Architektur", CLAUDE.md):
  *   core 1: pm_port engine only (DMX/RDM line timing, discovery, ArtSync commit) - started by pm_port_start()
- *   core 0: pm_net network task (pm_artnet + RDM responder + pm_port event drain, single-threaded),
- *           pm_config writer task, pm_ota (runs in the network task), pm_ui task (lowest)
+ *   core 0: pm_net network task (pm_node = pm_artnet + RDM responder, single-threaded), pm_config writer task,
+ *           pm_ota (runs in the network task), pm_ui task (lowest, 6 KB stack)
  *
- * Threading rule: pm_artnet and the RDM responder are NOT thread-safe. Everything that touches them runs in the
- * network task: UDP rx, the 10 ms tick, pm_port events (drained in the tick, non-blocking), settings changes
- * (listener -> pm_net_post), front-panel RDM requests (pm_net_post), OTA progress (sink runs there anyway).
+ * Threading rule: pm_node (and with it pm_artnet and the responder) is NOT thread-safe. Everything that touches it
+ * runs in the network task:
+ *   - UDP rx (pm_net -> net_rx -> pm_node_handle_packet, with the destination address from IP_PKTINFO)
+ *   - the tick (10 ms, 1 ms while RDM requests are in flight on a line): pm_port events (non-blocking drain) ->
+ *     pm_node_port_event, pm_node_tick (pm_artnet_tick, pm_rdm_responder_poll, live snapshot), pm_ota_poll
+ *   - settings changes: the pm_config listener runs in the WRITER's task (UI task, network task, ...) inside the
+ *     config lock. It only ORs the mask into s_chg_pending[src] and posts work_settings_changed once (coalesced,
+ *     no allocation per change); the network task then calls pm_node_settings_changed per source, which does
+ *     pm_port_configure, pm_net_apply_ip (not for ArtIpProg/RDM sources), the responder's queued messages,
+ *     pm_artnet_settings_changed and the UI notification.
+ *   - front panel: RDM requests (fixed slot pool, pm_net_post) and identify (pm_net_post) -> pm_node
+ *   - OTA progress: the sink runs in the network task, its listener -> pm_node_fw_progress (+ config flush)
+ * Data for other tasks leaves the network task as copies: pm_ui_notify (copies), the live port snapshot (s_live,
+ * spinlock), pm_net_get_status / pm_port_get_stats / pm_port_tod_get (thread-safe component APIs).
  *
- * Data flow:
- *   UDP -> pm_net task -> pm_artnet_handle_packet -> ops (this file) -> pm_port / pm_config / pm_ota / responder
- *   pm_port events (core 1 queue) -> net_tick -> pm_artnet_* (TOD, RDM response, input) / responder / pm_ui
- *   pm_config listener (caller's task) -> pm_port_configure, pm_net_apply_ip, pm_ui_notify (all thread-safe)
- *                                      -> pm_net_post -> pm_artnet_settings_changed / pm_rdm_responder_settings_changed
+ * Writes from the network side use pm_config_modify (read-modify-write under the config lock, only the fields of
+ * the change mask), so a panel change that is stored but not yet distributed is never overwritten.
  */
-#include <stdlib.h>
+#include <stdalign.h>
+#include <stddef.h>
 #include <string.h>
 
 #include "esp_heap_caps.h"
@@ -27,31 +38,31 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
-#include "pm_artnet.h"
 #include "pm_board.h"
 #include "pm_config.h"
 #include "pm_net.h"
+#include "pm_node.h"
 #include "pm_ota.h"
 #include "pm_pids.h"
 #include "pm_port.h"
-#include "pm_rdm_responder.h"
 #include "pm_ui.h"
 
 static const char *TAG = "pm_main";
 
 #define FW_VERSION_ID PM_FW_VERSION_ID(PM_FW_VERSION_MAJOR, PM_FW_VERSION_MINOR, PM_FW_VERSION_PATCH)
 #define NET_TICK_MS 10u
+#define NET_TICK_FAST_MS 1u      /* while pm_node_busy(): RDM responses come back within a few ms */
 #define PORT_EVENTS_PER_TICK 16
 #define OTA_POLL_MS 1000u
 #define MARK_VALID_AFTER_US (30ull * 1000 * 1000)
 #define RESET_DELAY_US (500ull * 1000)
-/** RDM tokens of front-panel requests (responses go to pm_ui instead of pm_artnet). pm_artnet's tokens must keep
- *  this bit clear (interface request in the Phase-1 report). */
-#define UI_TOKEN_FLAG 0x80000000u
+#define UI_RDM_SLOTS 4           /* panel RDM requests in flight to the network task */
+
+_Static_assert((PM_UI_RDM_TOKEN_TAG & PM_NODE_UI_TOKEN_FLAG) == 0 && (PM_UI_RDM_TOKEN_MASK & 0x80000000u) != 0,
+               "panel RDM tokens must keep bit 31 clear: pm_node tags them with it on the line");
 
 static pm_uid_t s_uid;
-static pm_artnet_node_t *s_artnet;
-static pm_rdm_responder_t *s_responder;
+static pm_node_t *s_node;
 static bool s_net_ok;
 static bool s_port_ok;
 
@@ -69,27 +80,39 @@ static uint32_t rnd(void *ctx)
     return esp_random();
 }
 
-static pm_port_cfg_t port_cfg_from(const pm_settings_t *s, pm_port_idx_t i)
+static pm_port_cfg_t to_port_cfg(const pm_node_port_cfg_t *n)
 {
-    const pm_port_settings_t *p = &s->port[i];
     pm_port_cfg_t c = {
-        .mode = !p->enabled ? PM_PORT_MODE_OFF
-                            : (p->direction == PM_PORT_DIR_INPUT ? PM_PORT_MODE_INPUT : PM_PORT_MODE_OUTPUT),
-        .rdm_enabled = p->rdm_enabled,
-        .rdm_bg_discovery = p->rdm_bg_discovery,
-        .rdm_bg_interval_ms = (uint32_t)s->rdm_bg_interval_s * 1000u,
-        .break_us = p->dmx_break_us,
-        .mab_us = p->dmx_mab_us,
-        .rate_hz = p->dmx_rate_hz,
-        .continuous = p->output_style == PM_OUTPUT_CONTINUOUS,
+        .mode = n->mode == PM_NODE_PORT_OUTPUT ? PM_PORT_MODE_OUTPUT
+                                               : (n->mode == PM_NODE_PORT_INPUT ? PM_PORT_MODE_INPUT : PM_PORT_MODE_OFF),
+        .rdm_enabled = n->rdm_enabled,
+        .rdm_bg_discovery = n->rdm_bg_discovery,
+        .rdm_bg_interval_ms = n->rdm_bg_interval_ms,
+        .break_us = n->break_us,
+        .mab_us = n->mab_us,
+        .rate_hz = n->rate_hz,
+        .continuous = n->continuous,
+        .mbs_us = n->mbs_us,
     };
     return c;
 }
 
-static void ui_event(pm_ui_event_type_t type, pm_port_idx_t port, int32_t value)
+static pm_port_cfg_t port_cfg_from(const pm_settings_t *s, pm_port_idx_t i)
 {
-    pm_ui_event_t ev = {.type = type, .port = port, .value = value};
-    pm_ui_notify(&ev);
+    pm_node_port_cfg_t n;
+    pm_node_port_cfg_from(s, i, &n);
+    return to_port_cfg(&n);
+}
+
+static pm_err_t from_esp(esp_err_t e)
+{
+    switch (e) {
+    case ESP_OK: return PM_OK;
+    case ESP_ERR_NO_MEM: return PM_ERR_FULL;
+    case ESP_ERR_INVALID_ARG: return PM_ERR_INVALID_ARG;
+    case ESP_ERR_INVALID_STATE: return PM_ERR_STATE;
+    default: return PM_ERR_IO;
+    }
 }
 
 /** Restart after a delay (RESET_DEVICE: the RDM response must leave first). Config is flushed by the shutdown
@@ -111,50 +134,33 @@ static void restart_later(void)
     esp_timer_start_once(t, RESET_DELAY_US);
 }
 
-/* ------------------------------------------------------------------------------------------------ RDM routing */
+/* ------------------------------------------------------------------------------------------------ pm_node ops */
 
-/**
- * Route one RDM request (wire bytes incl. start code) - network task only.
- * To the node UID (or a broadcast that includes it) -> responder; everything else -> DMX line of `port`.
- * `reply` receives the responder's answer (wire bytes) when there is one.
- */
-static pm_err_t rdm_route(pm_port_idx_t port, uint32_t token, const uint8_t *wire, size_t len,
-                          void (*reply)(uint32_t token, const uint8_t *resp, size_t resp_len))
+static void op_config_get(void *ctx, pm_settings_t *out)
 {
-    pm_rdm_msg_t m;
-    if (pm_rdm_decode(wire, len, &m) != PM_OK) return PM_ERR_BAD_FORMAT;
-    if (pm_uid_addresses(&m.dest, &s_uid)) {
-        uint8_t resp[PM_RDM_MAX_MSG_LEN];
-        int n = pm_rdm_responder_handle(s_responder, wire, len, resp, sizeof(resp));
-        if (n > 1) reply(token, resp, (size_t)n);
-        if (pm_uid_equal(&m.dest, &s_uid)) return PM_OK; /* only for us, never on the line */
-    }
-    esp_err_t e = pm_port_rdm_submit(port, token, wire, (uint16_t)len);
-    if (e == ESP_ERR_NO_MEM) return PM_ERR_FULL;
-    return e == ESP_OK ? PM_OK : PM_ERR_STATE;
+    (void)ctx;
+    pm_config_get(out);
 }
 
-static void reply_artnet(uint32_t token, const uint8_t *resp, size_t len)
+static pm_err_t op_config_modify(void *ctx, pm_node_modify_fn fn, void *fctx, pm_change_source_t src)
 {
-    pm_artnet_rdm_response(s_artnet, token, resp + 1, len - 1u); /* ArtRdm carries no start code */
+    (void)ctx;
+    return from_esp(pm_config_modify(fn, fctx, src));
 }
 
-static void reply_ui(uint32_t token, const uint8_t *resp, size_t len)
+static pm_err_t op_factory(void *ctx, pm_change_source_t src)
 {
-    pm_ui_event_t ev = {.type = PM_UI_EV_RDM_RESPONSE, .token = token & ~UI_TOKEN_FLAG, .len = (uint16_t)len,
-                        .data = resp};
-    pm_ui_notify(&ev);
+    (void)ctx;
+    return from_esp(pm_config_factory_reset(src));
 }
 
-/* ------------------------------------------------------------------------------------------------ pm_artnet ops */
-
-static pm_err_t an_send_udp(void *ctx, uint32_t ip, uint16_t port, const uint8_t *data, size_t len)
+static pm_err_t op_send_udp(void *ctx, uint32_t ip, uint16_t port, const uint8_t *data, size_t len)
 {
     (void)ctx;
     return pm_net_send_udp(ip, port, data, len) == ESP_OK ? PM_OK : PM_ERR_IO;
 }
 
-static void an_net_info(void *ctx, pm_artnet_net_info_t *out)
+static void op_net_info(void *ctx, pm_artnet_net_info_t *out)
 {
     (void)ctx;
     pm_net_status_t st;
@@ -167,33 +173,46 @@ static void an_net_info(void *ctx, pm_artnet_net_info_t *out)
     out->link_up = st.link_up;
 }
 
-static pm_err_t an_settings_apply(void *ctx, const pm_settings_t *s, pm_change_mask_t mask, pm_change_source_t src)
-{
-    (void)ctx; (void)mask;
-    return pm_config_update(s, src) == ESP_OK ? PM_OK : PM_ERR_IO;
-}
-
-static void an_ip_apply(void *ctx)
+static void op_net_apply_ip(void *ctx, const pm_ip_settings_t *ip)
 {
     (void)ctx;
-    static pm_settings_t s; /* network task only */
-    pm_config_get(&s);
-    pm_net_apply_ip(&s.ip, PM_ARTNET_OEM_NODE);
+    pm_net_apply_ip(ip, PM_ARTNET_OEM_NODE);
 }
 
-static void an_port_output(void *ctx, pm_port_idx_t port, const uint8_t *data, uint16_t len, bool defer)
+static void op_net_renew(void *ctx)
+{
+    (void)ctx;
+    pm_net_renew_dhcp();
+}
+
+static pm_err_t op_port_configure(void *ctx, pm_port_idx_t port, const pm_node_port_cfg_t *cfg)
+{
+    (void)ctx;
+    pm_port_cfg_t c = to_port_cfg(cfg);
+    esp_err_t e = pm_port_configure(port, &c);
+    if (e != ESP_OK) ESP_LOGW(TAG, "port %u configure: %s", (unsigned)port + 1, esp_err_to_name(e));
+    return from_esp(e);
+}
+
+static void op_port_output(void *ctx, pm_port_idx_t port, const uint8_t *data, uint16_t len, bool defer)
 {
     (void)ctx;
     pm_port_output_write(port, data, len, defer);
 }
 
-static void an_port_commit(void *ctx)
+static void op_port_commit(void *ctx)
 {
     (void)ctx;
     pm_port_commit();
 }
 
-static void an_port_status(void *ctx, pm_port_idx_t port, pm_artnet_port_status_t *out)
+static void op_port_clear(void *ctx, pm_port_idx_t port)
+{
+    (void)ctx;
+    pm_port_output_clear(port);
+}
+
+static void op_port_status(void *ctx, pm_port_idx_t port, pm_artnet_port_status_t *out)
 {
     (void)ctx;
     pm_port_stats_t st;
@@ -204,115 +223,104 @@ static void an_port_status(void *ctx, pm_port_idx_t port, pm_artnet_port_status_
     out->tod_count = st.tod_count;
 }
 
-static void an_port_clear(void *ctx, pm_port_idx_t port)
+static uint16_t op_input_read(void *ctx, pm_port_idx_t port, uint8_t *out, uint16_t cap)
 {
     (void)ctx;
-    pm_port_output_clear(port);
+    return pm_port_input_read(port, out, cap);
 }
 
-static uint16_t an_tod_get(void *ctx, pm_port_idx_t port, pm_uid_t *out, uint16_t cap)
+static pm_err_t op_rdm_submit(void *ctx, pm_port_idx_t port, uint32_t token, const uint8_t *wire, uint16_t len)
 {
     (void)ctx;
-    return pm_port_tod_get(port, out, cap);
+    return from_esp(pm_port_rdm_submit(port, token, wire, len));
 }
 
-static void an_tod_control(void *ctx, pm_port_idx_t port, uint8_t command)
-{
-    (void)ctx;
-    pm_port_tod_control(port, command);
-}
-
-static pm_err_t an_rdm_request(void *ctx, const pm_artnet_rdm_request_t *req)
-{
-    (void)ctx;
-    uint8_t wire[PM_RDM_MAX_MSG_LEN];
-    if (req->rdm_len + 1u > sizeof(wire)) return PM_ERR_INVALID_ARG;
-    wire[0] = PM_RDM_START_CODE;
-    memcpy(wire + 1, req->rdm, req->rdm_len);
-    return rdm_route(req->port, req->token, wire, req->rdm_len + 1u, reply_artnet);
-}
-
-static uint8_t an_rdm_fifo_avail(void *ctx, pm_port_idx_t port)
+static uint8_t op_rdm_queue_free(void *ctx, pm_port_idx_t port)
 {
     (void)ctx;
     return pm_port_rdm_queue_free(port);
 }
 
-static void an_indicator(void *ctx, uint8_t ac_led_command)
+static uint8_t op_rdm_queue_len(void *ctx, pm_port_idx_t port)
 {
     (void)ctx;
-    ui_event(PM_UI_EV_LED_MODE, 0, ac_led_command);
+    (void)port;
+    return (uint8_t)PM_RDM_QUEUE_LEN; /* pm_port: one pm_rdm_ctrl queue per port */
 }
 
-/* ------------------------------------------------------------------------------------------------ responder ops */
-
-static void rr_settings_get(void *ctx, pm_settings_t *out)
+static uint16_t op_tod_get(void *ctx, pm_port_idx_t port, pm_uid_t *out, uint16_t cap)
 {
     (void)ctx;
-    pm_config_get(out);
+    return pm_port_tod_get(port, out, cap);
 }
 
-static pm_err_t rr_settings_apply(void *ctx, const pm_settings_t *s, pm_change_mask_t mask)
-{
-    (void)ctx; (void)mask;
-    return pm_config_update(s, PM_SRC_RDM) == ESP_OK ? PM_OK : PM_ERR_IO;
-}
-
-static void rr_net_info(void *ctx, pm_rdm_net_info_t *out)
+static void op_tod_control(void *ctx, pm_port_idx_t port, uint8_t command)
 {
     (void)ctx;
-    pm_net_status_t st;
-    pm_net_get_status(&st);
-    out->ip = st.ip;
-    out->mask = st.mask;
-    out->gateway = st.gateway;
-    out->dhcp_active = st.mode == PM_NET_ADDR_DHCP;
-    memcpy(out->mac, st.mac, 6);
+    pm_port_tod_control(port, command);
 }
 
-static void rr_net_apply(void *ctx) { an_ip_apply(ctx); } /* E1.37-2 INTERFACE_APPLY_CONFIGURATION */
-
-static void rr_net_renew(void *ctx)
+static pm_err_t op_catch_start(void *ctx, pm_port_idx_t port, const pm_uid_t *target)
 {
     (void)ctx;
-    pm_net_renew_dhcp();
+    return pm_port_boot_catch_start(port, target) == ESP_OK ? PM_OK : PM_ERR_STATE;
 }
 
-static void rr_identify(void *ctx, bool on)
+static void op_catch_abort(void *ctx)
 {
     (void)ctx;
-    ui_event(PM_UI_EV_IDENTIFY, 0, on);
+    pm_port_boot_catch_abort();
 }
 
-static void rr_reset(void *ctx, uint8_t kind)
+static void op_catch_status(void *ctx, pm_port_idx_t *port, pm_rdm_boot_catch_t *out)
+{
+    (void)ctx;
+    pm_port_boot_catch_status(port, out);
+}
+
+static void op_reset(void *ctx, uint8_t kind)
 {
     (void)ctx;
     ESP_LOGW(TAG, "RESET_DEVICE 0x%02x", kind);
     restart_later();
 }
 
-static void rr_factory(void *ctx)
+static void op_ui_event(void *ctx, const pm_node_ui_event_t *ev)
 {
     (void)ctx;
-    pm_config_factory_reset(PM_SRC_RDM);
+    static const pm_ui_event_type_t MAP[] = {
+        [PM_NODE_UI_SETTINGS_CHANGED] = PM_UI_EV_SETTINGS_CHANGED,
+        [PM_NODE_UI_LED_MODE] = PM_UI_EV_LED_MODE,
+        [PM_NODE_UI_IDENTIFY] = PM_UI_EV_IDENTIFY,
+        [PM_NODE_UI_TOD_CHANGED] = PM_UI_EV_TOD_CHANGED,
+        [PM_NODE_UI_RDM_RESPONSE] = PM_UI_EV_RDM_RESPONSE,
+        [PM_NODE_UI_FW_PROGRESS] = PM_UI_EV_FW_PROGRESS,
+        [PM_NODE_UI_BOOT_CATCH] = PM_UI_EV_BOOT_CATCH,
+        [PM_NODE_UI_ERROR] = PM_UI_EV_ERROR,
+        [PM_NODE_UI_TUBE_UPDATE] = PM_UI_EV_TUBE_UPDATE,
+    };
+    if ((unsigned)ev->type >= sizeof(MAP) / sizeof(MAP[0])) return;
+    const pm_ui_event_t u = {.type = MAP[ev->type], .port = ev->port, .value = ev->value, .token = ev->token,
+                             .len = ev->len, .data = ev->data};
+    pm_ui_notify(&u);
 }
 
-static pm_err_t rr_catch_start(void *ctx, pm_port_idx_t port, const pm_uid_t *target)
-{
-    (void)ctx;
-    return pm_port_boot_catch_start(port, target) == ESP_OK ? PM_OK : PM_ERR_STATE;
-}
+/* Live port state for the UI: written by the network task every 100 ms, read by the UI task. */
+static portMUX_TYPE s_live_lock = portMUX_INITIALIZER_UNLOCKED;
+static pm_ui_port_live_t s_live[PM_NUM_PORTS];
 
-static void rr_catch_abort(void *ctx)
+static void op_port_live(void *ctx, const pm_artnet_port_live_t *live)
 {
     (void)ctx;
-    pm_port_boot_catch_abort();
-}
-
-static void rr_catch_status(void *ctx, pm_port_idx_t *port, pm_rdm_boot_catch_t *out)
-{
-    (void)ctx;
-    pm_port_boot_catch_status(port, out);
+    pm_ui_port_live_t v[PM_NUM_PORTS];
+    for (unsigned p = 0; p < PM_NUM_PORTS; p++) {
+        v[p] = (pm_ui_port_live_t){.rx_active = live[p].rx_active, .rx_fps = live[p].rx_fps,
+                                   .merge_sources = live[p].merge_sources, .data_loss = live[p].data_loss,
+                                   .merging = live[p].merging, .synced = live[p].synced};
+    }
+    portENTER_CRITICAL(&s_live_lock);
+    memcpy(s_live, v, sizeof(s_live));
+    portEXIT_CRITICAL(&s_live_lock);
 }
 
 /* ------------------------------------------------------------------------------------------------ settings changes */
@@ -322,7 +330,7 @@ static portMUX_TYPE s_chg_lock = portMUX_INITIALIZER_UNLOCKED;
 static pm_change_mask_t s_chg_pending[PM_SRC_SYSTEM + 1];
 static bool s_chg_posted;
 
-/** Network task: forward pending settings changes to pm_artnet and the RDM responder. */
+/** Network task: hand the pending changes to pm_node, per source. */
 static void work_settings_changed(void *arg)
 {
     (void)arg;
@@ -332,33 +340,16 @@ static void work_settings_changed(void *arg)
     memset(s_chg_pending, 0, sizeof(s_chg_pending));
     s_chg_posted = false;
     portEXIT_CRITICAL(&s_chg_lock);
-
-    static pm_settings_t s; /* network task only */
-    pm_config_get(&s);      /* last writer wins: the current state is what counts */
-    pm_change_mask_t all = 0;
     for (int src = 0; src <= PM_SRC_SYSTEM; src++) {
-        if (masks[src] == 0) continue;
-        all |= masks[src];
-        pm_rdm_responder_settings_changed(s_responder, masks[src], (pm_change_source_t)src);
+        if (masks[src] != 0) pm_node_settings_changed(s_node, masks[src], (pm_change_source_t)src);
     }
-    if (all) pm_artnet_settings_changed(s_artnet, &s, all);
 }
 
-/** pm_config listener (any task, inside pm_config's lock): only thread-safe calls and posts. */
+/** pm_config listener: runs in the writer's task inside the config lock - only copy and post. */
 static void on_settings(void *ctx, const pm_settings_t *s, pm_change_mask_t mask, pm_change_source_t src)
 {
     (void)ctx;
-    for (pm_port_idx_t i = 0; i < PM_NUM_PORTS; i++) {
-        if ((mask & PM_CHG_PORT(0x7F, i)) || (mask & PM_CHG_RDM_INTERVAL)) {
-            pm_port_cfg_t c = port_cfg_from(s, i);
-            pm_port_configure(i, &c);
-        }
-    }
-    /* ArtIpProg applies after its reply (ops.ip_apply); E1.37-2 applies on INTERFACE_APPLY_CONFIGURATION. */
-    if ((mask & PM_CHG_IP) && src != PM_SRC_IPPROG && src != PM_SRC_RDM) {
-        pm_net_apply_ip(&s->ip, PM_ARTNET_OEM_NODE);
-    }
-
+    (void)s;
     bool post = false;
     portENTER_CRITICAL(&s_chg_lock);
     s_chg_pending[src <= PM_SRC_SYSTEM ? src : PM_SRC_SYSTEM] |= mask;
@@ -370,8 +361,6 @@ static void on_settings(void *ctx, const pm_settings_t *s, pm_change_mask_t mask
         portEXIT_CRITICAL(&s_chg_lock);
         ESP_LOGW(TAG, "network queue full, settings change notification delayed");
     }
-
-    ui_event(PM_UI_EV_SETTINGS_CHANGED, 0, src);
 }
 
 /* ------------------------------------------------------------------------------------------------ OTA progress */
@@ -380,70 +369,36 @@ static void on_settings(void *ctx, const pm_settings_t *s, pm_change_mask_t mask
 static void on_ota(void *ctx, const pm_fw_status_t *st)
 {
     (void)ctx;
-    int32_t pct = -1;
-    if (st->state == PM_FW_STATE_FAILED) {
-        ESP_LOGW(TAG, "firmware update failed: error %u", (unsigned)st->last_error);
-        pm_artnet_set_node_report(s_artnet, 0x000E /* RcFirmwareFail */, "Firmware update failed");
-    } else if (st->total > 0) {
-        pct = (int32_t)((uint64_t)st->received * 100u / st->total);
-        if (st->state == PM_FW_STATE_READY) {
-            pct = 100;
-            pm_config_flush();
-        }
-    } else {
-        return; /* idle */
-    }
-    ui_event(PM_UI_EV_FW_PROGRESS, 0, pct);
+    if (st->state == PM_FW_STATE_FAILED) ESP_LOGW(TAG, "firmware update failed: error %u", (unsigned)st->last_error);
+    if (st->state == PM_FW_STATE_READY) pm_config_flush();
+    pm_node_fw_progress(s_node, st);
 }
 
 /* ------------------------------------------------------------------------------------------------ network task glue */
 
-static void net_rx(void *ctx, uint32_t src_ip, uint16_t src_port, const uint8_t *data, size_t len)
+static void net_rx(void *ctx, uint32_t src_ip, uint16_t src_port, uint32_t dst_ip, const uint8_t *data, size_t len)
 {
     (void)ctx;
-    pm_artnet_handle_packet(s_artnet, src_ip, src_port, data, len);
+    pm_node_handle_packet(s_node, src_ip, src_port, dst_ip, data, len);
 }
 
 static void handle_port_event(const pm_port_event_t *ev)
 {
-    switch (ev->type) {
-    case PM_PORT_EV_RDM_RESPONSE:
-        if (ev->len < 2) break;
-        if (ev->token & UI_TOKEN_FLAG) {
-            reply_ui(ev->token, ev->data, ev->len);
-        } else {
-            pm_artnet_rdm_response(s_artnet, ev->token, ev->data + 1, ev->len - 1u);
-        }
-        break;
-    case PM_PORT_EV_TOD_CHANGED:
-        pm_artnet_tod_changed(s_artnet, ev->port);
-        ui_event(PM_UI_EV_TOD_CHANGED, ev->port, 0);
-        break;
-    case PM_PORT_EV_INPUT_FRAME: {
-        static uint8_t buf[512];
-        uint16_t n = pm_port_input_read(ev->port, buf, sizeof(buf));
-        if (n) pm_artnet_input_frame(s_artnet, ev->port, buf, n);
-        break;
-    }
-    case PM_PORT_EV_INPUT_SIGNAL:
-        pm_artnet_port_status_changed(s_artnet, ev->port);
-        break;
-    case PM_PORT_EV_BOOT_CATCH:
-        pm_rdm_responder_queue_pid(s_responder, PM_PID_BOOT_CATCH_STATUS);
-        if (ev->value == PM_BOOT_CATCH_STATE_CAUGHT) {
-            pm_rdm_responder_status(s_responder, PM_STATUS_BOOT_CATCH_CAUGHT, PM_RDM_STATUS_ADVISORY,
-                                    (int16_t)(ev->port + 1), 0);
-        } else if (ev->value == PM_BOOT_CATCH_STATE_TIMEOUT) {
-            pm_rdm_responder_status(s_responder, PM_STATUS_BOOT_CATCH_TIMEOUT, PM_RDM_STATUS_WARNING,
-                                    (int16_t)(ev->port + 1), 0);
-        }
-        ui_event(PM_UI_EV_BOOT_CATCH, ev->port, ev->value);
-        break;
-    case PM_PORT_EV_ERROR:
+    static const pm_node_port_ev_type_t MAP[] = {
+        [PM_PORT_EV_RDM_RESPONSE] = PM_NODE_PEV_RDM_RESPONSE,
+        [PM_PORT_EV_TOD_CHANGED] = PM_NODE_PEV_TOD_CHANGED,
+        [PM_PORT_EV_INPUT_FRAME] = PM_NODE_PEV_INPUT_FRAME,
+        [PM_PORT_EV_INPUT_SIGNAL] = PM_NODE_PEV_INPUT_SIGNAL,
+        [PM_PORT_EV_BOOT_CATCH] = PM_NODE_PEV_BOOT_CATCH,
+        [PM_PORT_EV_ERROR] = PM_NODE_PEV_ERROR,
+    };
+    if ((unsigned)ev->type >= sizeof(MAP) / sizeof(MAP[0])) return;
+    if (ev->type == PM_PORT_EV_ERROR) {
         ESP_LOGW(TAG, "port %u: driver error %s", (unsigned)ev->port + 1, esp_err_to_name((esp_err_t)ev->value));
-        ui_event(PM_UI_EV_ERROR, ev->port, ev->value);
-        break;
     }
+    const pm_node_port_event_t n = {.type = MAP[ev->type], .port = ev->port, .token = ev->token,
+                                    .value = ev->value, .len = ev->len, .data = ev->data};
+    pm_node_port_event(s_node, &n);
 }
 
 static void net_tick(void *ctx)
@@ -451,7 +406,7 @@ static void net_tick(void *ctx)
     (void)ctx;
     static pm_port_event_t ev; /* network task only */
     for (int i = 0; i < PORT_EVENTS_PER_TICK && pm_port_event_receive(&ev, 0); i++) handle_port_event(&ev);
-    pm_artnet_tick(s_artnet);
+    pm_node_tick(s_node);
 
     static uint32_t next_ota_poll;
     uint32_t now = now_ms(NULL);
@@ -459,21 +414,47 @@ static void net_tick(void *ctx)
         next_ota_poll = now + OTA_POLL_MS;
         pm_ota_poll(); /* 30 s session timeout */
     }
+    pm_net_set_tick_period(pm_node_busy(s_node) ? NET_TICK_FAST_MS : NET_TICK_MS);
 }
 
 /** Network task: link/address changed -> unsolicited ArtPollReply from the new address. */
 static void on_net_change(void *ctx, const pm_net_status_t *st)
 {
-    (void)ctx; (void)st;
-    pm_artnet_net_changed(s_artnet);
+    (void)ctx;
+    (void)st;
+    pm_node_net_changed(s_node);
 }
 
 /* ------------------------------------------------------------------------------------------------ UI model */
+
+static void ui_net_info(void *ctx, pm_ui_net_info_t *out)
+{
+    (void)ctx;
+    pm_net_status_t st;
+    pm_net_get_status(&st);
+    out->ip = st.ip;
+    out->mask = st.mask;
+    out->gateway = st.gateway;
+    out->mode = (uint8_t)st.mode;
+    out->link_up = st.link_up;
+}
 
 static void ui_port_stats(void *ctx, pm_port_idx_t port, pm_port_stats_t *out)
 {
     (void)ctx;
     pm_port_get_stats(port, out);
+}
+
+static void ui_port_live(void *ctx, pm_port_idx_t port, pm_ui_port_live_t *out)
+{
+    (void)ctx;
+    if (port >= PM_NUM_PORTS) {
+        memset(out, 0, sizeof(*out));
+        return;
+    }
+    portENTER_CRITICAL(&s_live_lock);
+    *out = s_live[port];
+    portEXIT_CRITICAL(&s_live_lock);
 }
 
 static uint16_t ui_tod_get(void *ctx, pm_port_idx_t port, pm_uid_t *out, uint16_t cap)
@@ -482,40 +463,68 @@ static uint16_t ui_tod_get(void *ctx, pm_port_idx_t port, pm_uid_t *out, uint16_
     return pm_port_tod_get(port, out, cap);
 }
 
+/* Panel RDM requests: a fixed pool of slots handed to the network task (no malloc per request). */
 typedef struct {
+    bool busy;
     pm_port_idx_t port;
     uint32_t token;
     uint16_t len;
-    uint8_t data[];
-} ui_rdm_req_t;
+    uint8_t data[PM_RDM_MAX_MSG_LEN];
+} ui_rdm_slot_t;
 
-/** Network task: front-panel RDM request -> responder or line; SETs to devices are reported (LOCAL_RDM_SET). */
+static portMUX_TYPE s_ui_lock = portMUX_INITIALIZER_UNLOCKED;
+static ui_rdm_slot_t s_ui_rdm[UI_RDM_SLOTS];
+
+static void slot_free(ui_rdm_slot_t *r)
+{
+    portENTER_CRITICAL(&s_ui_lock);
+    r->busy = false;
+    portEXIT_CRITICAL(&s_ui_lock);
+}
+
+/** Network task: panel RDM request -> pm_node (responder or line; SETs to devices -> LOCAL_RDM_SET). */
 static void work_ui_rdm(void *arg)
 {
-    ui_rdm_req_t *r = arg;
-    pm_rdm_msg_t m;
-    if (pm_rdm_decode(r->data, r->len, &m) == PM_OK) {
-        pm_err_t e = rdm_route(r->port, r->token | UI_TOKEN_FLAG, r->data, r->len, reply_ui);
-        if (e == PM_OK && m.cc == PM_RDM_CC_SET && !pm_uid_equal(&m.dest, &s_uid)) {
-            pm_rdm_responder_local_set(s_responder, r->port, &m.dest, m.sub_device, m.pid);
-        }
-    }
-    free(r);
+    ui_rdm_slot_t *r = arg;
+    pm_err_t e = pm_node_ui_rdm_request(s_node, r->port, r->token, r->data, r->len);
+    if (e != PM_OK) ESP_LOGD(TAG, "panel RDM request on port %u: %s", (unsigned)r->port + 1, pm_err_name(e));
+    slot_free(r);
 }
 
 static esp_err_t ui_rdm_request(void *ctx, pm_port_idx_t port, uint32_t token, const uint8_t *data, uint16_t len)
 {
     (void)ctx;
-    if (data == NULL || len < 2 || len > PM_RDM_MAX_MSG_LEN || port >= PM_NUM_PORTS) return ESP_ERR_INVALID_ARG;
-    ui_rdm_req_t *r = malloc(sizeof(*r) + len);
+    if (data == NULL || len < 2 || len > PM_RDM_MAX_MSG_LEN || port >= PM_NUM_PORTS ||
+        (token & PM_NODE_UI_TOKEN_FLAG)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    ui_rdm_slot_t *r = NULL;
+    portENTER_CRITICAL(&s_ui_lock);
+    for (unsigned i = 0; i < UI_RDM_SLOTS && r == NULL; i++) {
+        if (!s_ui_rdm[i].busy) {
+            r = &s_ui_rdm[i];
+            r->busy = true;
+        }
+    }
+    portEXIT_CRITICAL(&s_ui_lock);
     if (r == NULL) return ESP_ERR_NO_MEM;
     r->port = port;
-    r->token = token & ~UI_TOKEN_FLAG;
+    r->token = token;
     r->len = len;
     memcpy(r->data, data, len);
     esp_err_t e = pm_net_post(work_ui_rdm, r);
-    if (e != ESP_OK) free(r);
+    if (e != ESP_OK) slot_free(r);
     return e;
+}
+
+static void work_ui_identify(void *arg) { pm_node_ui_identify(s_node, arg != NULL); }
+
+static void ui_identify(void *ctx, bool on)
+{
+    (void)ctx;
+    if (pm_net_post(work_ui_identify, on ? (void *)1 : NULL) != ESP_OK) {
+        ESP_LOGW(TAG, "network queue full, panel identify dropped");
+    }
 }
 
 /* ------------------------------------------------------------------------------------------------ rollback */
@@ -565,8 +574,8 @@ void app_main(void)
     esp_register_shutdown_handler(shutdown_flush);
 
     static const pm_ui_model_t ui_model = {
-        .port_stats = ui_port_stats, .tod_get = ui_tod_get, .rdm_request = ui_rdm_request,
-        .net_info = NULL, .port_live = NULL, .identify = NULL, /* Phase 2: Paket A wires them (main rewrite) */
+        .net_info = ui_net_info, .port_stats = ui_port_stats, .port_live = ui_port_live, .tod_get = ui_tod_get,
+        .rdm_request = ui_rdm_request, .identify = ui_identify,
     };
     err = pm_ui_init(board, &ui_model);
     if (err != ESP_OK) ESP_LOGE(TAG, "pm_ui_init: %s (running without front panel)", esp_err_to_name(err));
@@ -584,9 +593,9 @@ void app_main(void)
     s_uid = pm_uid_node_from_mac(PM_ESTA_MANUFACTURER, mac);
     char uid_str[PM_UID_STR_LEN];
     ESP_LOGI(TAG, "hw rev %u, UID %s", pm_board_revision(), pm_uid_format(&s_uid, uid_str));
+    pm_ui_set_node_info(&s_uid, mac, pm_image_desc.version_label, pm_board_revision());
 
     ESP_ERROR_CHECK(pm_ota_init(pm_board_revision()));
-    ESP_ERROR_CHECK(pm_ota_set_listener(on_ota, NULL));
 
     /* port engine: core 1 */
     err = pm_port_init(board, &s_uid);
@@ -600,51 +609,50 @@ void app_main(void)
     s_port_ok = err == ESP_OK;
     if (!s_port_ok) ESP_LOGE(TAG, "port engine: %s", esp_err_to_name(err));
 
-    /* Art-Net node + RDM responder (network task objects, allocated once at init) */
-    const pm_artnet_identity_t an_id = {
-        .esta_man = PM_ESTA_MANUFACTURER,
-        .oem = PM_ARTNET_OEM_NODE,
-        .vers_info = PM_FW_VERSINFO(FW_VERSION_ID),
-        .uid = s_uid,
-        .num_ports = board->num_ports,
+    /* pm_node = Art-Net node + RDM responder (network task objects, one internal-RAM block allocated once) */
+    const pm_node_identity_t id = {
+        .artnet = {
+            .esta_man = PM_ESTA_MANUFACTURER,
+            .oem = PM_ARTNET_OEM_NODE,
+            .vers_info = PM_FW_VERSINFO(FW_VERSION_ID),
+            .uid = s_uid,
+            .num_ports = board->num_ports,
+        },
+        .responder = {
+            .uid = s_uid,
+            .model_id = PM_MODEL_NODE,
+            .sw_version_id = FW_VERSION_ID,
+            .sw_version_label = pm_image_desc.version_label,
+            .model_description = "Pixelmapper Node",
+            .manufacturer_label = "Prototype",
+            .hw_revision = pm_board_revision(),
+        },
     };
-    static pm_artnet_ops_t an_ops = {
-        .now_ms = now_ms, .random = rnd, .send_udp = an_send_udp, .net_info = an_net_info,
-        .settings_apply = an_settings_apply, .ip_apply = an_ip_apply,
-        .port_output = an_port_output, .port_commit = an_port_commit, .port_status = an_port_status,
-        .port_clear = an_port_clear, .tod_get = an_tod_get, .tod_control = an_tod_control,
-        .rdm_request = an_rdm_request, .rdm_fifo_avail = an_rdm_fifo_avail, .indicator = an_indicator,
+    static pm_node_ops_t ops = {
+        .now_ms = now_ms, .random = rnd,
+        .config_get = op_config_get, .config_modify = op_config_modify, .config_factory_reset = op_factory,
+        .send_udp = op_send_udp, .net_info = op_net_info, .net_apply_ip = op_net_apply_ip,
+        .net_renew_dhcp = op_net_renew,
+        .port_configure = op_port_configure, .port_output = op_port_output, .port_commit = op_port_commit,
+        .port_clear = op_port_clear, .port_status = op_port_status, .port_input_read = op_input_read,
+        .port_rdm_submit = op_rdm_submit, .port_rdm_queue_free = op_rdm_queue_free,
+        .port_rdm_queue_len = op_rdm_queue_len, .tod_get = op_tod_get, .tod_control = op_tod_control,
+        .boot_catch_start = op_catch_start, .boot_catch_abort = op_catch_abort, .boot_catch_status = op_catch_status,
+        .reset = op_reset, .ui_event = op_ui_event, .port_live = op_port_live,
     };
-    an_ops.fw_sink = pm_ota_sink();
-    void *an_mem = heap_caps_malloc(pm_artnet_node_size(), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    s_artnet = an_mem ? pm_artnet_node_init(an_mem, &an_id, &an_ops, &settings) : NULL;
-
-    const pm_rdm_responder_identity_t rr_id = {
-        .uid = s_uid,
-        .model_id = PM_MODEL_NODE,
-        .sw_version_id = FW_VERSION_ID,
-        .sw_version_label = pm_image_desc.version_label,
-        .model_description = "Pixelmapper Node",
-        .manufacturer_label = "Prototype",
-        .hw_revision = pm_board_revision(),
-    };
-    static pm_rdm_responder_ops_t rr_ops = {
-        .now_ms = now_ms, .settings_get = rr_settings_get, .settings_apply = rr_settings_apply,
-        .net_info = rr_net_info, .net_apply = rr_net_apply, .net_renew_dhcp = rr_net_renew,
-        .identify = rr_identify, .reset = rr_reset, .factory_defaults = rr_factory,
-        .boot_catch_start = rr_catch_start, .boot_catch_abort = rr_catch_abort,
-        .boot_catch_status = rr_catch_status,
-    };
-    rr_ops.fw_sink = pm_ota_sink();
-    void *rr_mem = heap_caps_malloc(pm_rdm_responder_size(), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    s_responder = rr_mem ? pm_rdm_responder_init(rr_mem, &rr_id, &rr_ops) : NULL;
-    if (s_artnet == NULL || s_responder == NULL) {
-        /* Phase 1: pm_artnet / pm_rdm may still be stubs that return NULL. Nothing that dereferences them may
-         * run, so the network task is not started (DMX output keeps running on core 1). */
-        ESP_LOGE(TAG, "Art-Net node (%p) or RDM responder (%p) not available - network task not started",
-                 (void *)s_artnet, (void *)s_responder);
+    ops.fw_sink = pm_ota_sink();
+    size_t node_size = pm_node_size();
+    void *mem = heap_caps_aligned_alloc(alignof(max_align_t), node_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    s_node = mem ? pm_node_init(mem, &id, &ops, &settings) : NULL;
+    ESP_LOGI(TAG, "pm_node: %u bytes internal RAM (Art-Net %u, responder %u), free internal %u",
+             (unsigned)node_size, (unsigned)pm_artnet_node_size(), (unsigned)pm_rdm_responder_size(),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    if (s_node == NULL) {
+        /* Nothing that dereferences the node may run: the network task is not started (DMX keeps running). */
+        ESP_LOGE(TAG, "pm_node not available (%u bytes) - network task not started", (unsigned)node_size);
         s_net_ok = false;
     } else {
+        ESP_ERROR_CHECK(pm_ota_set_listener(on_ota, NULL));
         ESP_ERROR_CHECK(pm_config_subscribe(on_settings, NULL));
         pm_net_set_change_cb(on_net_change, NULL);
         ESP_ERROR_CHECK(pm_net_apply_ip(&settings.ip, PM_ARTNET_OEM_NODE));

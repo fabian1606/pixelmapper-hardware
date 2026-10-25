@@ -78,7 +78,9 @@ pm_fw_error_t pm_ota_session_write(pm_ota_session_t *s, uint32_t offset, const u
 /** Step 7: length, CRC-32, backend end. NONE -> state READY. */
 pm_fw_error_t pm_ota_session_finish(pm_ota_session_t *s);
 
-/** Drop the session. reason NONE -> IDLE, otherwise FAILED with last_error = reason. No-op unless RECEIVING. */
+/** Drop the session. RECEIVING: reason NONE -> IDLE, otherwise FAILED with last_error = reason (backend aborted).
+ *  IDLE/FAILED with reason != NONE: FAILED + last_error = reason, received/total = 0 (a rejection before begin(),
+ *  pm_fw.h). VERIFYING/READY and IDLE/FAILED with NONE: no-op. */
 void pm_ota_session_abort(pm_ota_session_t *s, pm_fw_error_t reason);
 
 /** Drop a RECEIVING session idle for more than PM_OTA_SESSION_TIMEOUT_MS (TIMEOUT). Call periodically. */

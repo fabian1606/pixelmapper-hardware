@@ -100,6 +100,9 @@ typedef struct {
     in_sub_t subs[PM_ARTNET_MAX_SUBSCRIBERS];
     /* RDM */
     uint8_t fifo_max_seen;
+    /* statistics for pm_artnet_port_live() */
+    uint16_t rx_count;     /* frames accepted in the current fps window */
+    uint8_t rx_fps;
 } port_state_t;
 
 typedef struct {
@@ -143,6 +146,7 @@ struct pm_artnet_node {
     uint32_t last_dmx_ip;
     bool last_dmx_valid;
     uint32_t own_poll_ms;
+    uint32_t fps_window_ms;
 
     uint8_t led;           /* PM_AC_LED_NORMAL / MUTE / LOCATE */
     uint16_t report_code;
@@ -591,6 +595,7 @@ static bool dmx_to_port(pm_artnet_node_t *n, unsigned p, uint32_t ip, uint8_t ph
     ps->rx_ever = true;
     ps->data_lost = false;
     ps->last_rx_ms = n->now;
+    if (ps->rx_count < 0xFFFFu) ps->rx_count++;
     output_frame(n, p, m->out, m->out_len, defer);
     return true;
 }
@@ -988,7 +993,9 @@ static void on_rdm(pm_artnet_node_t *n, uint32_t src, const uint8_t *data, size_
             }
             if (time_before(n->rdm[i].t_ms, slot->t_ms)) slot = &n->rdm[i];
         }
-        if (++n->next_token == 0) n->next_token = 1;
+        /* bit 31 stays clear: the platform tags its own requests (front panel) with it */
+        n->next_token = (n->next_token + 1u) & PM_ARTNET_RDM_TOKEN_MASK;
+        if (n->next_token == 0) n->next_token = 1;
         uint32_t token = n->next_token;
         *slot = (rdm_pending_t){.used = true, .token = token, .ip = src, .port = (pm_port_idx_t)p, .t_ms = n->now};
         const pm_artnet_rdm_request_t req = {.port = (pm_port_idx_t)p, .token = token, .rdm = r.rdm,
@@ -1002,6 +1009,22 @@ static void on_rdm(pm_artnet_node_t *n, uint32_t src, const uint8_t *data, size_
 static void fw_reply(pm_artnet_node_t *n, uint32_t ip, uint8_t type)
 {
     send(n, ip, n->tx, pm_artfirmwarereply_encode(type, n->tx, sizeof(n->tx)));
+}
+
+/** A FirmFirst was rejected before sink->begin(): record the reason in the sink (FW_INFO.last_error) via
+ *  abort(), which pm_fw.h allows while no session runs. A session of another source (RDM FW_*) is left alone. */
+static void fw_report_rejected(pm_artnet_node_t *n, pm_fw_error_t reason)
+{
+    const pm_fw_sink_t *k = n->ops.fw_sink;
+    if (k == NULL || k->abort == NULL) return;
+    if (k->status) {
+        pm_fw_status_t st;
+        k->status(k->ctx, &st);
+        if (st.state == PM_FW_STATE_RECEIVING || st.state == PM_FW_STATE_VERIFYING || st.state == PM_FW_STATE_READY) {
+            return;
+        }
+    }
+    k->abort(k->ctx, reason);
 }
 
 static void fw_abort(pm_artnet_node_t *n, pm_fw_error_t reason)
@@ -1035,9 +1058,11 @@ static pm_fw_error_t fw_consume(pm_artnet_node_t *n, const uint8_t *data)
     return PM_FW_ERROR_NONE;
 }
 
-/** FirmFirst: OEM list + description copy (image-format.md §2.5) -> sink->begin. */
-static pm_fw_error_t fw_first(pm_artnet_node_t *n, uint32_t src, const pm_artfirmwaremaster_t *fm)
+/** FirmFirst: OEM list + description copy (image-format.md §2.5) -> sink->begin. `*begun` = sink->begin() was
+ *  called (from then on the sink itself records errors). */
+static pm_fw_error_t fw_first(pm_artnet_node_t *n, uint32_t src, const pm_artfirmwaremaster_t *fm, bool *begun)
 {
+    *begun = false;
     if (fm->block_id != 0) return PM_FW_ERROR_SEQUENCE;
     bool oem_ok = false;
     for (unsigned i = 0; i < 256; i++) oem_ok |= pm_get_be16(fm->data + ALF_OEM_OFFSET + 2u * i) == n->id.oem;
@@ -1050,6 +1075,7 @@ static pm_fw_error_t fw_first(pm_artnet_node_t *n, uint32_t src, const pm_artfir
         return PM_FW_ERROR_DESC_MISMATCH; /* FirmwareLength must match image_length (image-format.md §2.5) */
     }
     const pm_fw_sink_t *sink = n->ops.fw_sink;
+    *begun = true;
     pm_fw_error_t e = sink->begin(sink->ctx, &desc); /* steps 1-5 of image-format.md §2.3 */
     if (e != PM_FW_ERROR_NONE) return e;
     n->fw = (fw_state_t){.active = true, .ip = src, .next_block = 1, .words = fm->firmware_length_words,
@@ -1079,8 +1105,10 @@ static void on_firmware(pm_artnet_node_t *n, uint32_t src, const uint8_t *data, 
     pm_fw_error_t e;
     if (fm.type == PM_FIRM_FIRST) {
         if (f->active) fw_abort(n, PM_FW_ERROR_SEQUENCE); /* restart by the same controller */
-        e = fw_first(n, src, &fm);
+        bool begun;
+        e = fw_first(n, src, &fm, &begun);
         if (e != PM_FW_ERROR_NONE) {
+            if (!begun) fw_report_rejected(n, e); /* .alf OEM list, FirmwareLength, description block */
             fw_abort(n, e);
             fw_reply(n, src, PM_FIRM_FAIL);
         } else {
@@ -1211,6 +1239,7 @@ pm_artnet_node_t *pm_artnet_node_init(void *mem, const pm_artnet_identity_t *id,
     now_ms(n);
     refresh_net(n);
     n->own_poll_ms = n->now - PM_ARTNET_OWN_POLL_MS; /* first own poll on the first tick */
+    n->fps_window_ms = n->now;
     for (unsigned i = 0; i < PM_NUM_PORTS; i++) {
         pm_artnet_merge_init(&n->merge[i], settings->port[i].merge);
         n->port[i].last_rx_ms = n->now;
@@ -1276,6 +1305,16 @@ void pm_artnet_tick(pm_artnet_node_t *n)
         }
     }
     if (n->sync_mode && elapsed(n->now, n->last_sync_ms, PM_ARTNET_SYNC_TIMEOUT_MS)) leave_sync(n);
+    uint32_t window = n->now - n->fps_window_ms;
+    if (window >= 1000u) {
+        for (unsigned p = 0; p < PM_NUM_PORTS; p++) {
+            port_state_t *s = &n->port[p];
+            uint32_t fps = window < 2000u ? ((uint32_t)s->rx_count * 1000u + window / 2u) / window : 0u;
+            s->rx_fps = (uint8_t)(fps > 255u ? 255u : fps);
+            s->rx_count = 0;
+        }
+        n->fps_window_ms = n->now;
+    }
     own_poll(n);
     if (n->fw.active && elapsed(n->now, n->fw.last_ms, PM_ARTNET_FIRMWARE_TIMEOUT_MS)) {
         fw_abort(n, PM_FW_ERROR_TIMEOUT);
@@ -1406,4 +1445,34 @@ void pm_artnet_set_node_report(pm_artnet_node_t *n, uint16_t code, const char *t
     if (n == NULL) return;
     n->report_code = code;
     snprintf(n->report_text, sizeof(n->report_text), "%s", text ? text : "");
+}
+
+/* ------------------------------------------------------------------------------------------------ Phase 2 additions */
+
+void pm_artnet_set_indicator(pm_artnet_node_t *n, uint8_t ac_led_command)
+{
+    if (n == NULL || n->led == ac_led_command) return;
+    if (ac_led_command != PM_AC_LED_NORMAL && ac_led_command != PM_AC_LED_MUTE && ac_led_command != PM_AC_LED_LOCATE) {
+        return;
+    }
+    now_ms(n);
+    n->led = ac_led_command;
+    finish(n); /* Status1 indicator bits changed: unsolicited ArtPollReply */
+}
+
+uint8_t pm_artnet_indicator(const pm_artnet_node_t *n) { return n != NULL ? n->led : PM_AC_LED_NORMAL; }
+
+void pm_artnet_port_live(const pm_artnet_node_t *n, pm_port_idx_t port, pm_artnet_port_live_t *out)
+{
+    if (out == NULL) return;
+    memset(out, 0, sizeof(*out));
+    if (n == NULL || port >= num_pages(n) || !output_active(n, port)) return;
+    const port_state_t *s = &n->port[port];
+    const pm_artnet_merge_t *m = &n->merge[port];
+    out->rx_active = s->rx_ever && !elapsed(n->now, s->last_rx_ms, PM_ARTNET_RX_ACTIVE_MS);
+    out->rx_fps = out->rx_active ? s->rx_fps : 0;
+    out->merge_sources = (uint8_t)pm_artnet_merge_sources(m);
+    out->merging = out->merge_sources == 2;
+    out->data_loss = s->data_lost;
+    out->synced = n->sync_mode;
 }

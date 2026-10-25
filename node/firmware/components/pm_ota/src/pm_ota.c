@@ -53,6 +53,23 @@ static pm_fw_error_t be_begin(void *ctx, uint32_t image_len)
     s_part = esp_ota_get_next_update_partition(NULL);
     if (s_part == NULL) return PM_FW_ERROR_FLASH;
     if (image_len > s_part->size) return PM_FW_ERROR_TOO_LARGE;
+    /*
+     * Rollback window (image-format.md §2.3 step 8): right after an update the running image is PENDING_VERIFY
+     * until main marks it valid after 30 s of healthy operation. With CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE,
+     * esp_ota_begin() refuses to start in that state (ESP_ERR_OTA_ROLLBACK_INVALID_STATE), and writing the other
+     * slot would destroy the image a rollback returns to anyway. A firmware that receives an update over the network
+     * has obviously working Ethernet and a working network task - the essential part of the health check - so it
+     * is marked valid here first. The chain stays consistent: running = valid, the slot being written becomes the
+     * new PENDING_VERIFY image after the reboot, and a failed new image rolls back to this one.
+     */
+    if (pm_ota_pending_verify()) {
+        ESP_LOGW(TAG, "update during the rollback window: marking the running firmware valid first");
+        esp_err_t e = pm_ota_mark_valid();
+        if (e != ESP_OK) {
+            ESP_LOGE(TAG, "mark valid: %s", esp_err_to_name(e));
+            return PM_FW_ERROR_FLASH;
+        }
+    }
     /* Erase sector by sector while writing: the network task is not blocked for the whole-partition erase. */
     esp_err_t err = esp_ota_begin(s_part, OTA_WITH_SEQUENTIAL_WRITES, &s_handle);
     if (err != ESP_OK) {

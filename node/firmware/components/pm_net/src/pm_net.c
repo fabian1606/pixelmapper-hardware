@@ -9,6 +9,15 @@
  *     tcpip_api_call(), i.e. in the lwIP thread.
  *   - pm_net_get_status() / pm_net_get_mac() / pm_net_send_udp() / pm_net_post() are callable from any task.
  *
+ * Receive path: recvmsg() with IP_PKTINFO (CONFIG_LWIP_NETBUF_RECVINFO, selected by PM_NET_PKTINFO) hands the
+ * destination address of each datagram to the rx callback (broadcast vs. unicast, e.g. for ArtSync).
+ *
+ * Latency of posted work: the task sleeps in select() for at most one tick period and drains the post queue at the
+ * top of every loop, so a pm_net_post() item waits <= period (10 ms by default). That is fine for what is posted
+ * (settings changes, panel RDM requests, link/IP events). The latency-critical path - RDM responses from the port
+ * engine, drained in the tick - is handled with pm_net_set_tick_period(): main switches to a 1 ms period while RDM
+ * requests are in flight on a line. A wake-up socket would not help there (pm_port has its own queue).
+ *
  * DHCP + fallback: ESP-IDF starts the DHCP client on link up. Without a lease after 5 s the Art-Net address
  * 2.B.C.D/8 is put on the lwIP netif directly (netif_set_addr) while the DHCP client keeps discovering (lwIP retries
  * forever, back-off up to 60 s). A late lease replaces the fallback address (dhcp_bind -> netif_set_addr).
@@ -68,6 +77,7 @@ static pm_net_rx_fn s_rx;
 static pm_net_tick_fn s_tick;
 static void *s_ctx;
 static uint32_t s_period_ms = 10;
+static uint32_t s_next_tick;
 static pm_net_change_fn s_change_fn;
 static void *s_change_ctx;
 static uint8_t s_rx_buf[RX_BUF_LEN];
@@ -271,12 +281,13 @@ static esp_err_t eth_init(const pm_board_t *board)
     }
     emac.clock_config.rmii.clock_mode = EMAC_CLK_EXT_IN; /* 50 MHz from the IP101 (25 MHz crystal) */
     emac.clock_config.rmii.clock_gpio = (emac_rmii_clock_gpio_t)board->eth.rmii_clk_in;
-    emac.emac_dataif_gpio.rmii.tx_en_num = CONFIG_PM_NET_RMII_TX_EN;
-    emac.emac_dataif_gpio.rmii.txd0_num = CONFIG_PM_NET_RMII_TXD0;
-    emac.emac_dataif_gpio.rmii.txd1_num = CONFIG_PM_NET_RMII_TXD1;
-    emac.emac_dataif_gpio.rmii.crs_dv_num = CONFIG_PM_NET_RMII_CRS_DV;
-    emac.emac_dataif_gpio.rmii.rxd0_num = CONFIG_PM_NET_RMII_RXD0;
-    emac.emac_dataif_gpio.rmii.rxd1_num = CONFIG_PM_NET_RMII_RXD1;
+    /* RMII data pins: P4 IO_MUX choices from the board table (pm_board_eth_pins_t) */
+    emac.emac_dataif_gpio.rmii.tx_en_num = board->eth.rmii_tx_en;
+    emac.emac_dataif_gpio.rmii.txd0_num = board->eth.rmii_txd0;
+    emac.emac_dataif_gpio.rmii.txd1_num = board->eth.rmii_txd1;
+    emac.emac_dataif_gpio.rmii.crs_dv_num = board->eth.rmii_crs_dv;
+    emac.emac_dataif_gpio.rmii.rxd0_num = board->eth.rmii_rxd0;
+    emac.emac_dataif_gpio.rmii.rxd1_num = board->eth.rmii_rxd1;
     esp_eth_mac_t *mac = esp_eth_mac_new_esp32(&emac, &mac_cfg);
 
     eth_phy_config_t phy_cfg = ETH_PHY_DEFAULT_CONFIG();
@@ -388,6 +399,14 @@ void pm_net_set_change_cb(pm_net_change_fn fn, void *ctx)
 
 bool pm_net_in_task(void) { return s_task != NULL && xTaskGetCurrentTaskHandle() == s_task; }
 
+void pm_net_set_tick_period(uint32_t period_ms)
+{
+    if (period_ms == 0 || period_ms == s_period_ms) return;
+    s_period_ms = period_ms;
+    uint32_t soon = now_ms() + period_ms;
+    if ((int32_t)(soon - s_next_tick) < 0) s_next_tick = soon; /* shorter period: do not wait for the old deadline */
+}
+
 /* ------------------------------------------------------------------------------------------------ task */
 
 static int open_socket(void)
@@ -397,6 +416,9 @@ static int open_socket(void)
     int one = 1;
     setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &one, sizeof(one)); /* send + receive directed broadcasts */
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    if (setsockopt(sock, IPPROTO_IP, IP_PKTINFO, &one, sizeof(one)) != 0) {
+        ESP_LOGW(TAG, "IP_PKTINFO not available: destination addresses unknown (ArtSync accepted from unicast)");
+    }
     struct sockaddr_in addr = {
         .sin_family = AF_INET,
         .sin_port = lwip_htons(PM_NET_ARTNET_PORT),
@@ -415,16 +437,46 @@ static void drain_work(void)
     while (xQueueReceive(s_queue, &w, 0) == pdTRUE) w.fn(w.arg);
 }
 
+/** Receive one datagram (non-blocking). Returns its length (<= 0: nothing), the sender and the destination address
+ *  from IP_PKTINFO (0 = unknown). Host byte order. */
+static int receive(int sock, uint32_t *src_ip, uint16_t *src_port, uint32_t *dst_ip)
+{
+    struct sockaddr_in from;
+    struct iovec iov = {.iov_base = s_rx_buf, .iov_len = sizeof(s_rx_buf)};
+    uint8_t cbuf[CMSG_SPACE(sizeof(struct in_pktinfo))];
+    struct msghdr msg = {
+        .msg_name = &from,
+        .msg_namelen = sizeof(from),
+        .msg_iov = &iov,
+        .msg_iovlen = 1,
+        .msg_control = cbuf,
+        .msg_controllen = sizeof(cbuf),
+    };
+    int n = recvmsg(sock, &msg, MSG_DONTWAIT);
+    if (n <= 0) return n;
+    *src_ip = from_lwip(from.sin_addr.s_addr);
+    *src_port = lwip_ntohs(from.sin_port);
+    *dst_ip = 0;
+    for (struct cmsghdr *c = CMSG_FIRSTHDR(&msg); c != NULL; c = CMSG_NXTHDR(&msg, c)) {
+        if (c->cmsg_level == IPPROTO_IP && c->cmsg_type == IP_PKTINFO) {
+            struct in_pktinfo pi;
+            memcpy(&pi, CMSG_DATA(c), sizeof(pi));
+            *dst_ip = from_lwip(pi.ipi_addr.s_addr);
+        }
+    }
+    return n;
+}
+
 static void net_task(void *arg)
 {
     (void)arg;
     const int sock = s_sock;
-    uint32_t next_tick = now_ms();
-    uint32_t next_dhcp_poll = next_tick + DHCP_POLL_MS;
+    s_next_tick = now_ms();
+    uint32_t next_dhcp_poll = s_next_tick + DHCP_POLL_MS;
     for (;;) {
         drain_work();
         uint32_t now = now_ms();
-        int32_t wait = (int32_t)(next_tick - now);
+        int32_t wait = (int32_t)(s_next_tick - now);
         if (wait < 0) wait = 0;
         if (wait > (int32_t)s_period_ms) wait = (int32_t)s_period_ms;
 
@@ -437,14 +489,12 @@ static void net_task(void *arg)
         bool got = false;
         if (r > 0 && FD_ISSET(sock, &rfds)) {
             for (int i = 0; i < RX_BATCH; i++) {
-                struct sockaddr_in from;
-                socklen_t flen = sizeof(from);
-                int n = recvfrom(sock, s_rx_buf, sizeof(s_rx_buf), MSG_DONTWAIT, (struct sockaddr *)&from, &flen);
+                uint32_t src_ip, dst_ip;
+                uint16_t src_port;
+                int n = receive(sock, &src_ip, &src_port, &dst_ip);
                 if (n <= 0) break;
                 got = true;
-                if (s_rx) {
-                    s_rx(s_ctx, from_lwip(from.sin_addr.s_addr), lwip_ntohs(from.sin_port), s_rx_buf, (size_t)n);
-                }
+                if (s_rx) s_rx(s_ctx, src_ip, src_port, dst_ip, s_rx_buf, (size_t)n);
             }
         }
 
@@ -454,8 +504,8 @@ static void net_task(void *arg)
             next_dhcp_poll = now + DHCP_POLL_MS;
             poll_dhcp();
         }
-        bool due = (int32_t)(now - next_tick) >= 0;
-        if (due) next_tick = now + s_period_ms;
+        bool due = (int32_t)(now - s_next_tick) >= 0;
+        if (due) s_next_tick = now + s_period_ms;
         if ((got || due) && s_tick) s_tick(s_ctx);
     }
 }
