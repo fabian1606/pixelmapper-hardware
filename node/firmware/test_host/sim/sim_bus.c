@@ -1,9 +1,10 @@
-/* test_rdm_sim.c - simulated RS-485 RDM bus (see test_rdm_sim.h). */
-#include "test_rdm_sim.h"
+/* sim_bus.c - simulated RS-485 RDM bus (see sim_bus.h). */
+#include "sim_bus.h"
 
 #include <string.h>
 
 #include "pm_pids.h"
+#include "sim_model.h"
 
 #define TUBE_WINDOW_START_MS 26u  /* tube README: rescue window 26..225 ms after reset */
 #define TUBE_WINDOW_END_MS 225u
@@ -89,15 +90,21 @@ static bool dev_update(sim_bus_t *b, sim_dev_t *d)
         d->present = true;
         d->muted = false;
         d->mode = d->tube ? SIM_BOOT_WINDOW : SIM_APP;
+        if (d->model) sim_model_power_on(b, d);
     }
     if (d->mode == SIM_BOOT_WINDOW) {
         uint32_t t = b->now_ms - d->power_on_ms;
         if (t < TUBE_WINDOW_START_MS) return false;
         if (t > TUBE_WINDOW_END_MS) {
-            d->mode = d->app_valid ? SIM_APP : SIM_BOOT;
             d->muted = false; /* reset into the app */
+            if (d->model) {
+                sim_model_window_end(b, d);
+            } else {
+                d->mode = d->app_valid ? SIM_APP : SIM_BOOT;
+            }
         }
     }
+    if (d->model) return sim_model_update(b, d);
     return true;
 }
 
@@ -151,6 +158,7 @@ static int dev_respond(sim_bus_t *b, sim_dev_t *d, const pm_rdm_msg_t *m, uint8_
     d->requests++;
     d->last_pid_hi = (uint8_t)(m->pid >> 8);
     d->last_pid_lo = (uint8_t)m->pid;
+    if (d->model) return sim_model_respond(b, d, m, bcast, out);
     int n;
     if (m->pid == PM_PID_BOOT_INFO && m->cc == PM_RDM_CC_GET) {
         d->boot_info_gets++;

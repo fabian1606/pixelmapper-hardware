@@ -66,6 +66,11 @@ Was hier über das Verhalten des Nodes steht, ist das Soll; Firmware (`node/firm
   - `DefaultRespUID` = RDM-UID des Nodes (Spec: „RDMnet & LLRP Default Responder UID“; wir nutzen das Feld für die
     UID des eingebauten RDM-Responders, LLRP/RDMnet gibt es nicht) **[FEST]**
   - MAC, BindIp = eigene IP, `RefreshRate` = 44
+  - **[KORR]** Nur das Feld der aktuellen Richtung trägt das Universe (SwOut bei Output, SwIn bei Input, das andere 0);
+    ein Input-Port meldet GoodOutputB Bit 7 (RDM aus). `AcnPriority` = 0 (kein sACN, §1; ArtAddress-AcnPriority wird
+    ignoriert). `NodeReport` `#xxxx [zzzz] Text`: Zähler zählt jedes ArtPollReply und beginnt nach einem Neustart neu
+    (daran erkennt `pixelmapper-net` einen Neustart, §6.1); nach einem gescheiterten Update `#000e … Firmware update
+    failed` bis zum Neustart
 - „Kein Signal“ am Input: GoodInput Bit 7 **nicht** gesetzt (ein eigenes Bit gibt es nicht) **[KORR]**.
 - **Ungefragte Replies:** bei jeder Änderung an Konfiguration oder Status (auch durch andere Clients, auch Merge-Beginn)
   per Unicast an alle Controller, die mit Flags Bit 1 gepollt haben.
@@ -85,8 +90,9 @@ Was hier über das Verhalten des Nodes steht, ist das Soll; Firmware (`node/firm
 - **Port-Address 0 ist in Art-Net 4 deprecated** **[KORR]**. Werkseinstellung der Ports: Net 0, Sub-Net 0,
   Universe 1–4 (Port-Address 1–4).
 - Optional **`ArtSync`** (0x5200) nach jedem Frame-Satz. **[KORR] ArtSync muss per Broadcast gesendet werden** (Unicast
-  ist laut Spec nicht erlaubt). Der Node ignoriert ArtSync, solange er auf einem Port mergt oder wenn es nicht von der
-  IP des letzten ArtDmx kommt. Fehlt der Sync länger als 4 s, gibt der Node wieder direkt aus.
+  ist laut Spec nicht erlaubt). Der Node ignoriert ArtSync, solange er auf einem Port **Streams verschiedener IPs**
+  mergt (zwei Physicals derselben IP blockieren ArtSync nicht, digest §3.3) oder wenn es nicht von der IP des letzten
+  ArtDmx kommt **[KORR]**. Fehlt der Sync länger als 4 s, gibt der Node wieder direkt aus.
 - **Der Node sendet DMX dauerhaft** mit ca. 40 Hz (PORTn_DMX_RATE). Datenverlust: **nach 4 s ohne ArtDmx greift
   Failsafe** (unsere Festlegung, die Spec nennt keine Zeit), Standard Hold. Wer „Zero“ nutzt, sendet ≥ 1×/s.
 - **Merge:** höchstens 2 Quellen pro Port, unterschieden nach **IP + Physical** **[KORR]**. Standard HTP, LTP per
@@ -163,7 +169,8 @@ schickt allen Pollern mit Flags Bit 1 ein ungefragtes Reply.
   stecken startet zwar ungemutet, aber das Un-Mute macht die Suche unabhängig davon, in welchem Zustand Geräte auf der
   Leitung sind (OLA macht es genauso; `pm_rdm_ctrl.c`). Kosten: drei Broadcasts pro Lauf. Während BOOT_CATCH läuft,
   startet keine Hintergrundsuche (sie würde das ~200-ms-Fenster der Tube verfehlen).
-- Bis zu **512 Geräte pro Port**. Port ohne RDM (aus oder Input): TOD leer.
+- Bis zu **512 Geräte pro Port**. Port ohne RDM (aus, Input oder RDM aus): `ArtTodData` mit **TodNak** und ohne UIDs
+  **[KORR]**.
 
 ### 6.2 RDM-Anfragen [FEST]
 
@@ -190,11 +197,14 @@ schickt allen Pollern mit Flags Bit 1 ein ungefragtes Reply.
   - Pflicht (nicht in SUPPORTED_PARAMETERS): DEVICE_INFO, SUPPORTED_PARAMETERS, PARAMETER_DESCRIPTION,
     SOFTWARE_VERSION_LABEL, IDENTIFY_DEVICE
   - E1.20: QUEUED_MESSAGE, STATUS_MESSAGES, STATUS_ID_DESCRIPTION, CLEAR_STATUS_ID, PRODUCT_DETAIL_ID_LIST
-    (ETHERNET_NODE), DEVICE_MODEL_DESCRIPTION, MANUFACTURER_LABEL, DEVICE_LABEL (= Short Name; längere Labels werden
-    auf 17 Zeichen gekürzt), FACTORY_DEFAULTS (= Werksreset), BOOT_SOFTWARE_VERSION_ID/LABEL, **DISPLAY_LEVEL**
-    (= Display-Helligkeit), RESET_DEVICE
+    (ETHERNET_NODE), DEVICE_MODEL_DESCRIPTION ("Pixelmapper Node"), MANUFACTURER_LABEL ("Prototype", wie die Tube),
+    DEVICE_LABEL (= Short Name; längere Labels werden auf 17 Zeichen gekürzt), FACTORY_DEFAULTS (= Werksreset),
+    BOOT_SOFTWARE_VERSION_ID/LABEL (ESP-IDF-Version des installierten Bootloaders: `0x00MMmmpp`,
+    „ESP-IDF v5.5.6 bootloader“) **[KORR]**, **DISPLAY_LEVEL** (= Display-Helligkeit), RESET_DEVICE
   - E1.37-2: LIST_INTERFACES, INTERFACE_LABEL, INTERFACE_HARDWARE_ADDRESS_TYPE1, IPV4_DHCP_MODE, IPV4_CURRENT_ADDRESS,
-    IPV4_STATIC_ADDRESS, INTERFACE_RENEW_DHCP, INTERFACE_APPLY_CONFIGURATION, IPV4_DEFAULT_ROUTE
+    IPV4_STATIC_ADDRESS, INTERFACE_RENEW_DHCP, INTERFACE_APPLY_CONFIGURATION, IPV4_DEFAULT_ROUTE. **[KORR]**
+    IPV4_STATIC_ADDRESS meldet ohne gesetzte Adresse die Art-Net-Ersatzadresse 2.B.C.D (§2), die eine statische
+    Konfiguration dann nutzt; IPV4_DEFAULT_ROUTE ohne Gateway = Interface 0 + 0.0.0.0
   - **Nicht** genutzt: E1.37-1 LOCK_PIN/LOCK_STATE (verlangt PIN und sperrt RDM-SETs mit WRITE_PROTECT – unsere
     Panelsperre sperrt nur das Bedienfeld und lässt sich am Gerät ohne PIN lösen), DMX_START_ADDRESS (Footprint 0),
     die Dimmer-PIDs aus E1.37-1, DNS-PIDs aus E1.37-2.
@@ -298,7 +308,9 @@ Art-Net-`.alf`-Format (1060-Byte-Header mit OEM-Liste), 1024 Byte Daten pro Bloc
 auf beiden Seiten. Unser Beschreibungsblock steckt im Spare-Bereich des Headers und wird so **im ersten Block** geprüft.
 
 **Weg B: RDM an die Node-UID** – FW_INFO (0x8180), FW_BEGIN (0x8181, PD = 64-Byte-Beschreibungsblock), FW_WRITE
-(0x8182, Offset u32 + ≤ 224 B), FW_FINISH (0x8183). PDL und Fehlercodes in `pids.toml`.
+(0x8182, Offset u32 + ≤ 224 B), FW_FINISH (0x8183). PDL und Fehlercodes in `pids.toml`. **[KORR]** FW_WRITE mit
+Lücke (Offset > empfangen) → NACK DATA_OUT_OF_RANGE, die Sitzung läuft weiter (ab `received` neu senden), FW_INFO
+unverändert; FW_WRITE/FW_FINISH ohne Sitzung → NACK, FW_INFO unverändert.
 
 **Für beide Wege:** Prüfung vor dem ersten Schreibzugriff (OEM-Liste bei Art-Net, ESTA-Hersteller, DEVICE_MODEL_ID,
 HW-Revision, Größe; bei Art-Net zusätzlich `FirmwareLength` = 530 + ceil(image_length / 2), sonst `DESC_MISMATCH`
@@ -347,7 +359,7 @@ Geändert (oben mit [KORR] markiert):
 1. Input-Broadcast verboten → PID entfällt.
 2. `Physical` gehört zur Merge-Quelle (IP + Physical).
 3. ArtPollReply nur Unicast, Zufallsverzögerung bis 1 s; Controller wartet bis 3 s.
-4. ArtSync nur als Broadcast; wird beim Mergen und von fremder IP ignoriert.
+4. ArtSync nur als Broadcast; wird beim Mergen von Streams verschiedener IPs und von fremder IP ignoriert.
 5. Ein Port pro BindIndex statt 4 Ports in BindIndex 1.
 6. Aktuelle Richtung in `PortTypes[]`, nicht in GoodInput/GoodOutput; „kein Signal“ = GoodInput Bit 7 aus.
 7. ArtInput wirkt nur auf Inputs.
@@ -375,6 +387,17 @@ Geändert (oben mit [KORR] markiert):
     image-format.md §2.3/§2.5).
 24. Statusmeldungs-Namen und -Texte werden aus `pids.toml` generiert (`pids::status_name`, `PM_STATUS_LIST`).
 
+### 12.3 Nachträge aus dem Ende-zu-Ende-Test (Phase 3, `docs/e2e-findings.md`)
+
+25. ArtSync wird nur beim Mergen von Streams **verschiedener IPs** ignoriert (§4, digest §3.3).
+26. Pixelmapper fordert die TODs nach einem Neustart des Nodes erneut an; erkannt am NodeReport-Zähler (§3, §6.1).
+27. ArtPollReply: SwIn/SwOut nur für die aktuelle Richtung, Input-Port meldet RDM aus, AcnPriority 0 (§3).
+28. Port ohne RDM: ArtTodData mit TodNak (§6.1).
+29. MANUFACTURER_LABEL „Prototype“, BOOT_SOFTWARE_VERSION_ID/LABEL aus dem Bootloader, IPV4_STATIC_ADDRESS
+    ohne Adresse = 2.B.C.D, IPV4_DEFAULT_ROUTE ohne Gateway = 0/0 (§6.3).
+30. FW_WRITE-Lücke und Anfragen ohne Sitzung lassen FW_INFO unverändert (§9.2).
+31. Failsafe-Modus pro Port (ArtAddress über BindIndex, Status3 je Reply).
+
 ## 13. Offene Punkte
 
 - ESTA-Normtexte (E1.20-2025, E1.37-1/-2) liegen nicht vor; der RDM-Digest stützt sich auf OLA/Ja Rule und ist dort
@@ -386,4 +409,6 @@ Geändert (oben mit [KORR] markiert):
   Bereich/Beschreibung in `pids.toml` bestätigen.
 - Hintergrundsuche mit Un-Mute: auf der Hardware prüfen, dass die DMX-Rate ≥ 30 Hz bleibt und ein zweiter
   RDM-Controller am selben Strang nicht stört (das Un-Mute hebt auch dessen Mutes auf).
-- Ende-zu-Ende-Test `pixelmapper-net` gegen den virtuellen Node (`tools/e2e.sh`, Stand in `docs/STATUS.md`).
+- Ende-zu-Ende-Test `pixelmapper-net` gegen den virtuellen Node: `tools/e2e.sh`, Abweichungen in
+  `docs/e2e-findings.md`. Der virtuelle Node simuliert die RS-485-Leitung; Zeitverhalten am echten Bus bleibt auf der
+  Hardware zu prüfen.

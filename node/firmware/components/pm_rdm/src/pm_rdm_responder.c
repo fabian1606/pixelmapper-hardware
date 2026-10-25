@@ -540,8 +540,15 @@ static int h_static_address(pm_rdm_responder_t *r, ctx_t *c)
     pm_settings_t *s = &r->work;
     settings_get(r, s);
     if (c->req->cc == PM_RDM_CC_GET) {
+        /* static_ip 0 = the Art-Net fallback 2.B.C.D: report the address a static configuration uses */
+        uint32_t ip = s->ip.static_ip;
+        if (ip == 0) {
+            pm_rdm_net_info_t n;
+            net_info(r, &n);
+            ip = pm_ip_artnet_fallback(n.mac, PM_ARTNET_OEM_NODE);
+        }
         pm_put_be32(c->out, PM_RDM_RESP_INTERFACE_ID);
-        pm_put_be32(c->out + 4, s->ip.static_ip);
+        pm_put_be32(c->out + 4, ip);
         c->out[8] = mask_to_cidr(s->ip.static_mask);
         c->out_len = 9;
         return RES_ACK;

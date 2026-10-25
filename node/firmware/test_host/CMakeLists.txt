@@ -48,15 +48,35 @@ add_custom_command(
     DEPENDS ${VECTOR_FILES} ${CMAKE_CURRENT_SOURCE_DIR}/tools/vectors_to_c.py
     COMMENT "Converting protocol/vectors to C")
 
+# Simulated RS-485 bus with virtual responders (pm_rdm_ctrl tests, virtual node).
+add_library(pm_sim STATIC sim/sim_bus.c sim/sim_model.c)
+target_include_directories(pm_sim PUBLIC sim)
+target_link_libraries(pm_sim PUBLIC pm_rdm pm_protocol)
+target_compile_options(pm_sim PRIVATE ${PM_WARN})
+
 file(GLOB TEST_SOURCES CONFIGURE_DEPENDS src/*.c)  # test_<component>*.c, see CLAUDE.md
 add_executable(pm_tests ${TEST_SOURCES}
                         ${CMAKE_CURRENT_BINARY_DIR}/vectors_gen.c)
 target_include_directories(pm_tests PRIVATE src)
-target_link_libraries(pm_tests PRIVATE pm_node pm_artnet pm_rdm pm_protocol)
+target_link_libraries(pm_tests PRIVATE pm_node pm_sim)
 target_compile_options(pm_tests PRIVATE -Wall -Wextra -Werror)
 
 enable_testing()
 add_test(NAME pm_tests COMMAND pm_tests)
+
+# Virtual node: the real pm_node/pm_artnet/pm_rdm with fake port engine (simulated bus), RAM config and RAM
+# firmware sink (pm_ota_session) on real UDP sockets - target of tools/e2e.sh (pixelmapper-net end-to-end tests).
+add_executable(virtual_node virtual_node/vn_main.c virtual_node/vn_port.c virtual_node/vn_config.c
+                            virtual_node/vn_fw.c
+                            ${FW}/components/pm_config/src/pm_config_store.c
+                            ${FW}/components/pm_ota/src/pm_ota_session.c)
+target_include_directories(virtual_node PRIVATE virtual_node ${FW}/components/pm_config/src
+                           ${FW}/components/pm_ota/src)
+target_link_libraries(virtual_node PRIVATE pm_node pm_sim)
+target_compile_options(virtual_node PRIVATE ${PM_WARN})
+target_compile_definitions(virtual_node PRIVATE _DEFAULT_SOURCE _DARWIN_C_SOURCE)
+add_test(NAME virtual_node_smoke COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/vn_smoke.py
+         $<TARGET_FILE:virtual_node>)
 
 # Component-owned host test projects, run in the same ctest pass (Phase 2 integration).
 add_subdirectory(${FW}/components/pm_port/test_host ${CMAKE_CURRENT_BINARY_DIR}/pm_port)   # test_pm_port

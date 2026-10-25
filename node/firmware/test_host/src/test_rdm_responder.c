@@ -745,7 +745,9 @@ static void test_e137_2(void)
     /* static address */
     CHECK_ACK(ifc_req(PM_RDM_CC_GET, PM_RDM_PID_IPV4_STATIC_ADDRESS, ID, NULL, 0));
     CHECK_EQ(g_resp.pdl, 9);
-    CHECK_EQ(pm_get_be32(g_resp.pd + 4), 0);
+    /* static_ip 0 = Art-Net fallback 2.B.C.D (B = MAC[3] + OemHi + OemLo): 2.(0x33 + 0xFF).0x44.0x55 */
+    CHECK_EQ(pm_get_be32(g_resp.pd + 4), 0x02324455u);
+    CHECK_EQ(pm_get_be32(g_resp.pd + 4), pm_ip_artnet_fallback(F.net.mac, PM_ARTNET_OEM_NODE));
     CHECK_EQ(g_resp.pd[8], 8);
     uint8_t st[5];
     pm_put_be32(st, 0xC0A8010Au);

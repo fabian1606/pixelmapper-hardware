@@ -32,6 +32,7 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 #include "esp_random.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -609,6 +610,16 @@ void app_main(void)
     s_port_ok = err == ESP_OK;
     if (!s_port_ok) ESP_LOGE(TAG, "port engine: %s", esp_err_to_name(err));
 
+    /* BOOT_SOFTWARE_VERSION_ID/LABEL: the ESP-IDF version of the installed 2nd-stage bootloader (not updated by OTA) */
+    static char boot_label[40];
+    uint32_t boot_id = 0;
+    esp_bootloader_desc_t boot_desc;
+    if (esp_ota_get_bootloader_description(NULL, &boot_desc) == ESP_OK) {
+        boot_id = pm_node_boot_version(boot_desc.idf_ver, boot_label, sizeof(boot_label));
+    } else {
+        ESP_LOGW(TAG, "bootloader description not readable");
+    }
+
     /* pm_node = Art-Net node + RDM responder (network task objects, one internal-RAM block allocated once) */
     const pm_node_identity_t id = {
         .artnet = {
@@ -626,6 +637,8 @@ void app_main(void)
             .model_description = "Pixelmapper Node",
             .manufacturer_label = "Prototype",
             .hw_revision = pm_board_revision(),
+            .boot_sw_version_id = boot_id,
+            .boot_sw_version_label = boot_label,
         },
     };
     static pm_node_ops_t ops = {

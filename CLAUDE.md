@@ -84,8 +84,10 @@ python3 protocol/gen.py --check
 cargo build --workspace && cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all --check
 
-# End-to-end: pixelmapper-net against the virtual node
-tools/e2e.sh                                 # Ende-zu-Ende, siehe docs/STATUS.md
+# End-to-end: pixelmapper-net against the virtual node (real pm_node/pm_artnet/pm_rdm + simulated bus, test_host
+# target virtual_node). Builds test_host, runs crates/pixelmapper-net/tests/e2e_virtual_node.rs (PM_VIRTUAL_NODE;
+# without it those tests return at once). Every Rust <-> C <-> contract difference goes into docs/e2e-findings.md
+tools/e2e.sh
 
 # Tube (only when tube/ is touched)
 ~/.platformio/penv/bin/pio run -d tube/boot_rdm && ~/.platformio/penv/bin/pio run -d tube/firmware -e isp

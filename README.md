@@ -28,14 +28,15 @@ protocol/                   the contract between all parts
   vectors/                  JSON test vectors (C and Rust tests run against them)
 node/firmware/              ESP-IDF project (esp32p4), components pm_*
   components/pm_node/      pure-C glue between pm_artnet, pm_rdm, pm_port and pm_ui (Phase 2)
-  test_host/                host tests (CMake): pm_protocol, pm_artnet, pm_rdm, pm_port, pm_net/config/ota, UI renderer
+  test_host/                host tests (CMake): pm_protocol, pm_artnet, pm_rdm, pm_port, pm_net/config/ota, UI renderer;
+                            sim/ (simulated RS-485 bus with tubes/fixtures), virtual_node/ (the firmware on UDP)
 tube/
   firmware/                 tube_fw (PlatformIO, ATmega8)
   boot_rdm/                 tube_boot_rdm (2 KB RDM bootloader)
   tools/                    flash_rdm.py, flash_dmx.py, tool.py, sim/ (AVR emulator tests)
 crates/pixelmapper-net/     Rust library + pmnet
 crates/pmnet-bridge/        WebSocket bridge for the web app (pmnet-bridge serve)
-tools/e2e.sh                end-to-end test (see docs/STATUS.md)
+tools/e2e.sh                end-to-end test pixelmapper-net <-> virtual node (findings: docs/e2e-findings.md)
 ```
 
 ## Quick start
@@ -59,8 +60,11 @@ python3 tube/tools/flash_rdm.py --selftest
 cargo build --workspace && cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all --check
 
-# end-to-end: pixelmapper-net against the virtual node
-tools/e2e.sh                                    # end-to-end, see docs/STATUS.md
+# end-to-end: pixelmapper-net against the virtual node (builds test_host incl. virtual_node, runs
+# crates/pixelmapper-net/tests/e2e_virtual_node.rs with PM_VIRTUAL_NODE set; findings: docs/e2e-findings.md)
+tools/e2e.sh
+# the virtual node alone (prints "READY ... port= bcast= ctl= uid=", see virtual_node/vn_main.c for the options):
+node/firmware/test_host/build/virtual_node --port 16454 --tubes 1:3,2:1 --log
 ```
 
 Conventions for contributors (human or agent): [CLAUDE.md](CLAUDE.md).
