@@ -106,39 +106,40 @@ static void p_restart(void *ctx)
     esp_restart(); /* ui_core calls this ~300 ms after the "Restarting" frame */
 }
 
-/* Settings copies are 2.3 KB each and needed only for a moment: taken from the heap (PSRAM if present) instead of
- * keeping three static copies in internal RAM. */
-static pm_settings_t *settings_alloc(unsigned n)
-{
-    pm_settings_t *p = heap_caps_malloc(n * sizeof(pm_settings_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!p) p = malloc(n * sizeof(pm_settings_t));
-    if (!p) ESP_LOGE(TAG, "no memory for a settings copy");
-    return p;
-}
-
 static void p_factory(void *ctx, bool keep_network)
 {
     (void)ctx;
-    pm_settings_t *buf = settings_alloc(2);
-    if (!buf) return;
-    pm_settings_t *cur = &buf[0], *def = &buf[1];
-    pm_config_get(cur);
-    pm_settings_defaults(def);
-    def->hw_revision_override = cur->hw_revision_override;
-    if (keep_network) def->ip = cur->ip;
-    pm_config_update(def, PM_SRC_LOCAL_UI);
-    free(buf);
+    /* pm_config does the read-modify-write under its lock (no lost concurrent change) */
+    esp_err_t err = keep_network ? pm_config_factory_reset_keep_network(PM_SRC_LOCAL_UI)
+                                 : pm_config_factory_reset(PM_SRC_LOCAL_UI);
+    if (err != ESP_OK) ESP_LOGW(TAG, "factory reset failed: %s", esp_err_to_name(err));
+}
+
+typedef struct {
+    pm_port_idx_t port;
+    uint16_t len;
+    uint8_t data[512];
+} scene_rec_t;
+
+static void scene_apply(void *ctx, pm_settings_t *s)
+{
+    const scene_rec_t *r = ctx;
+    s->port[r->port].scene_len = r->len;
+    memcpy(s->port[r->port].scene, r->data, sizeof(r->data));
 }
 
 static void p_record_scene(void *ctx, pm_port_idx_t port)
 {
     (void)ctx;
-    pm_settings_t *s = settings_alloc(1);
-    if (!s) return;
-    pm_config_get(s);
-    s->port[port].scene_len = pm_port_output_read(port, s->port[port].scene, sizeof(s->port[port].scene));
-    pm_config_update(s, PM_SRC_LOCAL_UI);
-    free(s);
+    if (port >= PM_NUM_PORTS) return;
+    scene_rec_t *r = calloc(1, sizeof(*r)); /* not on the 6 KB UI stack */
+    if (!r) return;
+    r->port = port;
+    r->len = pm_port_output_read(port, r->data, sizeof(r->data));
+    /* atomic: only the scene of this port is written, concurrent remote changes survive */
+    esp_err_t err = pm_config_modify(scene_apply, r, PM_SRC_LOCAL_UI);
+    if (err != ESP_OK) ESP_LOGW(TAG, "record scene failed: %s", esp_err_to_name(err));
+    free(r);
 }
 
 static void p_tod_flush(void *ctx, pm_port_idx_t port)
