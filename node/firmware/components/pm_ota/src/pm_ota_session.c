@@ -157,7 +157,15 @@ pm_fw_error_t pm_ota_session_finish(pm_ota_session_t *s)
 
 void pm_ota_session_abort(pm_ota_session_t *s, pm_fw_error_t reason)
 {
-    if (s->st.state != PM_FW_STATE_RECEIVING) return;
+    if (s->st.state == PM_FW_STATE_IDLE || s->st.state == PM_FW_STATE_FAILED) {
+        /* no session: record a rejection that happened before begin() (pm_fw.h) */
+        if (reason == PM_FW_ERROR_NONE) return;
+        s->st.received = 0;
+        s->st.total = 0;
+        set_state(s, PM_FW_STATE_FAILED, reason);
+        return;
+    }
+    if (s->st.state != PM_FW_STATE_RECEIVING) return; /* VERIFYING / READY: reboot into the new image pending */
     close_backend(s);
     set_state(s, reason == PM_FW_ERROR_NONE ? PM_FW_STATE_IDLE : PM_FW_STATE_FAILED, reason);
 }

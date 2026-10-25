@@ -411,6 +411,35 @@ static void t_busy_timeout(void)
     check_failed(PM_FW_ERROR_TIMEOUT);
 }
 
+/* abort() while no session runs records a rejection made before begin() (pm_fw.h: .alf OEM list etc.). */
+static void t_abort_idle(void)
+{
+    g_context = "abort while idle";
+    pm_image_desc_t a = make_image();
+    pm_fw_status_t st;
+    setup();
+    pm_ota_session_abort(&s_s, PM_FW_ERROR_NONE); /* IDLE + NONE: nothing */
+    pm_ota_session_status(&s_s, &st);
+    CHECK_EQ(st.state, PM_FW_STATE_IDLE);
+    CHECK_EQ(s_ev.count, 0);
+    pm_ota_session_abort(&s_s, PM_FW_ERROR_OEM);
+    check_failed(PM_FW_ERROR_OEM);
+    CHECK_EQ(s_fake.aborts, 0); /* no backend session was open */
+    CHECK_EQ(s_ev.count, 1);
+    CHECK_EQ(s_ev.last.last_error, PM_FW_ERROR_OEM);
+    pm_ota_session_abort(&s_s, PM_FW_ERROR_DESC_MISMATCH); /* FAILED: the newer reason wins */
+    check_failed(PM_FW_ERROR_DESC_MISMATCH);
+    pm_ota_session_status(&s_s, &st);
+    CHECK(st.received == 0 && st.total == 0);
+    CHECK_EQ(begin(&a), PM_FW_ERROR_NONE); /* a new session starts normally afterwards */
+    CHECK_EQ(send(0, IMG_LEN, 1024), PM_FW_ERROR_NONE);
+    CHECK_EQ(pm_ota_session_finish(&s_s), PM_FW_ERROR_NONE);
+    pm_ota_session_abort(&s_s, PM_FW_ERROR_OEM); /* READY: reboot pending, untouched */
+    pm_ota_session_status(&s_s, &st);
+    CHECK_EQ(st.state, PM_FW_STATE_READY);
+    CHECK_EQ(st.last_error, PM_FW_ERROR_NONE);
+}
+
 void test_ota_session(void)
 {
     t_desc_checks();
@@ -419,5 +448,6 @@ void test_ota_session(void)
     t_desc_in_image();
     t_finish_errors();
     t_busy_timeout();
+    t_abort_idle();
     g_context = NULL;
 }

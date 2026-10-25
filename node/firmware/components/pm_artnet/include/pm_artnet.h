@@ -52,6 +52,10 @@ extern "C" {
 #define PM_ARTNET_MAX_SUBSCRIBERS 32u      /**< remembered output nodes per input port / ArtTodData subscribers */
 #define PM_ARTNET_MAX_RDM_PENDING 32u      /**< forwarded ArtRdm requests waiting for an answer */
 #define PM_ARTNET_TOD_MAX 512u             /**< UIDs per port that are reported in ArtTodData */
+#define PM_ARTNET_RX_ACTIVE_MS 2000u       /**< pm_artnet_port_live().rx_active: ArtDmx within this time */
+/** Tokens of pm_artnet_rdm_request_t never have bits outside this mask (bit 31 is free for the platform, e.g. to
+ *  tag its own front-panel requests on the same port queue). */
+#define PM_ARTNET_RDM_TOKEN_MASK 0x7FFFFFFFu
 
 /* ------------------------------------------------------------------------------------------------ platform ops */
 
@@ -78,7 +82,7 @@ typedef struct {
  *  pm_artnet_rdm_response() with the same `token`. */
 typedef struct {
     pm_port_idx_t port;
-    uint32_t token;              /**< opaque, echo in pm_artnet_rdm_response() */
+    uint32_t token;              /**< opaque, echo in pm_artnet_rdm_response(); never 0, bit 31 always clear */
     const uint8_t *rdm;          /**< RDM message without start code */
     size_t rdm_len;
 } pm_artnet_rdm_request_t;
@@ -118,7 +122,8 @@ typedef struct {
     pm_err_t (*rdm_request)(void *ctx, const pm_artnet_rdm_request_t *req);
     /** Free request slots of a port (ArtRdm FifoAvail). */
     uint8_t (*rdm_fifo_avail)(void *ctx, pm_port_idx_t port);
-    /** Optional: size of the RDM request queue of a port (ArtRdm FifoMax). NULL = the largest FifoAvail seen. */
+    /** Optional: size of the RDM request queue of a port (ArtRdm FifoMax). NULL = the largest FifoAvail seen.
+     *  The platform should set it (pm_port: PM_RDM_QUEUE_LEN) so FifoMax is right from the first ArtRdm. */
     uint8_t (*rdm_fifo_max)(void *ctx, pm_port_idx_t port);
 
     /** LED/indicator mode changed: PM_AC_LED_NORMAL / MUTE / LOCATE (display off / identify). */
@@ -187,6 +192,29 @@ void pm_artnet_diag(pm_artnet_node_t *n, uint8_t priority, const char *text);
 
 /** Node report text for ArtPollReply NodeReport ("#xxxx [cnt] text", the counter is added by the node). */
 void pm_artnet_set_node_report(pm_artnet_node_t *n, uint16_t code, const char *text);
+
+/* ------------------------------------------------------------------------------------------------ Phase 2 additions */
+
+/** Indicator state changed elsewhere (RDM IDENTIFY_DEVICE, front panel): PM_AC_LED_NORMAL / MUTE / LOCATE.
+ *  Updates ArtPollReply Status1 (unsolicited replies) without calling ops->indicator (no loop). */
+void pm_artnet_set_indicator(pm_artnet_node_t *n, uint8_t ac_led_command);
+
+/** Current indicator state (PM_AC_LED_*). */
+uint8_t pm_artnet_indicator(const pm_artnet_node_t *n);
+
+/** Live Art-Net state of one output port (UI). All false/0 for input/disabled ports. */
+typedef struct {
+    bool rx_active;        /**< ArtDmx accepted within PM_ARTNET_RX_ACTIVE_MS */
+    uint8_t rx_fps;        /**< accepted ArtDmx frames per second (last full 1-s window), 0 when !rx_active */
+    uint8_t merge_sources; /**< 0..2 active merge sources */
+    bool merging;          /**< two sources (GoodOutputA bit 3) */
+    bool data_loss;        /**< no ArtDmx for PM_ARTNET_DATA_LOSS_MS, failsafe applied */
+    bool synced;           /**< ArtSync mode active */
+} pm_artnet_port_live_t;
+
+/** Copy the live state of `port`. Not thread-safe like everything here: call from the node's task and hand a copy
+ *  to other tasks. Values are as of the last call into the node (tick). */
+void pm_artnet_port_live(const pm_artnet_node_t *n, pm_port_idx_t port, pm_artnet_port_live_t *out);
 
 /* ------------------------------------------------------------------------------------------------ merge (exposed for tests) */
 

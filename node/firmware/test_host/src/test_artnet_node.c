@@ -63,6 +63,7 @@ static struct {
     pm_fw_error_t fw_begin_result, fw_finish_result;
     unsigned fw_begins, fw_writes, fw_finishes, fw_aborts, fw_reboots;
     pm_fw_error_t fw_abort_reason;
+    pm_fw_state_t fw_state;          /* what fw_status() reports */
     pm_image_desc_t fw_desc;
     uint8_t fw_image[FW_IMAGE_MAX];
     uint32_t fw_received;
@@ -170,7 +171,12 @@ static pm_fw_error_t fw_write(void *ctx, uint32_t off, const uint8_t *data, size
 
 static pm_fw_error_t fw_finish(void *ctx) { (void)ctx; F.fw_finishes++; return F.fw_finish_result; }
 static void fw_abort(void *ctx, pm_fw_error_t r) { (void)ctx; F.fw_aborts++; F.fw_abort_reason = r; }
-static void fw_status(void *ctx, pm_fw_status_t *out) { (void)ctx; memset(out, 0, sizeof(*out)); }
+static void fw_status(void *ctx, pm_fw_status_t *out)
+{
+    (void)ctx;
+    memset(out, 0, sizeof(*out));
+    out->state = F.fw_state;
+}
 static void fw_reboot(void *ctx) { (void)ctx; F.fw_reboots++; }
 
 static const pm_fw_sink_t SINK = {NULL, fw_begin, fw_write, fw_finish, fw_abort, fw_status, fw_reboot};
@@ -704,7 +710,39 @@ static void test_ip_prog(void)
         CHECK_EQ(F.ip_applies, 1);
         CHECK(F.ip_apply_seq > s->seq); /* reply first, then the new address */
     }
-    /* enquiry: no change */
+    /* enquiry (Command = 0, also with garbage in the address fields): nothing is stored or applied, the reply
+       carries the live address (the bridge session relies on this) */
+    p = (pm_artipprog_t){.command = 0, .ip = IP(9, 9, 9, 9), .mask = 0xFFFFFFF0u, .gateway = IP(9, 9, 9, 1)};
+    F.net.mask = 0xFFFF0000u;
+    F.net.gateway = IP(2, 0, 0, 1);
+    pm_artnet_net_changed(N);
+    unsigned applies = F.applies;
+    clear_sent();
+    rx(CTL_A, PKT, pm_artipprog_encode(&p, PKT, sizeof(PKT)));
+    CHECK_EQ(F.ip_applies, 1);
+    CHECK_EQ(F.applies, applies);
+    CHECK_EQ(count_sent(PM_OP_IP_PROG_REPLY, CTL_A), 1);
+    s = nth_sent(PM_OP_IP_PROG_REPLY, CTL_A, 0);
+    if (s) {
+        pm_artipprogreply_decode(s->data, s->len, &r);
+        CHECK(r.ip == NODE_IP && r.mask == 0xFFFF0000u && r.gateway == IP(2, 0, 0, 1) && r.status == 0);
+    }
+    F.settings.ip.dhcp = true; /* DHCP bit = configured mode */
+    pm_artnet_settings_changed(N, &F.settings, PM_CHG_IP);
+    clear_sent();
+    rx(CTL_A, PKT, pm_artipprog_encode(&p, PKT, sizeof(PKT)));
+    s = nth_sent(PM_OP_IP_PROG_REPLY, CTL_A, 0);
+    if (s) {
+        pm_artipprogreply_decode(s->data, s->len, &r);
+        CHECK_EQ(r.status, 0x40);
+    }
+    CHECK_EQ(F.ip_applies, 1);
+    CHECK_EQ(F.applies, applies);
+    F.settings.ip.dhcp = false;
+    pm_artnet_settings_changed(N, &F.settings, PM_CHG_IP);
+    F.net.mask = 0xFF000000u;
+    F.net.gateway = 0;
+    pm_artnet_net_changed(N);
     p = (pm_artipprog_t){0};
     clear_sent();
     rx(CTL_A, PKT, pm_artipprog_encode(&p, PKT, sizeof(PKT)));
@@ -1017,11 +1055,13 @@ static void test_firmware(void)
     advance(30);
     CHECK_EQ(F.fw_reboots, 1);
 
-    /* wrong OEM: rejected in the first block, sink untouched */
+    /* wrong OEM: rejected in the first block, no session; the reason goes to the sink (FW_INFO.last_error) */
     setup();
     build_alf(0x1234);
     CHECK_EQ(send_block(CTL_A, 0, PM_FIRM_FIRST, 0), PM_FIRM_FAIL);
     CHECK_EQ(F.fw_begins, 0);
+    CHECK_EQ(F.fw_writes, 0);
+    CHECK(F.fw_aborts == 1 && F.fw_abort_reason == PM_FW_ERROR_OEM);
     clear_sent();
     rx(CTL_A, PKT, mk_poll(0));
     CHECK(strncmp(reply_of(nth_sent(PM_OP_POLL_REPLY, CTL_A, 0)).node_report, "#000e", 5) == 0);
@@ -1038,6 +1078,25 @@ static void test_firmware(void)
     ALF_WORDS++;
     CHECK_EQ(send_block(CTL_A, 0, PM_FIRM_FIRST, 0), PM_FIRM_FAIL);
     CHECK_EQ(F.fw_begins, 0);
+    CHECK(F.fw_aborts == 1 && F.fw_abort_reason == PM_FW_ERROR_DESC_MISMATCH);
+    /* broken description block in the header */
+    setup();
+    build_alf(PM_ARTNET_OEM_NODE);
+    ALF[546] ^= 0xFF; /* magic */
+    CHECK_EQ(send_block(CTL_A, 0, PM_FIRM_FIRST, 0), PM_FIRM_FAIL);
+    CHECK(F.fw_aborts == 1 && F.fw_abort_reason == PM_FW_ERROR_DESC_MAGIC);
+    /* rejected while another source (RDM FW_*) owns the sink: its session is not aborted */
+    setup();
+    build_alf(0x1234);
+    F.fw_state = PM_FW_STATE_RECEIVING;
+    CHECK_EQ(send_block(CTL_A, 0, PM_FIRM_FIRST, 0), PM_FIRM_FAIL);
+    CHECK_EQ(F.fw_aborts, 0);
+    F.fw_state = PM_FW_STATE_READY;
+    CHECK_EQ(send_block(CTL_A, 0, PM_FIRM_FIRST, 0), PM_FIRM_FAIL);
+    CHECK_EQ(F.fw_aborts, 0);
+    F.fw_state = PM_FW_STATE_FAILED; /* an old failure: overwritten */
+    CHECK_EQ(send_block(CTL_A, 0, PM_FIRM_FIRST, 0), PM_FIRM_FAIL);
+    CHECK_EQ(F.fw_aborts, 1);
     /* wrong BlockId */
     setup();
     build_alf(PM_ARTNET_OEM_NODE);
@@ -1209,6 +1268,69 @@ static void test_edge_cases(void)
     g_context = NULL;
 }
 
+/* Phase 2: live port state for the UI, indicator mirror, RDM tokens keep bit 31 free. */
+static void test_live(void)
+{
+    g_context = "live";
+    setup();
+    pm_artnet_port_live_t l;
+    pm_artnet_port_live(N, 0, &l);
+    CHECK(!l.rx_active && l.rx_fps == 0 && l.merge_sources == 0 && !l.data_loss);
+    for (unsigned i = 0; i < 60; i++) { /* 20 fps from A for 3 s, B joins for the second half */
+        rx(CTL_A, PKT, mk_dmx_fill(1, 0, 0, 1, 2));
+        if (i >= 30) rx(CTL_B, PKT, mk_dmx_fill(1, 0, 0, 1, 2));
+        advance(50);
+    }
+    pm_artnet_port_live(N, 0, &l);
+    CHECK(l.rx_active);
+    CHECK(l.rx_fps >= 39 && l.rx_fps <= 41); /* both sources count */
+    CHECK(l.merging && l.merge_sources == 2 && !l.data_loss && !l.synced);
+    pm_artnet_port_live(N, 1, &l);
+    CHECK(!l.rx_active && l.rx_fps == 0);
+    rx_dst(CTL_A, BCAST, PKT, mk_sync());
+    pm_artnet_port_live(N, 0, &l);
+    CHECK(!l.synced); /* merging from two IPs: ArtSync ignored */
+    advance(PM_ARTNET_MERGE_TIMEOUT_MS + 100);
+    pm_artnet_port_live(N, 0, &l);
+    CHECK(!l.rx_active && l.data_loss && l.merge_sources == 0 && l.rx_fps == 0);
+    pm_artnet_port_live(N, 7, &l); /* bad port: zeros */
+    CHECK(!l.rx_active && !l.data_loss);
+    rx(CTL_A, PKT, mk_dmx_fill(1, 0, 0, 1, 2));
+    rx_dst(CTL_A, BCAST, PKT, mk_sync());
+    pm_artnet_port_live(N, 0, &l);
+    CHECK(l.synced && l.rx_active && !l.data_loss);
+
+    g_context = "indicator";
+    setup();
+    CHECK_EQ(pm_artnet_indicator(N), PM_AC_LED_NORMAL);
+    rx(CTL_A, PKT, mk_poll(PM_POLL_FLAG_REPLY_ON_CHANGE));
+    advance(1100);
+    clear_sent();
+    pm_artnet_set_indicator(N, PM_AC_LED_LOCATE);
+    CHECK_EQ(pm_artnet_indicator(N), PM_AC_LED_LOCATE);
+    CHECK_EQ(F.indicator, 0); /* ops->indicator not called (no loop) */
+    CHECK_EQ(count_sent(PM_OP_POLL_REPLY, CTL_A), 4); /* unsolicited, all pages */
+    const sent_t *s = nth_sent(PM_OP_POLL_REPLY, CTL_A, 0);
+    if (s) CHECK_EQ(reply_of(s).status1 & 0xC0u, 0x40u);
+    clear_sent();
+    pm_artnet_set_indicator(N, PM_AC_LED_LOCATE); /* no change: nothing sent */
+    pm_artnet_set_indicator(N, 0x33);             /* invalid: ignored */
+    CHECK_EQ(count_sent(PM_OP_POLL_REPLY, CTL_A), 0);
+    CHECK_EQ(pm_artnet_indicator(N), PM_AC_LED_LOCATE);
+
+    g_context = "rdm tokens";
+    setup();
+    for (unsigned i = 0; i < 100; i++) {
+        static const uint8_t msg[24] = {0x01, 0x18, 0x7F, 0xF0, 0, 0, 0, 0x42};
+        const pm_artrdm_t r = {.rdm_ver = 1, .net = 0, .address = 1, .rdm = msg, .rdm_len = sizeof(msg)};
+        unsigned before = F.rdm_count;
+        rx(CTL_A, PKT, pm_artrdm_encode(&r, PKT, sizeof(PKT)));
+        CHECK_EQ(F.rdm_count, before + 1);
+        CHECK(F.rdm_last.token != 0 && (F.rdm_last.token & ~PM_ARTNET_RDM_TOKEN_MASK) == 0);
+    }
+    g_context = NULL;
+}
+
 void test_artnet_node(void)
 {
     test_edge_cases();
@@ -1227,4 +1349,5 @@ void test_artnet_node(void)
     test_input();
     test_firmware();
     test_diag();
+    test_live();
 }

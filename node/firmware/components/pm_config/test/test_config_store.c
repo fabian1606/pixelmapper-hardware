@@ -93,6 +93,7 @@ static void make_custom(pm_settings_t *s)
         p->dmx_break_us = (uint16_t)(352 - i);
         p->dmx_mab_us = (uint16_t)(88 - i);
         p->dmx_rate_hz = (uint8_t)(1 + i);
+        p->dmx_mbs_us = (uint16_t)(100 - i);
     }
     static const uint16_t lens[PM_NUM_PORTS] = {0, 1, 512, 7};
     for (unsigned i = 0; i < PM_NUM_PORTS; i++) {
@@ -151,7 +152,7 @@ static void test_size_bounds(void)
     g_context = "config size bounds";
     static pm_settings_t s;
     static uint8_t buf[PM_CONFIG_STORE_MAIN_MAX + PM_CONFIG_STORE_SCENE_MAX];
-    CHECK_EQ(PM_CONFIG_STORE_MAIN_MAX, 393);
+    CHECK_EQ(PM_CONFIG_STORE_MAIN_MAX, 417); /* 393 + 4 ports x DMX_MBS record (4 + 2) */
     CHECK_EQ(PM_CONFIG_STORE_SCENE_MAX, 528);
     make_custom(&s);
     CHECK_EQ(pm_config_store_encode_main(&s, buf, PM_CONFIG_STORE_MAIN_MAX - 1), 0); /* too small */
@@ -405,6 +406,79 @@ static void test_find(void)
     CHECK(!pm_config_store_get_uint(val, 5, &v));
 }
 
+/* PORTn_DMX_MBS (Phase 2): new port tag; blobs written before it read as the default 0 us. */
+static void test_mbs(void)
+{
+    g_context = "config dmx_mbs";
+    static pm_settings_t s;
+    static blob_t b;
+    blob_init(&b);
+    rec_u16(&b, PM_CFG_TAG_PORT(0, PM_CFG_PTAG_DMX_BREAK), 200); /* an old blob: no MBS records */
+    size_t n = build(&b, PM_CONFIG_STORE_MAGIC_MAIN, PM_CONFIG_STORE_SCHEMA);
+    uint16_t schema = 0;
+    CHECK_EQ(pm_config_store_decode_main(b.buf, n, &s, &schema), PM_OK);
+    CHECK_EQ(schema, 1);
+    for (unsigned i = 0; i < PM_NUM_PORTS; i++) CHECK_EQ(s.port[i].dmx_mbs_us, 0);
+    CHECK_EQ(s.port[0].dmx_break_us, 200);
+    /* v0 blobs too (migration path) */
+    n = build(&b, PM_CONFIG_STORE_MAGIC_MAIN, 0);
+    CHECK_EQ(pm_config_store_decode_main(b.buf, n, &s, NULL), PM_OK);
+    CHECK_EQ(s.port[3].dmx_mbs_us, 0);
+
+    blob_init(&b);
+    rec_u16(&b, PM_CFG_TAG_PORT(1, PM_CFG_PTAG_DMX_MBS), 40);
+    rec_u16(&b, PM_CFG_TAG_PORT(2, PM_CFG_PTAG_DMX_MBS), 1000); /* > 100: sanitized */
+    rec_u8(&b, PM_CFG_TAG_PORT(3, PM_CFG_PTAG_DMX_MBS), 12);    /* narrower width is fine */
+    n = build(&b, PM_CONFIG_STORE_MAGIC_MAIN, PM_CONFIG_STORE_SCHEMA);
+    CHECK_EQ(pm_config_store_decode_main(b.buf, n, &s, NULL), PM_OK);
+    CHECK_EQ(s.port[0].dmx_mbs_us, 0);
+    CHECK_EQ(s.port[1].dmx_mbs_us, 40);
+    CHECK_EQ(s.port[2].dmx_mbs_us, 100);
+    CHECK_EQ(s.port[3].dmx_mbs_us, 12);
+
+    /* encode -> decode keeps it */
+    static uint8_t buf[PM_CONFIG_STORE_MAIN_MAX];
+    s.port[0].dmx_mbs_us = 77;
+    n = pm_config_store_encode_main(&s, buf, sizeof(buf));
+    static pm_settings_t t;
+    CHECK_EQ(pm_config_store_decode_main(buf, n, &t, NULL), PM_OK);
+    CHECK_EQ(t.port[0].dmx_mbs_us, 77);
+    CHECK_EQ(t.port[1].dmx_mbs_us, 40);
+}
+
+/* pm_config_update()/pm_config_modify() core: sanitize + normalize + diff against the current settings. */
+static void test_prepare(void)
+{
+    g_context = "config prepare (update/modify)";
+    static pm_settings_t cur, next;
+    pm_settings_defaults(&cur);
+    next = cur;
+    CHECK_EQ(pm_config_store_prepare(&next, &cur), 0);
+    /* a modify callback changes one field: exactly that bit */
+    next = cur;
+    next.port[2].dmx_mbs_us = 30;
+    CHECK_EQ(pm_config_store_prepare(&next, &cur), PM_CHG_PORT(PM_CHG_P_TIMING, 2));
+    /* out of range is clamped before the diff */
+    next = cur;
+    next.port[0].dmx_mbs_us = 500;
+    next.rdm_bg_interval_s = 0;
+    CHECK_EQ(pm_config_store_prepare(&next, &cur), PM_CHG_PORT(PM_CHG_P_TIMING, 0) | PM_CHG_RDM_INTERVAL);
+    CHECK_EQ(next.port[0].dmx_mbs_us, 100);
+    CHECK_EQ(next.rdm_bg_interval_s, 1);
+    /* garbage beyond scene_len and in the version field is not a change */
+    next = cur;
+    next.port[1].scene[100] = 0x55;
+    next.version = 77;
+    CHECK_EQ(pm_config_store_prepare(&next, &cur), 0);
+    CHECK_EQ(next.port[1].scene[100], 0);
+    CHECK_EQ(next.version, PM_SETTINGS_VERSION);
+    /* normalize clamps a bogus scene_len instead of writing past the scene */
+    next = cur;
+    next.port[3].scene_len = 9999;
+    pm_config_store_normalize(&next);
+    CHECK_EQ(next.port[3].scene_len, 512);
+}
+
 void test_config_store(void)
 {
     test_round_trip();
@@ -414,5 +488,7 @@ void test_config_store(void)
     test_sanitize();
     test_migration();
     test_find();
+    test_mbs();
+    test_prepare();
     g_context = NULL;
 }

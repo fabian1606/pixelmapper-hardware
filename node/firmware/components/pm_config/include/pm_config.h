@@ -47,6 +47,18 @@ void pm_config_get(pm_settings_t *out);
  */
 esp_err_t pm_config_update(const pm_settings_t *s, pm_change_source_t src);
 
+/** Callback of pm_config_modify(): change `s` in place (it holds the current settings). Runs inside the config
+ *  lock: must not block and must not call pm_config_update()/pm_config_modify()/pm_config_flush(). */
+typedef void (*pm_config_modify_fn)(void *ctx, pm_settings_t *s);
+
+/**
+ * Atomic read-modify-write: `fn` changes a copy of the current settings under the config lock, then the copy is
+ * applied like pm_config_update() (sanitize, diff, persist, notify with the resulting mask). Unlike
+ * pm_config_get() + pm_config_update(), a concurrent change by another writer (UI task vs. network task) cannot be
+ * overwritten with stale values. Returns ESP_OK also when nothing changed.
+ */
+esp_err_t pm_config_modify(pm_config_modify_fn fn, void *ctx, pm_change_source_t src);
+
 /** Factory defaults (keeps hw_revision_override), source PM_SRC_SYSTEM or the requester. */
 esp_err_t pm_config_factory_reset(pm_change_source_t src);
 

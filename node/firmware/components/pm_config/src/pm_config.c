@@ -249,22 +249,6 @@ static void load(void)
 
 /* ------------------------------------------------------------------------------------------------ API */
 
-/** Make equal settings compare equal: zero the scene tail beyond scene_len and the IP struct padding. */
-static void normalize(pm_settings_t *s)
-{
-    pm_ip_settings_t ip;
-    memset(&ip, 0, sizeof(ip));
-    ip.dhcp = s->ip.dhcp;
-    ip.static_ip = s->ip.static_ip;
-    ip.static_mask = s->ip.static_mask;
-    ip.gateway = s->ip.gateway;
-    s->ip = ip;
-    for (unsigned i = 0; i < PM_NUM_PORTS; i++) {
-        pm_port_settings_t *p = &s->port[i];
-        memset(&p->scene[p->scene_len], 0, sizeof(p->scene) - p->scene_len);
-    }
-}
-
 esp_err_t pm_config_init(bool factory_reset)
 {
     if (s_lock != NULL) return ESP_ERR_INVALID_STATE;
@@ -276,7 +260,7 @@ esp_err_t pm_config_init(bool factory_reset)
     if (!s_nvs_open) ESP_LOGE(TAG, "nvs_open: %s - settings are not persistent", esp_err_to_name(err));
 
     load();
-    normalize(&s_settings);
+    pm_config_store_normalize(&s_settings);
     if (factory_reset) {
         uint8_t hw = s_settings.hw_revision_override;
         pm_settings_defaults(&s_settings);
@@ -309,16 +293,10 @@ void pm_config_get(pm_settings_t *out)
     unlock();
 }
 
-esp_err_t pm_config_update(const pm_settings_t *s, pm_change_source_t src)
+/** Commit s_next (filled by the caller) and notify. Caller holds s_lock. */
+static void commit_next(pm_change_source_t src)
 {
-    if (s == NULL) return ESP_ERR_INVALID_ARG;
-    if (s_lock == NULL) return ESP_ERR_INVALID_STATE;
-    lock();
-    s_next = *s;
-    pm_settings_sanitize(&s_next);
-    normalize(&s_next);
-    s_next.version = PM_SETTINGS_VERSION;
-    pm_change_mask_t mask = pm_settings_diff(&s_settings, &s_next);
+    pm_change_mask_t mask = pm_config_store_prepare(&s_next, &s_settings);
     if (mask != 0) {
         s_settings = s_next;
         mark_dirty();
@@ -339,6 +317,27 @@ esp_err_t pm_config_update(const pm_settings_t *s, pm_change_source_t src)
             s_notifying = false;
         }
     }
+}
+
+esp_err_t pm_config_update(const pm_settings_t *s, pm_change_source_t src)
+{
+    if (s == NULL) return ESP_ERR_INVALID_ARG;
+    if (s_lock == NULL) return ESP_ERR_INVALID_STATE;
+    lock();
+    s_next = *s;
+    commit_next(src);
+    unlock();
+    return ESP_OK;
+}
+
+esp_err_t pm_config_modify(pm_config_modify_fn fn, void *ctx, pm_change_source_t src)
+{
+    if (fn == NULL) return ESP_ERR_INVALID_ARG;
+    if (s_lock == NULL) return ESP_ERR_INVALID_STATE;
+    lock();
+    s_next = s_settings; /* read-modify-write under the lock: no change of another writer is lost */
+    fn(ctx, &s_next);
+    commit_next(src);
     unlock();
     return ESP_OK;
 }
