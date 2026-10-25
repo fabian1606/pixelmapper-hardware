@@ -204,6 +204,10 @@ struct State {
     tods: HashMap<(NodeId, u16), Vec<Uid>>,
     tod_assembly: HashMap<(SocketAddr, u16), TodAssembly>,
     dmx_seq: HashMap<u16, u8>,
+    /// Sequence per (destination, Port-Address) for [`Controller::try_send_dmx`].
+    dmx_seq_to: HashMap<(SocketAddr, u16), u8>,
+    /// Extra unicast ArtPoll destinations ([`Controller::set_poll_targets`]).
+    poll_targets: Vec<SocketAddr>,
     reply_waiters: Vec<(SocketAddr, oneshot::Sender<()>)>,
     ipprog_waiters: Vec<(SocketAddr, oneshot::Sender<ArtIpProgReply>)>,
     fw_waiters: Vec<(SocketAddr, oneshot::Sender<ArtFirmwareReply>)>,
@@ -293,6 +297,24 @@ impl Controller {
     /// Send an ArtPoll now (in addition to the periodic ones).
     pub async fn poll_now(&self) -> Result<()> {
         self.inner.send_poll().await
+    }
+
+    /// Replace the set of extra unicast ArtPoll destinations (port [`ControllerConfig::node_port`]). Every ArtPoll
+    /// (periodic and [`poll_now`](Self::poll_now)) also goes to each of them, e.g. nodes in other subnets.
+    pub fn set_poll_targets(&self, targets: &[Ipv4Addr]) {
+        let port = self.inner.cfg.node_port;
+        let mut t: Vec<SocketAddr> = targets
+            .iter()
+            .map(|ip| SocketAddr::V4(SocketAddrV4::new(*ip, port)))
+            .collect();
+        t.sort();
+        t.dedup();
+        lock(&self.inner.state).poll_targets = t;
+    }
+
+    /// The extra unicast ArtPoll destinations.
+    pub fn poll_targets(&self) -> Vec<SocketAddr> {
+        lock(&self.inner.state).poll_targets.clone()
     }
 
     /// All known nodes, sorted by id.
@@ -628,26 +650,39 @@ impl Controller {
         self.inner.send_raw(&pkt, n.address).await
     }
 
-    fn dmx_packet(&self, pa: PortAddress, data: &[u8]) -> Result<Vec<u8>> {
-        if data.len() > ArtDmx::MAX_DATA {
-            return Err(Error::InvalidArgument(format!(
-                "DMX data {} > 512 slots",
-                data.len()
-            )));
-        }
-        let mut d = data.to_vec();
-        if d.len() % 2 == 1 || d.is_empty() {
-            d.push(0);
-        }
-        if d.len() < 2 {
-            d.push(0);
-        }
+    /// Non-blocking ArtDmx to `dest` (any IP, also one that is not a known node) with an explicit `physical`
+    /// (one merge source per caller, contract §4). Sequence 1..255 counts per (destination, Port-Address); data
+    /// is padded to an even length ≥ 2. Fails with an I/O error (`WouldBlock`) instead of waiting when the socket
+    /// buffer is full – the frame is then dropped, the next one follows anyway.
+    pub fn try_send_dmx(
+        &self,
+        dest: SocketAddr,
+        port_address: PortAddress,
+        data: &[u8],
+        physical: u8,
+    ) -> Result<()> {
+        let d = dmx_data(data)?;
         let seq = {
             let mut st = lock(&self.inner.state);
-            let s = st.dmx_seq.entry(pa.raw()).or_insert(0);
-            *s = if *s == 255 { 1 } else { *s + 1 };
-            *s
+            next_seq(st.dmx_seq_to.entry((dest, port_address.raw())).or_insert(0))
         };
+        let pkt = ArtDmx::new(seq, physical, port_address, d)?.encode();
+        self.inner.socket.try_send_to(&pkt, dest)?;
+        Ok(())
+    }
+
+    /// Non-blocking ArtSync to every broadcast target (contract §4: never unicast). Errors of single targets are
+    /// ignored like in [`send_sync`](Self::send_sync).
+    pub fn try_send_sync(&self) {
+        let pkt = ArtPacket::Sync(ArtSync::default()).encode();
+        for t in &self.inner.broadcast {
+            let _ = self.inner.socket.try_send_to(&pkt, *t);
+        }
+    }
+
+    fn dmx_packet(&self, pa: PortAddress, data: &[u8]) -> Result<Vec<u8>> {
+        let d = dmx_data(data)?;
+        let seq = next_seq(lock(&self.inner.state).dmx_seq.entry(pa.raw()).or_insert(0));
         Ok(ArtDmx::new(seq, self.inner.cfg.physical, pa, d)?.encode())
     }
 
@@ -769,6 +804,30 @@ pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// DMX slots padded to an even length ≥ 2 (ArtDmx rule), at most 512.
+fn dmx_data(data: &[u8]) -> Result<Vec<u8>> {
+    if data.len() > ArtDmx::MAX_DATA {
+        return Err(Error::InvalidArgument(format!(
+            "DMX data {} > 512 slots",
+            data.len()
+        )));
+    }
+    let mut d = data.to_vec();
+    if d.len() % 2 == 1 || d.is_empty() {
+        d.push(0);
+    }
+    if d.len() < 2 {
+        d.push(0);
+    }
+    Ok(d)
+}
+
+/// ArtDmx Sequence 1..255 (0 = off is never sent).
+fn next_seq(s: &mut u8) -> u8 {
+    *s = if *s == 255 { 1 } else { *s + 1 };
+    *s
+}
+
 impl Inner {
     pub(crate) async fn send_raw(&self, pkt: &[u8], to: SocketAddr) -> Result<()> {
         self.socket.send_to(pkt, to).await?;
@@ -792,7 +851,8 @@ impl Inner {
         let pkt = p.encode();
         let mut last_err = None;
         let mut ok = false;
-        for t in &self.broadcast {
+        let extra = lock(&self.state).poll_targets.clone();
+        for t in self.broadcast.iter().chain(extra.iter()) {
             match self.socket.send_to(&pkt, t).await {
                 Ok(_) => ok = true,
                 Err(e) => last_err = Some(e),

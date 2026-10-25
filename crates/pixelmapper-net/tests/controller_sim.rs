@@ -655,3 +655,41 @@ async fn rdm_request_options_buffer_full() {
     ctrl.shutdown();
     sim.shutdown();
 }
+
+#[tokio::test]
+async fn extra_poll_targets_and_nonblocking_dmx() {
+    // ArtPoll "broadcast" only goes to a sink; the node is found once it is an extra unicast poll target.
+    let sim = SimNode::start(SimConfig::default()).await.unwrap();
+    let sink = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut cfg = ctrl_config(&sim);
+    cfg.broadcast = vec![sink.local_addr().unwrap()];
+    cfg.node_port = sim.local_addr().port();
+    let ctrl = Controller::bind(cfg).await.unwrap();
+    let id = NodeId::Uid(sim.uid());
+    assert!(ctrl
+        .wait_for_node(&id, Duration::from_millis(700))
+        .await
+        .is_err());
+    ctrl.set_poll_targets(&["127.0.0.1".parse().unwrap()]);
+    assert_eq!(ctrl.poll_targets(), vec![sim.local_addr()]);
+    ctrl.poll_now().await.unwrap();
+    ctrl.wait_for_node(&id, WAIT).await.unwrap();
+
+    // try_send_dmx: explicit destination and Physical, sequence per (destination, Port-Address)
+    for _ in 0..2 {
+        ctrl.try_send_dmx(sim.local_addr(), pa(2), &[7, 8, 9], 5)
+            .unwrap();
+    }
+    ctrl.try_send_sync();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let f = sim.last_dmx(2).unwrap();
+    assert_eq!((f.sequence, f.physical), (2, 5));
+    assert_eq!(&f.data[..4], &[7, 8, 9, 0]);
+    assert!(ctrl
+        .try_send_dmx(sim.local_addr(), pa(2), &[0; 513], 5)
+        .is_err());
+    ctrl.set_poll_targets(&[]);
+    assert!(ctrl.poll_targets().is_empty());
+    ctrl.shutdown();
+    sim.shutdown();
+}
