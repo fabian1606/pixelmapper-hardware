@@ -42,6 +42,7 @@ typedef struct {
     int8_t enc_a, enc_b, enc_push, back; /**< active low, internal pull-ups */
 } pm_board_input_pins_t;
 
+/** Ethernet: PHY management + all RMII pins. pm_net takes them from here (not from Kconfig). */
 typedef struct {
     int8_t mdc, mdio, phy_reset;
     int8_t phy_addr;
@@ -76,6 +77,21 @@ uint8_t pm_board_revision(void);
 
 /** Bitmask of all revisions this firmware has pin tables for (-> image description hw_rev_mask). */
 uint32_t pm_board_supported_revisions(void);
+
+/* ------------------------------------------------------------------------------------------------ tables (pure C) */
+
+/** GPIOs of the ESP32-P4 are 0..54. */
+#define PM_BOARD_GPIO_MAX 55
+
+/** Pin table of `revision`, NULL when this firmware has none (pure function, host-tested). */
+const pm_board_t *pm_board_table(uint8_t revision);
+
+/**
+ * Self-check of a pin table: every GPIO (ports, display, inputs, Ethernet/RMII incl. REF_CLK, C6 enable) is used at
+ * most once and is a P4 GPIO (< PM_BOARD_GPIO_MAX). Returns false on the first double booking; `dup_gpio` (may be
+ * NULL) receives that GPIO. pm_board_init() logs an error for a bad table; the host test checks every table.
+ */
+bool pm_board_pins_unique(const pm_board_t *b, int8_t *dup_gpio);
 
 /* ------------------------------------------------------------------------------------------------ revision code */
 

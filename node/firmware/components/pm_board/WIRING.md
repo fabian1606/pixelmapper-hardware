@@ -1,6 +1,6 @@
 # Verdrahtung Rev 0 (Lötaufbau auf dem Waveshare ESP32-P4-WIFI6-POE-ETH)
 
-Stand: 2026-10-25. Gilt für die Pin-Tabelle `s_rev0` in [src/pm_board.c](src/pm_board.c).
+Stand: 2026-10-25. Gilt für die Pin-Tabelle `s_rev0` in [src/pm_board_tables.c](src/pm_board_tables.c).
 **Nichts davon ist auf Hardware geprüft.** Die Belegung stammt aus dem Waveshare-Schaltplan und ist nur auf dem Papier
 abgeglichen.
 
@@ -79,6 +79,33 @@ der Lautsprecherverstärker dauerhaft an, ohne Lautsprecher ist das harmlos).
   ESP-IDF-Defaults und der Waveshare-Demo. Das Wiki nennt RXD0/RXD1 vertauscht (30/29). Das IO_MUX des P4 erlaubt
   RXD0 aber nur auf 29/46/52, also gilt 29/30. Keiner dieser Pins liegt auf dem Header.
 - C6 über SDIO: 14–19. SD-Karte: 39–44, Strom 45. Codec/I2S: 9–13, I2C 7/8, Verstärker 53. UART0: 37/38. BOOT: 35.
+
+### Keine Doppelbelegung (Display gegen RMII)
+
+Die RMII-Pins stehen vollständig in `pm_board_eth_pins_t` (`s_rev0.eth` in
+[src/pm_board_tables.c](src/pm_board_tables.c)); pm_net soll sie dort lesen, nicht aus Kconfig.
+
+| Gruppe | GPIOs |
+|---|---|
+| RMII/PHY (on board) | MDC 31, MDIO 52, PHY-Reset 51, REF_CLK 50, TXD0 34, TXD1 35, TX_EN 49, RXD0 29, RXD1 30, CRS_DV 28 |
+| Display | SCLK 48, MOSI 46, CS 36, DC 32, BL 2 |
+| Ports | 25/24/33, 27/47/26, 20/21/22, 5/4/3 |
+| Bedienung | 23, 6, 0, 1 |
+| C6-Reset | 54 |
+
+Geprüft (2026-10-25): Keine GPIO kommt zweimal vor; Display und RMII überschneiden sich in der Tabelle nicht.
+Verwechslungsgefahr besteht nur mit den **alternativen** IO_MUX-Pins des EMAC: RXD0 46 (= Display MOSI), RXD1 47
+(= Port 2 RX), TX_EN 33 (= Port 1 DE), CRS_DV 45. Diese Alternativen dürfen in keiner Pin-Tabelle und keinem
+Kconfig-Default auftauchen, solange Rev 0 die Pins anders nutzt. Die Kconfig-Optionen `PM_NET_RMII_*` bieten sie noch
+an (Paket A ersetzt sie durch die Tabelle).
+
+Annahmen aus dem Waveshare-Schaltplan (nicht auf Hardware geprüft): Die Header-GPIOs 2, 32, 36, 46, 48 haben auf dem
+Board keine weitere Beschaltung außer dem Strapping-Pull an GPIO36; die RMII-Netze liegen nicht auf dem Header; der
+IP101GRI liefert REF_CLK (50 MHz) an GPIO50.
+
+**Selbstprüfung:** `pm_board_pins_unique()` prüft jede Tabelle (Ports, Display, Bedienung, Ethernet inkl. REF_CLK,
+C6-Reset) auf doppelte und ungültige GPIOs (≥ 55). Der Hosttest `test_board_pins` in `pm_port/test_host` (ctest
+`pm_port`) läuft über alle Tabellen; `pm_board_init()` meldet eine kaputte Tabelle zusätzlich im Log.
 
 ## 2. RS-485-Ports (4×)
 
