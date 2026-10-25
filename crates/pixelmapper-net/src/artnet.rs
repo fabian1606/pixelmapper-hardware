@@ -1129,9 +1129,72 @@ impl Default for ArtIpProg {
     }
 }
 
+/// What an ArtIpProg should change. `IpProgChange::default()` changes nothing: the packet is a pure query
+/// (Command = 0) and the node answers with its current IP, mask, gateway and DHCP state (contract §5).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IpProgChange {
+    /// Switch DHCP on. Takes precedence over everything else (the spec ignores the lower bits then).
+    /// DHCP is switched off by programming a static `ip`.
+    pub dhcp: bool,
+    /// Static IP to program (switches DHCP off).
+    pub ip: Option<Ipv4Addr>,
+    /// Subnet mask to program.
+    pub mask: Option<Ipv4Addr>,
+    /// Default gateway to program.
+    pub gateway: Option<Ipv4Addr>,
+    /// Reset IP, mask and gateway to the factory values first (`ip`/`mask`/`gateway` are applied after it).
+    pub reset: bool,
+}
+
+impl IpProgChange {
+    /// True when nothing is to be changed (the packet becomes a query).
+    pub fn is_query(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 impl ArtIpProg {
     /// Packet length (also the minimum accepted).
     pub const LEN: usize = 34;
+
+    /// Pure query (Command = 0): the node changes nothing and answers with its current configuration.
+    pub fn query() -> Self {
+        Self::default()
+    }
+
+    /// Whether this packet only queries (programming-enable bit 7 clear).
+    pub fn is_query(&self) -> bool {
+        self.command & IPPROG_ENABLE == 0
+    }
+
+    /// Packet for `change` (Command bits per digest §4.3; a default `change` gives [`ArtIpProg::query`]).
+    pub fn from_change(change: &IpProgChange) -> Self {
+        let mut p = Self::default();
+        if change.is_query() {
+            return p;
+        }
+        p.command = IPPROG_ENABLE;
+        if change.dhcp {
+            p.command |= IPPROG_DHCP;
+            return p;
+        }
+        if change.reset {
+            p.command |= IPPROG_RESET;
+        }
+        if let Some(ip) = change.ip {
+            p.command |= IPPROG_IP;
+            p.prog_ip = ip;
+        }
+        if let Some(m) = change.mask {
+            p.command |= IPPROG_MASK;
+            p.prog_sm = m;
+        }
+        if let Some(g) = change.gateway {
+            p.command |= IPPROG_GATEWAY;
+            p.prog_dg = g;
+        }
+        p
+    }
 
     /// Encode the 34-byte packet.
     pub fn encode(&self) -> Vec<u8> {
@@ -2211,6 +2274,42 @@ mod tests {
         assert_eq!(serde_json::to_string(&pa).unwrap(), "531");
         assert_eq!(serde_json::from_str::<PortAddress>("531").unwrap(), pa);
         assert!(serde_json::from_str::<PortAddress>("40000").is_err());
+    }
+
+    #[test]
+    fn ip_prog_change_command_bits() {
+        let q = ArtIpProg::from_change(&IpProgChange::default());
+        assert_eq!(q, ArtIpProg::query());
+        assert!(q.is_query() && q.command == 0);
+        let ip = Ipv4Addr::new(2, 0, 0, 20);
+        let mask = Ipv4Addr::new(255, 0, 0, 0);
+        let gw = Ipv4Addr::new(2, 0, 0, 1);
+        let p = ArtIpProg::from_change(&IpProgChange {
+            ip: Some(ip),
+            mask: Some(mask),
+            gateway: Some(gw),
+            ..Default::default()
+        });
+        assert_eq!(
+            p.command,
+            IPPROG_ENABLE | IPPROG_IP | IPPROG_MASK | IPPROG_GATEWAY
+        );
+        assert_eq!((p.prog_ip, p.prog_sm, p.prog_dg), (ip, mask, gw));
+        assert!(!p.is_query());
+        // DHCP wins, lower bits are not sent
+        let d = ArtIpProg::from_change(&IpProgChange {
+            dhcp: true,
+            ip: Some(ip),
+            ..Default::default()
+        });
+        assert_eq!(d.command, IPPROG_ENABLE | IPPROG_DHCP);
+        assert_eq!(d.prog_ip, Ipv4Addr::UNSPECIFIED);
+        let r = ArtIpProg::from_change(&IpProgChange {
+            reset: true,
+            ..Default::default()
+        });
+        assert_eq!(r.command, IPPROG_ENABLE | IPPROG_RESET);
+        assert_eq!(ArtIpProg::decode(&q.encode()), Ok(q));
     }
 
     #[test]

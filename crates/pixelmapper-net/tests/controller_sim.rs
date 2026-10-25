@@ -2,7 +2,8 @@
 //! Every test uses ephemeral ports, so the tests run in parallel.
 
 use pixelmapper_net::artnet::{
-    address_command, ArtAddress, ArtIpProg, PortAddress, IPPROG_ENABLE, IPPROG_IP, IPPROG_MASK,
+    address_command, ArtAddress, ArtIpProg, IpProgChange, PortAddress, IPPROG_ENABLE, IPPROG_IP,
+    IPPROG_MASK,
 };
 use pixelmapper_net::controller::{Controller, ControllerConfig, RdmRequest};
 use pixelmapper_net::flash::node::{NodeFlashMethod, NodeFlashOptions};
@@ -408,7 +409,12 @@ async fn node_configuration() {
         st.status1.indicators,
         pixelmapper_net::state::Indicators::Locate
     );
-    // IP programming
+    // IP query (Command 0) changes nothing and reports the current configuration
+    let q = ctrl.ip_prog_query(&id).await.unwrap();
+    assert_eq!(q.prog_ip.to_string(), "127.0.0.1");
+    assert!(q.dhcp_enabled());
+    assert_eq!(sim.snapshot().ip.to_string(), "127.0.0.1");
+    // IP programming (raw packet)
     let r = ctrl
         .ip_prog(
             &id,
@@ -424,6 +430,33 @@ async fn node_configuration() {
         .unwrap();
     assert_eq!(r.prog_ip.to_string(), "2.0.0.20");
     assert_eq!(sim.snapshot().ip.to_string(), "2.0.0.20");
+    // typed change: gateway only, then the query shows everything
+    let r = ctrl
+        .ip_prog_change(
+            &id,
+            &IpProgChange {
+                gateway: Some("2.0.0.1".parse().unwrap()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.prog_dg.to_string(), "2.0.0.1");
+    let q = ctrl.ip_prog_query(&id).await.unwrap();
+    assert_eq!(
+        (
+            q.prog_ip.to_string(),
+            q.prog_sm.to_string(),
+            q.prog_dg.to_string(),
+            q.dhcp_enabled()
+        ),
+        (
+            "2.0.0.20".into(),
+            "255.0.0.0".into(),
+            "2.0.0.1".into(),
+            false
+        )
+    );
     // TOD flush answered with TodData
     ctrl.tod_flush(&id, pa(1)).await.unwrap();
     ctrl.shutdown();
@@ -619,6 +652,44 @@ async fn rdm_request_options_buffer_full() {
     )
     .await
     .unwrap();
+    ctrl.shutdown();
+    sim.shutdown();
+}
+
+#[tokio::test]
+async fn extra_poll_targets_and_nonblocking_dmx() {
+    // ArtPoll "broadcast" only goes to a sink; the node is found once it is an extra unicast poll target.
+    let sim = SimNode::start(SimConfig::default()).await.unwrap();
+    let sink = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut cfg = ctrl_config(&sim);
+    cfg.broadcast = vec![sink.local_addr().unwrap()];
+    cfg.node_port = sim.local_addr().port();
+    let ctrl = Controller::bind(cfg).await.unwrap();
+    let id = NodeId::Uid(sim.uid());
+    assert!(ctrl
+        .wait_for_node(&id, Duration::from_millis(700))
+        .await
+        .is_err());
+    ctrl.set_poll_targets(&["127.0.0.1".parse().unwrap()]);
+    assert_eq!(ctrl.poll_targets(), vec![sim.local_addr()]);
+    ctrl.poll_now().await.unwrap();
+    ctrl.wait_for_node(&id, WAIT).await.unwrap();
+
+    // try_send_dmx: explicit destination and Physical, sequence per (destination, Port-Address)
+    for _ in 0..2 {
+        ctrl.try_send_dmx(sim.local_addr(), pa(2), &[7, 8, 9], 5)
+            .unwrap();
+    }
+    ctrl.try_send_sync();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let f = sim.last_dmx(2).unwrap();
+    assert_eq!((f.sequence, f.physical), (2, 5));
+    assert_eq!(&f.data[..4], &[7, 8, 9, 0]);
+    assert!(ctrl
+        .try_send_dmx(sim.local_addr(), pa(2), &[0; 513], 5)
+        .is_err());
+    ctrl.set_poll_targets(&[]);
+    assert!(ctrl.poll_targets().is_empty());
     ctrl.shutdown();
     sim.shutdown();
 }

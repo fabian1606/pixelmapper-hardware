@@ -182,6 +182,13 @@ def gen_c(d: dict) -> str:
     for s in d.get("status", []):
         L.append(f"    X(0x{s['id']:04X}u, \"{s['description']}\") \\")
     L.append("")
+    L.append("/* X(id, status_type, name, description) - name = pids.toml [[status]] name (e.g. for logs/UI) */")
+    L.append("#define PM_STATUS_LIST(X) \\")
+    for s in d.get("status", []):
+        L.append(f"    X(0x{s['id']:04X}u, 0x{STATUS_TYPES[s['type']]:02X}u, \"{s['name']}\", \"{s['description']}\") \\")
+    L.append("")
+    L.append(f"#define PM_STATUS_COUNT {len(d.get('status', []))}u")
+    L.append("")
     L.append("/* ---- manufacturer PIDs ---- */")
     bases: dict[str, list[dict]] = {}
     for p in d["pids"]:
@@ -255,6 +262,39 @@ def gen_rs(d: dict) -> str:
         L.append(f"    pub const {s['name']}: u16 = 0x{s['id']:04X};")
     L.append("}")
     L.append("")
+    L.append("""/// One manufacturer status message (pids.toml `[[status]]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatusDef {
+    pub id: u16,
+    pub name: &'static str,
+    /// E1.20 status type (0x02 advisory, 0x03 warning, 0x04 error).
+    pub status_type: u8,
+    /// STATUS_ID_DESCRIPTION text (may contain %d for data1/data2).
+    pub description: &'static str,
+}
+
+/// All manufacturer status messages.
+pub static STATUS: &[StatusDef] = &[""")
+    for s in d.get("status", []):
+        L.append(f"    StatusDef {{ id: 0x{s['id']:04X}, name: \"{s['name']}\", "
+                 f"status_type: 0x{STATUS_TYPES[s['type']]:02X}, description: {rs_str(s['description'])} }},")
+    L.append("];")
+    L.append("")
+    L.append("""/// Manufacturer status message definition by id.
+pub fn status_def(id: u16) -> Option<&'static StatusDef> {
+    STATUS.iter().find(|s| s.id == id)
+}
+
+/// Name of a manufacturer status message id (e.g. `"BOOT_CATCH_CAUGHT"`).
+pub fn status_name(id: u16) -> Option<&'static str> {
+    status_def(id).map(|s| s.name)
+}
+
+/// STATUS_ID_DESCRIPTION text of a manufacturer status message id.
+pub fn status_description(id: u16) -> Option<&'static str> {
+    status_def(id).map(|s| s.description)
+}
+""")
     for p in d["pids"]:
         L.append(f"/// {p['device']} {p['cc']}: {p.get('doc', '')}")
         L.append(f"pub const PID_{p['name']}: u16 = 0x{p['pid']:04X};")

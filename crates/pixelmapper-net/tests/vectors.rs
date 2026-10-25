@@ -234,6 +234,16 @@ fn artnet_fields(p: &ArtPacket, bytes: &[u8]) -> Map<String, Value> {
                 "port_addresses_in",
                 pas((0..4).map(|i| x.port_address_in(i)).collect()),
             );
+            // Derived for one-port BindIndex pages (contract §3): the Port-Address of that port, output if
+            // PortTypes bit 7 (output) is set, else input.
+            if x.num_ports == 1 {
+                let pa = if x.port_types[0] & 0x80 != 0 {
+                    x.port_address_out(0)
+                } else {
+                    x.port_address_in(0)
+                };
+                put("port_address", json!(pa.raw()));
+            }
             put("acn_priority", json!(x.acn_priority));
             put("sw_macro", json!(x.sw_macro));
             put("sw_remote", json!(x.sw_remote));

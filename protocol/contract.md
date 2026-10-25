@@ -1,6 +1,6 @@
 # Pixelmapper Node – Protokollvertrag für Pixelmapper
 
-Stand: 2026-10-24 (Phase 0, gegen die Art-Net-4-Spec Rev 1.4dp geprüft). Für alle, die das Pixelmapper-Plugin bauen,
+Stand: 2026-10-25 (Phase 0, gegen die Art-Net-4-Spec Rev 1.4dp geprüft; Phase-2-Nachträge in §12.2). Für alle, die das Pixelmapper-Plugin bauen,
 das mit dem Pixelmapper Node und den LED-Tubes spricht, und für die Firmware/`pixelmapper-net`.
 Gesamtplan: [docs/plan.md](../docs/plan.md). UI am Gerät: [docs/ui-konzept.md](../docs/ui-konzept.md).
 Geprüfte Auszüge: [artnet4-digest.md](artnet4-digest.md), [rdm-digest.md](rdm-digest.md).
@@ -10,8 +10,9 @@ Zahlen (PIDs, Konstanten, Fehlercodes): [pids.toml](pids.toml). Images: [image-f
 legt fest, **welche Teile wir nutzen, wie sich der Node verhält und was Pixelmapper tun muss**.
 
 Kennzeichnung: **[FEST]** ist entschieden · **[VORLÄUFIG]** ist ein Vorschlag · **[OFFEN]** ist noch nicht entschieden.
-**[KORR]** markiert Korrekturen aus der Spec-Prüfung von Phase 0 (Liste in §12). Der Node existiert noch nicht; was
-hier über sein Verhalten steht, ist das Soll.
+**[KORR]** markiert Korrekturen aus der Spec-Prüfung von Phase 0 und aus der Umsetzung in Phase 1/2 (Liste in §12).
+Was hier über das Verhalten des Nodes steht, ist das Soll; Firmware (`node/firmware`) und der simulierte Node in
+`pixelmapper-net` (`sim::node`) setzen es um.
 
 ---
 
@@ -108,17 +109,30 @@ schickt allen Pollern mit Flags Bit 1 ein ungefragtes Reply.
 | Was | Opcode |
 |---|---|
 | Short/Long Name, Net/Sub/Uni, Merge HTP/LTP, Richtung Input/Output, RDM ein/aus, Output-Style continuous/delta, Failsafe (Hold/Zero/Full/Scene) + Szene aufnehmen, AcCancelMerge, AcClearOp, **LED Mute/Normal/Locate** | `ArtAddress` (0x6000), **adressiert über BindIndex = Port** |
-| IP, Maske, Gateway, DHCP ein/aus, Reset auf Standard | `ArtIpProg` (0xF800) → `ArtIpProgReply` (0xF900) |
+| IP, Maske, Gateway, DHCP ein/aus, Reset auf Standard; **Abfrage** (Command = 0) | `ArtIpProg` (0xF800) → `ArtIpProgReply` (0xF900) |
 | **DMX-Input** deaktivieren/aktivieren | `ArtInput` (0x7000) **[KORR]**: wirkt nur auf Input-Ports. Output-Ports schaltet `PORTn_ENABLED` (RDM) |
 
 - Programmierregeln der Spec **[KORR]**: Bit 7 gesetzt = Wert übernehmen, **0x00 = zurück auf Werkseinstellung**
   („Hardware-Schalter“), 0x7F = keine Änderung (Konvention, digest §4.1), leere Namen = keine Änderung, AcnPriority 255 =
   keine Änderung. AcDirectionRx leert die Abonnentenliste.
-- **Locate/Identify:** `ArtAddress` LED Locate **oder** RDM `IDENTIFY_DEVICE` an die Node-UID, beides gleich. **[FEST]**
+- **Locate/Identify [FEST]:** `ArtAddress` LED Locate/Normal, RDM `IDENTIFY_DEVICE` an die Node-UID und die
+  Identify-Funktion am Gerät schalten **denselben Zustand** (Spiegelung in alle Richtungen): Status1 Bit 7–6 im
+  ArtPollReply (ungefragt an die Poller), GET IDENTIFY_DEVICE, Anzeige am Panel. Ändert ArtAddress oder das Panel den
+  Zustand, legt der Node eine Queued Message IDENTIFY_DEVICE an (`pm_rdm_responder_set_identify`); ein RDM-SET
+  IDENTIFY_DEVICE selbst erzeugt keine (der Absender kennt den Wert).
 - **LED Mute** schaltet das Display ganz aus, bis zur nächsten Bedienung am Gerät oder bis LED Normal (Erweiterung). **[FEST]**
+- **[KORR] `ArtIpProg` mit Command = 0 (Bit 7 „Programmieren“ aus) ist eine reine Abfrage:** der Node ändert nichts
+  und antwortet mit IP, Maske, Gateway und DHCP-Status (ArtIpProgReply Status Bit 6). So liest Pixelmapper Maske und
+  Gateway, die im ArtPollReply fehlen (`pixelmapper-net`: `Controller::ip_prog_query`, Bridge: `ipProg` nur mit
+  `nodeId`). Programmieren: Bit 7 + DHCP (Bit 6, niedrigere Bits ignoriert) oder Reset (Bit 3, danach die
+  gesetzten Werte) + IP (Bit 2, schaltet DHCP aus) / Maske (Bit 1) / Gateway (Bit 4). Ungültige Werte (IP 0.0.0.0 oder
+  255.255.255.255, nicht zusammenhängende oder leere Maske) ignoriert der Node.
 - IP-Änderung per `ArtIpProg` wirkt sofort; das ArtIpProgReply geht noch von der alten IP und enthält die neuen Werte
   (Spec schweigt, unsere Festlegung). Danach Replies von der neuen IP mit **derselben UID**.
 - Die IP-Konfiguration ist zusätzlich per E1.37-2 erreichbar (§6.3), beide Wege ändern dieselben Einstellungen.
+  **[KORR] Unterschied:** SETs von IPV4_DHCP_MODE, IPV4_STATIC_ADDRESS und IPV4_DEFAULT_ROUTE werden sofort
+  gespeichert (Queued Message), **wirksam werden sie erst mit INTERFACE_APPLY_CONFIGURATION** (E1.37-2); ArtIpProg
+  wirkt sofort.
 
 ## 6. RDM über Art-Net
 
@@ -133,8 +147,22 @@ schickt allen Pollern mit Flags Bit 1 ein ungefragtes Reply.
 - **[KORR] Ungefragte `ArtTodData`** gehen per Unicast an **alle IPs, die vorher ArtTodData angefordert haben**
   (ArtTodRequest), nicht an alle Poller. Pixelmapper sendet deshalb nach dem Finden eines Nodes einmal `ArtTodRequest`
   pro Port (und nach einem Neustart des Nodes erneut).
-- Volle Discovery beim Start, beim Aktivieren eines Ports und bei `AtcFlush`. Danach **Hintergrundsuche alle ca. 3 s**
-  (`RDM_BG_DISCOVERY_INTERVAL`): neue Geräte + Präsenzprüfung; nach 3 Fehlversuchen fällt ein Gerät heraus.
+- Volle Discovery beim Start, beim Aktivieren eines Ports und bei `AtcFlush`: TOD leeren, 3× DISC_UN_MUTE an
+  Broadcast, binäre Suche mit DISC_UNIQUE_BRANCH über den ganzen UID-Raum, jeder Fund wird per DISC_MUTE bestätigt.
+- Danach **Hintergrundsuche alle ca. 3 s** (`RDM_BG_DISCOVERY_INTERVAL`, pro Port `PORTn_RDM_BG_DISCOVERY` bzw.
+  AtcIncOn/Off) **[KORR]**:
+  1. **3× DISC_UN_MUTE an Broadcast**,
+  2. **Präsenzprüfung:** DISC_MUTE an jede bekannte UID (das muted sie zugleich); nach 3 Fehlversuchen in Folge fällt
+     ein Gerät aus der TOD,
+  3. **DUB über den ganzen Raum:** antworten können nur noch Geräte, die nicht in der TOD stehen (neue oder
+     zurückgekehrte). Die TOD wird nicht geleert.
+
+  Abweichung vom Plan („DUB ohne Un-Mute“): Ohne Un-Mute bleibt ein Gerät, das einmal gemutet war und dann aus der TOD
+  fiel (Wackelkontakt, drei verpasste Präsenzprüfungen) oder dessen Mute-Zustand ein anderer Controller gesetzt hat,
+  gemutet und damit für jede Hintergrundsuche unsichtbar – bis zum nächsten Flush. Ein Gerät nach Reset/Wiederein-
+  stecken startet zwar ungemutet, aber das Un-Mute macht die Suche unabhängig davon, in welchem Zustand Geräte auf der
+  Leitung sind (OLA macht es genauso; `pm_rdm_ctrl.c`). Kosten: drei Broadcasts pro Lauf. Während BOOT_CATCH läuft,
+  startet keine Hintergrundsuche (sie würde das ~200-ms-Fenster der Tube verfehlen).
 - Bis zu **512 Geräte pro Port**. Port ohne RDM (aus oder Input): TOD leer.
 
 ### 6.2 RDM-Anfragen [FEST]
@@ -145,7 +173,10 @@ schickt allen Pollern mit Flags Bit 1 ein ungefragtes Reply.
 - **Antworten** als `ArtRdm` per Unicast an den Absender. **Keine Antwort → keine Meldung.** Pixelmapper braucht einen
   eigenen Timeout: **[VORLÄUFIG]** 500 ms, 2 Wiederholungen, höchstens 4 offene Anfragen pro Port.
 - **[KORR]** Der Node meldet seine Queue in `FifoAvail`/`FifoMax` (ArtRdm Offset 19/20, in Antworten). Pixelmapper soll
-  nicht mehr Anfragen schicken, als `FifoAvail` erlaubt.
+  nicht mehr Anfragen schicken, als `FifoAvail` erlaubt. **[FEST] Phase 2:** 8 Plätze pro Port (`PM_RDM_QUEUE_LEN`
+  = FifoMax). Ist die Queue voll, verwirft der Node die Anfrage ohne Antwort (Pixelmapper läuft in seinen Timeout).
+  Jede weitergeleitete Anfrage bekommt intern ein Token (gemerkt mit Absender-IP und Port), über das die Antwort
+  genau an den Absender geht; andere Controller sehen sie nicht.
 - Mehrere Anfragen an verschiedene Ports laufen parallel. ACK_TIMER, ACK_OVERFLOW, QUEUED_MESSAGE reicht der Node unverändert durch.
 - **`ArtRdmSub` (0x8400): [FEST] nicht unterstützt.** Die Spec verlangt es nicht (es ist nur eine Ergänzung zu ArtRdm);
   weder Tubes noch Node haben Sub-Devices. Der Node ignoriert ArtRdmSub-Pakete.
@@ -176,6 +207,7 @@ schickt allen Pollern mit Flags Bit 1 ein ungefragtes Reply.
 | 0x8110–0x8113 | PORT1..4_DMX_BREAK | GET/SET | u16 µs, 176–352, Standard 176 |
 | 0x8114–0x8117 | PORT1..4_DMX_MAB | GET/SET | u16 µs, 12–88, Standard 16 |
 | 0x8118–0x811B | PORT1..4_DMX_RATE | GET/SET | u8 Hz, 1–44, Standard 40 |
+| 0x811C–0x811F | PORT1..4_DMX_MBS | GET/SET | u16 µs, 0–100, Standard 0 (Mark between Slots; Semantik auf Hardware zu bestätigen) |
 | 0x8120–0x8123 | PORT1..4_RDM_BG_DISCOVERY | GET/SET | bool (= AtcIncOn/Off) |
 | 0x8124 | RDM_BG_DISCOVERY_INTERVAL | GET/SET | u16 s, 1–600, Standard 3 |
 | 0x8130 | DISPLAY_DIM_TIMEOUT | GET/SET | u16 s, 0 = nie dimmen, Standard 60 |
@@ -190,6 +222,13 @@ schickt allen Pollern mit Flags Bit 1 ein ungefragtes Reply.
 - **Änderungsmeldungen per RDM:** Ändert sich eine nur per RDM sichtbare Einstellung, legt der Node eine **Queued
   Message** an (Message Count in jeder Antwort des Nodes). Inhalt = GET-Antwort der geänderten PID. Pixelmapper holt sie
   mit `QUEUED_MESSAGE` (Status-Typ GET_LAST_MESSAGE/ADVISORY). Ist nichts mehr da, antwortet der Node mit leerem STATUS_MESSAGES.
+- **[KORR] Eine Queue für alle Controller:** Der Node hat **eine** Queued-Message-Queue (16 PIDs + 8 Statusmeldungen),
+  nicht eine pro Controller (E1.20 sieht nichts anderes vor). Wer zuerst abholt, leert sie. Pixelmapper darf sich
+  deshalb nicht darauf verlassen, jede Änderung als Queued Message zu sehen (OLA, DMX-Workshop oder eine zweite
+  Pixelmapper-Instanz können sie abholen) und liest **zusätzlich nach**: bei jedem ungefragten ArtPollReply des Nodes
+  und regelmäßig (30–60 s) die Einstellungs-PIDs. Eine PID steht höchstens einmal in der Queue (eine erneute
+  Änderung schiebt sie ans Ende, Inhalt = GET-Antwort zum Abholzeitpunkt); ist die Queue voll, fällt die älteste
+  Meldung weg.
 - **Panelsperre am Gerät aufgehoben:** Queued Message PANEL_LOCK + Statusmeldung `PANEL_UNLOCKED_LOCAL` (0x8003).
 
 ### 6.4 `BOOT_CATCH` (Rettung einer Tube übers Netzwerk) [FEST]
@@ -209,7 +248,7 @@ schickt allen Pollern mit Flags Bit 1 ein ungefragtes Reply.
 | Änderung | Meldung |
 |---|---|
 | Konfiguration des Nodes (Art-Net-Felder) | ungefragtes `ArtPollReply` (ArtPoll Flags Bit 1 nötig) |
-| Konfiguration des Nodes (nur per RDM) | Queued Message an der Node-UID |
+| Konfiguration des Nodes (nur per RDM) | Queued Message an der Node-UID (eine Queue für alle Controller, §6.3: zusätzlich nachlesen) |
 | IP des Nodes | `ArtPollReply` von der neuen IP mit derselben UID |
 | Geräte kommen dazu oder fallen weg | ungefragtes `ArtTodData` (an IPs, die ArtTodRequest geschickt haben) |
 | **RDM-SET am Node-Display an ein angeschlossenes Gerät** | **[FEST]** Queued Message an der Node-UID = GET-Antwort `LOCAL_RDM_SET` (0x8150: Sequenz, Port, UID, Sub-Device, PID) + Statusmeldung `LOCAL_RDM_SET` (0x8004). Pixelmapper liest daraufhin genau diese PID am Gerät nach. Zusätzlich empfohlen: DEVICE_INFO/Labels bei TOD-Änderungen und alle 30–60 s nachlesen (Tubes haben keine Queued Messages) |
@@ -262,10 +301,12 @@ auf beiden Seiten. Unser Beschreibungsblock steckt im Spare-Bereich des Headers 
 (0x8182, Offset u32 + ≤ 224 B), FW_FINISH (0x8183). PDL und Fehlercodes in `pids.toml`.
 
 **Für beide Wege:** Prüfung vor dem ersten Schreibzugriff (OEM-Liste bei Art-Net, ESTA-Hersteller, DEVICE_MODEL_ID,
-HW-Revision, Größe), dann Abgleich mit dem Block im Image, CRC-32, ESP-IDF-Imageprüfung, Neustart, **Rollback** wenn
+HW-Revision, Größe; bei Art-Net zusätzlich `FirmwareLength` = 530 + ceil(image_length / 2), sonst `DESC_MISMATCH`
+**[KORR]**), dann Abgleich mit dem Block im Image, CRC-32, ESP-IDF-Imageprüfung, Neustart, **Rollback** wenn
 sich die neue Firmware nicht innerhalb der ersten Minute als gültig markiert. **Keine Signatur.** Format und Ablauf:
 [image-format.md §2](image-format.md). Pixelmapper prüft vorher selbst Hersteller, Modell und HW-Revision
-(`NODE_HW_REVISION`).
+(`NODE_HW_REVISION`). **Fehler schon im ersten Block** (FW_BEGIN-NACK bzw. FirmFail auf FirmFirst) stehen ebenfalls in
+`FW_INFO.last_error` (Zustand FAILED), auch wenn noch keine Sitzung lief – Pixelmapper liest nach jedem Fehler FW_INFO.
 
 ## 10. Für das Plugin schon jetzt sicher umsetzbar
 
@@ -295,7 +336,9 @@ sich die neue Firmware nicht innerhalb der ersten Minute als gültig markiert. *
 | Dateiformat Node-Image | `image-format.md` §2 | |
 | Ports im ArtPollReply | 1 Port pro BindIndex | Art-Net 4: ArtAddress für Port 1–3 deprecated |
 
-## 12. Korrekturen aus der Spec-Prüfung (gegenüber dem Vertrag vom 2026-10-24 aus dem Gedächtnis)
+## 12. Korrekturen
+
+### 12.1 Spec-Prüfung Phase 0 (gegenüber dem Vertrag vom 2026-10-24 aus dem Gedächtnis)
 
 Bestätigt: alle Opcodes; ArtPoll Flags Bit 1; ArtSync-Timeout 4 s; Merge-Timeout 10 s, 2 Quellen, HTP-Standard;
 ArtRdm ohne Start Code; AtcFlush = 0x01; FirmFirst/Cont/Last und FirmBlockGood/AllGood/Fail; Input-Keepalive 1×/s.
@@ -317,6 +360,21 @@ Geändert (oben mit [KORR] markiert):
 14. Datenverlust-Zeit (4 s) ist unsere Festlegung, nicht Spec.
 15. `DefaultRespUID` ist in der Spec die LLRP/RDMnet-Responder-UID; wir verwenden sie für den eingebauten Responder.
 
+### 12.2 Nachträge aus Phase 1/2 (Umsetzung, 2026-10-25)
+
+16. Hintergrundsuche = 3× DISC_UN_MUTE (Broadcast) + Präsenzprüfung per DISC_MUTE + DUB über den ganzen Raum (§6.1),
+    statt „DUB ohne Un-Mute“ aus dem Plan.
+17. Eine Queued-Message-Queue für alle Controller; Pixelmapper liest zusätzlich nach (§6.3, §7).
+18. `ArtIpProg` Command = 0 ist eine reine Abfrage (Maske/Gateway lesen), §5.
+19. E1.37-2-IP-SETs werden erst mit INTERFACE_APPLY_CONFIGURATION wirksam (ArtIpProg sofort), §5.
+20. Identify-Spiegelung ArtAddress Locate ↔ IDENTIFY_DEVICE ↔ Panel, mit Queued Message bei Änderung über
+    ArtAddress/Panel (§5).
+21. Neue PIDs PORT1..4_DMX_MBS (0x811C–0x811F), §6.3.
+22. ArtRdm: FifoMax = 8 pro Port, volle Queue = keine Antwort (§6.2).
+23. `.alf`: FirmwareLength ≠ image_length → `DESC_MISMATCH`; Fehler im ersten Block in FW_INFO.last_error (§9.2,
+    image-format.md §2.3/§2.5).
+24. Statusmeldungs-Namen und -Texte werden aus `pids.toml` generiert (`pids::status_name`, `PM_STATUS_LIST`).
+
 ## 13. Offene Punkte
 
 - ESTA-Normtexte (E1.20-2025, E1.37-1/-2) liegen nicht vor; der RDM-Digest stützt sich auf OLA/Ja Rule und ist dort
@@ -324,3 +382,8 @@ Geändert (oben mit [KORR] markiert):
 - Art-Net-Spec mehrdeutig: Blockgröße ArtFirmwareMaster, `.alf`-Checksumme, BlockId-Überlauf → mit DMX-Workshop testen.
 - Verhalten von DMX-Workshop bei 4 BindIndex-Seiten und bei FirmFail prüfen (Abnahme).
 - Matrix-Modus (mehrere Universes pro Port) – später.
+- PORTn_DMX_MBS: Wirkung (UART-Idle zwischen Slots) auf der Hardware messen (`pm_port/MEASURE.md` M5), danach
+  Bereich/Beschreibung in `pids.toml` bestätigen.
+- Hintergrundsuche mit Un-Mute: auf der Hardware prüfen, dass die DMX-Rate ≥ 30 Hz bleibt und ein zweiter
+  RDM-Controller am selben Strang nicht stört (das Un-Mute hebt auch dessen Mutes auf).
+- Ende-zu-Ende-Test `pixelmapper-net` gegen den virtuellen Node (`tools/e2e.sh`, Stand in `docs/STATUS.md`).

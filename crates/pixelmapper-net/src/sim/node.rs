@@ -16,8 +16,8 @@ use super::SimResponder;
 use crate::artnet::{
     self, address_command as ac, ArtAddress, ArtDmx, ArtFirmwareMaster, ArtFirmwareReply, ArtInput,
     ArtIpProg, ArtIpProgReply, ArtPacket, ArtPoll, ArtPollReply, ArtRdm, ArtTodControl, ArtTodData,
-    ArtTodRequest, PortAddress, IPPROG_DHCP, IPPROG_ENABLE, IPPROG_GATEWAY, IPPROG_IP, IPPROG_MASK,
-    IPPROG_RESET, TOD_FULL,
+    ArtTodRequest, PortAddress, IPPROG_DHCP, IPPROG_GATEWAY, IPPROG_IP, IPPROG_MASK, IPPROG_RESET,
+    TOD_FULL,
 };
 use crate::pids;
 use crate::rdm::pd::{BootCatchStatus, LocalRdmSet};
@@ -196,6 +196,8 @@ pub struct SimPortSnapshot {
     pub dmx_mab: u16,
     /// PORTn_DMX_RATE in Hz.
     pub dmx_rate: u8,
+    /// PORTn_DMX_MBS (mark between slots) in µs.
+    pub dmx_mbs: u16,
     /// Current TOD.
     pub tod: Vec<Uid>,
 }
@@ -297,6 +299,7 @@ pub(super) struct Port {
     pub(super) dmx_break: u16,
     pub(super) dmx_mab: u16,
     pub(super) dmx_rate: u8,
+    pub(super) dmx_mbs: u16,
     pub(super) responders: Vec<Box<dyn SimResponder>>,
     pub(super) tod: Vec<Uid>,
     reported_tod: Vec<Uid>,
@@ -334,6 +337,7 @@ impl Port {
             dmx_break: 0,
             dmx_mab: 0,
             dmx_rate: 0,
+            dmx_mbs: 0,
             responders: Vec::new(),
             tod: Vec::new(),
             reported_tod: Vec::new(),
@@ -364,6 +368,7 @@ impl Port {
         self.dmx_break = u16::try_from(pid_default(pids::PID_PORT1_DMX_BREAK)).unwrap_or(176);
         self.dmx_mab = u16::try_from(pid_default(pids::PID_PORT1_DMX_MAB)).unwrap_or(16);
         self.dmx_rate = u8::try_from(pid_default(pids::PID_PORT1_DMX_RATE)).unwrap_or(40);
+        self.dmx_mbs = u16::try_from(pid_default(pids::PID_PORT1_DMX_MBS)).unwrap_or(0);
     }
 
     /// Whether the port's settings equal the factory values.
@@ -378,6 +383,7 @@ impl Port {
             && u32::from(self.dmx_break) == pid_default(pids::PID_PORT1_DMX_BREAK)
             && u32::from(self.dmx_mab) == pid_default(pids::PID_PORT1_DMX_MAB)
             && u32::from(self.dmx_rate) == pid_default(pids::PID_PORT1_DMX_RATE)
+            && u32::from(self.dmx_mbs) == pid_default(pids::PID_PORT1_DMX_MBS)
     }
 
     /// RDM runs on the line: enabled output with RDM on.
@@ -609,7 +615,7 @@ pub(super) struct Node {
     report_counter: u16,
     outbox: Vec<Outgoing>,
     reported_replies: Vec<Vec<u8>>,
-    reported_settings: Vec<(u16, Vec<u8>)>,
+    pub(super) reported_settings: Vec<(u16, Vec<u8>)>,
     sync_count: u64,
     last_dmx_ip: Option<IpAddr>,
     next_discovery: Instant,
@@ -1061,23 +1067,27 @@ impl Node {
         Some(bind - 1)
     }
 
+    /// Same rules as the firmware (`pm_artnet_node.c` `on_ip_prog`): Command 0 (bit 7 clear) = query only;
+    /// DHCP bit wins; otherwise reset first, then IP (switches DHCP off), mask, gateway. Invalid IPs
+    /// (0.0.0.0, 255.255.255.255) and non-contiguous/empty masks are ignored.
     fn on_ip_prog(&mut self, p: &ArtIpProg, src: SocketAddr, now: Instant) {
         let c = p.command;
-        if c & IPPROG_ENABLE != 0 {
+        if !p.is_query() {
             let mut s = self.ip.active;
             if c & IPPROG_DHCP != 0 {
                 s.dhcp = true;
-            } else if c & IPPROG_RESET != 0 {
-                // factory network configuration: DHCP with the Art-Net fallback as static values
-                s = self.ip.factory;
             } else {
-                if c & IPPROG_IP != 0 {
+                if c & IPPROG_RESET != 0 {
+                    // factory network configuration: DHCP with the Art-Net fallback as static values
+                    s = self.ip.factory;
+                }
+                if c & IPPROG_IP != 0 && !p.prog_ip.is_unspecified() && !p.prog_ip.is_broadcast() {
                     s.static_ip = p.prog_ip;
                     s.dhcp = false;
                 }
-                if c & IPPROG_MASK != 0 {
+                let m = u32::from(p.prog_sm);
+                if c & IPPROG_MASK != 0 && m != 0 && m.leading_ones() + m.trailing_zeros() == 32 {
                     s.static_mask = p.prog_sm;
-                    s.dhcp = false;
                 }
                 if c & IPPROG_GATEWAY != 0 {
                     s.gateway = p.prog_dg;
@@ -1404,6 +1414,7 @@ impl Node {
                     dmx_break: p.dmx_break,
                     dmx_mab: p.dmx_mab,
                     dmx_rate: p.dmx_rate,
+                    dmx_mbs: p.dmx_mbs,
                     tod: p.tod.clone(),
                 })
                 .collect(),

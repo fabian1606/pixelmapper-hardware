@@ -7,6 +7,11 @@ UI-Details: [ui-konzept.md](ui-konzept.md).
 > maßgeblich ist [protocol/contract.md](../protocol/contract.md) §11/§12. Wichtigste Änderungen: kein Input-Broadcast
 > (Spec verbietet ihn), ein Port pro `BindIndex`, ArtSync nur per Broadcast, Merge-Quelle = IP + Physical,
 > Display-Helligkeit und Werksreset über die Standard-PIDs DISPLAY_LEVEL/FACTORY_DEFAULTS, Node-Modell 0x0002.
+>
+> **Phase 1/2 (2026-10-25):** Umsetzung zeigte weitere Änderungen (contract.md §12.2): Hintergrundsuche **mit**
+> Un-Mute (3× DISC_UN_MUTE, Präsenzprüfung, DUB über den ganzen Raum), **eine** Queued-Message-Queue für alle
+> Controller (Pixelmapper liest zusätzlich nach), `ArtIpProg` Command 0 = Abfrage, neue PIDs PORTn_DMX_MBS
+> (Mark between Slots). Stand der Arbeit: [STATUS.md](STATUS.md).
 
 ## Ziel
 
@@ -50,16 +55,16 @@ Er ersetzt den Aufbau aus ESP32 und `tool.py` zum Betreiben und Flashen der LED-
 - **Konfiguration:** `ArtAddress` (Namen, Port-Adresse, Merge, Richtung, RDM ein/aus, Output-Stil, Failsafe, LED Mute/Normal), `ArtIpProg`, `ArtInput`.
 - **Output:** DMX läuft dauerhaft mit ca. 40 Hz. Merge **HTP** als Standard (LTP wählbar), höchstens 2 Quellen, eine Quelle verfällt nach 10 s. `ArtSync`; ohne Sync länger als 4 s gibt der Node direkt aus.
 - **Failsafe:** alle 4 Modi (Hold/Zero/Full/Scene), Standard **Hold**. Datenverlust ist in der Statusleiste und im `ArtPollReply` sichtbar.
-- **Input:** DMX → `ArtDmx` per **Unicast** an Nodes, die das Universe ausgeben (der Node pollt selbst alle ca. 3 s), und an Controller, die den Node in den letzten ca. 10 s gepollt haben. Broadcast per PID zuschaltbar. Gesendet wird bei Änderung und mindestens jede Sekunde als Keepalive. Statusbit „kein Signal“.
+- **Input:** DMX → `ArtDmx` per **Unicast** an Nodes, die das Universe ausgeben (der Node pollt selbst alle ca. 3 s), und an Controller, die den Node in den letzten ca. 10 s gepollt haben. ~~Broadcast per PID zuschaltbar~~ – **entfällt** (Art-Net 4 verbietet Broadcast von ArtDmx, contract §4). Gesendet wird bei Änderung und mindestens jede Sekunde als Keepalive. „Kein Signal“ = GoodInput Bit 7 aus.
 - **Diagnose:** `ArtDiagData` und die Statusfelder im PollReply.
 
 ## RDM
 
-- **Discovery:** vollständig beim Start, bei Port-Aktivierung und bei `ArtTodControl` Flush. Danach **Hintergrundsuche alle ca. 3 s** (DUB ohne Un-Mute, also nur neue Geräte) mit Präsenzprüfung bekannter Geräte (`DISC_MUTE`, entfernt nach 3 Fehlversuchen). Bei Änderung `ArtTodData`. Intervall per PID einstellbar; per `ArtAddress` lässt sich RDM pro Port abschalten. Die DMX-Rate bleibt über ca. 30 Hz.
+- **Discovery:** vollständig beim Start, bei Port-Aktivierung und bei `ArtTodControl` Flush. Danach **Hintergrundsuche alle ca. 3 s**: 3× `DISC_UN_MUTE` (Broadcast), Präsenzprüfung bekannter Geräte (`DISC_MUTE`, entfernt nach 3 Fehlversuchen; mutet sie zugleich), dann DUB über den ganzen Raum – es antworten nur Geräte, die nicht in der TOD stehen. *Geändert in Phase 1* (vorher „DUB ohne Un-Mute“): ohne Un-Mute blieben Geräte, die gemutet aus der TOD gefallen sind, bis zum Flush unsichtbar (contract §6.1). Bei Änderung `ArtTodData`. Intervall per PID einstellbar, pro Port per PID bzw. AtcIncOn/Off abschaltbar; per `ArtAddress` lässt sich RDM pro Port abschalten. Die DMX-Rate bleibt über ca. 30 Hz.
 - **Weiterleitung:** **Jedes `ArtRdm` wird weitergeleitet**, auch an UIDs, die nicht in der TOD stehen, sowie an Broadcasts und Herstellerbroadcasts. Pro Port gibt es eine Warteschlange, jede Anfrage wird beantwortet bzw. läuft sauber in den Timeout.
 - **TOD:** bis zu 512 Geräte pro Port, Labels im PSRAM zwischengespeichert.
 - **Node als RDM-Responder:** UID `7FF0:8xxxxxxx` (die unteren 28 Bit der MAC). Er ist über `ArtRdm` an seine UID erreichbar und unterstützt die Standard-PIDs (DEVICE_INFO, Label, Software-Version, IDENTIFY usw.).
-- **Hersteller-PIDs des Nodes:** alles, was Art-Net nicht abdeckt (DMX-Timing, Discovery-Intervall, Display, Panelsperre, Input-Broadcast, Adressformat …). `PARAMETER_DESCRIPTION` ist vollständig gepflegt, **damit Pixelmapper die Einstellungsseiten selbst erzeugen kann**. Wo E1.37-1 oder -2 passende Standard-PIDs haben, werden die genommen.
+- **Hersteller-PIDs des Nodes:** alles, was Art-Net nicht abdeckt (DMX-Timing: Break, MAB, Rate, **MBS** (Mark between Slots, Phase 2); Discovery-Intervall, Display, Panelsperre, Adressformat …; die Input-Broadcast-PID entfällt). `PARAMETER_DESCRIPTION` ist vollständig gepflegt, **damit Pixelmapper die Einstellungsseiten selbst erzeugen kann**. Wo E1.37-1 oder -2 passende Standard-PIDs haben, werden die genommen.
 - **`BOOT_CATCH(port, uid)`:** Der Node schickt bis zu 60 s lang alle ca. 20 ms ein GET BOOT_INFO an die UID, damit er nach einem Power-Cycle das Boot-Fenster der Tube (ca. 200 ms) trifft. So geht die Rettung übers Netzwerk, ohne ESP32.
 - **ESTA-ID:** `7FF0` ist der Prototypen-Bereich, OEM-Code ebenfalls für den Prototyp. Bevor Geräte weitergegeben werden, braucht es eine eigene ESTA-Hersteller-ID und einen eigenen Art-Net-OEM-Code.
 
@@ -76,7 +81,7 @@ Er ersetzt den Aufbau aus ESP32 und `tool.py` zum Betreiben und Flashen der LED-
 ## Konfiguration & Zusammenarbeit
 
 - **Alles** lässt sich über Art-Net/RDM aus Pixelmapper einstellen, **und alles** auch am Gerät.
-- **Wer zuletzt schreibt, gewinnt, ohne Dialog** (wie in Pixelmapper). Jede Änderung, ob lokal oder remote, wird sofort gemeldet (`ArtPollReply` + RDM-Queued-Message). Bearbeitet jemand am Gerät gerade einen Wert, den Pixelmapper ändert, zeigt der Editor kurz „↻ changed by Pixelmapper“ an.
+- **Wer zuletzt schreibt, gewinnt, ohne Dialog** (wie in Pixelmapper). Jede Änderung, ob lokal oder remote, wird sofort gemeldet (`ArtPollReply` + RDM-Queued-Message). Der Node hat **eine** Queued-Message-Queue für alle Controller (E1.20); wer zuerst abholt, leert sie – Pixelmapper liest deshalb zusätzlich nach (bei ungefragtem ArtPollReply und alle 30–60 s). Bearbeitet jemand am Gerät gerade einen Wert, den Pixelmapper ändert, zeigt der Editor kurz „↻ changed by Pixelmapper“ an.
 
 ## UI (Kurzfassung, Details siehe UI-Konzept)
 
@@ -107,8 +112,8 @@ pixelmapper-hardware/            (neues Monorepo, git)
 ```
 
 - Das jetzige Projekt `ledTubeXBAR500` bleibt als **Archiv** des Reverse Engineerings bestehen (Dumps, Logs, Kamerabilder, ESP32-Aufbau).
-- `pmnet`: `poll`, `tod`, `rdm get/set`, `node config …`, `flash <uid> <image>`, `flash --rescue` (über `BOOT_CATCH`). Dazu ein simulierter Tube-Bootloader für Tests ohne Hardware.
-- Pixelmapper (Backend Rust) bindet `pixelmapper-net` als Git- oder Pfad-Abhängigkeit ein.
+- `pmnet`: `poll`, `tod`, `rdm get/set`, `node config …`, `flash <uid> <image>`, `flash --rescue` (über `BOOT_CATCH`). Dazu ein simulierter Tube-Bootloader und ein simulierter Node (`pmnet sim`) für Tests ohne Hardware.
+- Pixelmapper (Backend Rust) bindet `pixelmapper-net` als Git- oder Pfad-Abhängigkeit ein. Die Web-App spricht über die **Bridge** `crates/pmnet-bridge` (eigenes Binary `pmnet-bridge serve`, WebSocket-Protokoll `protocol/bridge-ws.md`), die intern `pixelmapper-net` nutzt.
 
 ## Abnahme („sauber nach Standard“)
 
@@ -135,6 +140,13 @@ pixelmapper-hardware/            (neues Monorepo, git)
 9. UI nach Konzept
 10. `pixelmapper-net` + `pmnet` parallel ab Schritt 4, Abnahmetests fortlaufend
 11. Später: Matrix-Modus, eigene Platine (Rev 1: PoE, THVD1450, galvanische Trennung), ggf. sACN, Funk über den C6, signierte Images
+
+## Stand Phase 2 (2026-10-25)
+
+Phase 0 (Vertrag, PIDs, Vektoren) und Phase 1 (Komponenten `pm_*`, `pixelmapper-net`, Simulatoren) sind fertig. Phase 2
+verbindet die Komponenten in der Firmware (`components/pm_node` als reiner C-Kleber zwischen pm_artnet, pm_rdm,
+pm_port und pm_ui), baut die Bridge `pmnet-bridge` für die Web-App und einen Ende-zu-Ende-Test `pixelmapper-net` gegen
+den virtuellen Node (`tools/e2e.sh`). Laufender Stand: [STATUS.md](STATUS.md).
 
 ## Offene Punkte
 

@@ -100,14 +100,7 @@ pub fn decode(p: u16, data: &[u8]) -> Option<Value> {
 fn status_value(m: &StatusMessage) -> Value {
     let mut v = to_value(m);
     if let Value::Object(o) = &mut v {
-        use pids::status as st;
-        let name = match m.status_message_id {
-            st::BOOT_CATCH_CAUGHT => Some("BOOT_CATCH_CAUGHT"),
-            st::BOOT_CATCH_TIMEOUT => Some("BOOT_CATCH_TIMEOUT"),
-            st::PANEL_UNLOCKED_LOCAL => Some("PANEL_UNLOCKED_LOCAL"),
-            st::LOCAL_RDM_SET => Some("LOCAL_RDM_SET"),
-            _ => None,
-        };
+        let name = pids::status_name(m.status_message_id);
         o.insert("statusName".into(), json!(name));
     }
     v
