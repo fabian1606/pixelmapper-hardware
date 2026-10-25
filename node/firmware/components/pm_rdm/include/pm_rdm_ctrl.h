@@ -38,7 +38,7 @@ extern "C" {
 #define PM_RDM_MUTE_ATTEMPTS 5u         /**< DISC_MUTE attempts to verify a UID found by DUB (OLA MAX_MUTE_ATTEMPTS) */
 #define PM_RDM_BRANCH_MAX_FAILURES 5u   /**< collisions on a single-UID branch before it is given up (OLA) */
 #define PM_RDM_BRANCH_MAX_ATTEMPTS 5u   /**< DUBs of one branch without a new device before it is given up (OLA) */
-#define PM_RDM_DISC_STACK 64u           /**< branch stack depth (48 binary levels + split-around-bad-UID) */
+#define PM_RDM_DISC_STACK 72u           /**< branch stack depth (48 binary levels + split-around-bad-UID + margin) */
 #define PM_RDM_BAD_UIDS 16u             /**< UIDs that answered DUB but not DISC_MUTE (phantoms, broken responders) */
 #define PM_RDM_TOD_NOTIFY_MS 1000u      /**< min. interval of on_tod_changed while a full discovery runs */
 #define PM_RDM_BG_INTERVAL_MIN_MS 100u
@@ -127,7 +127,8 @@ typedef struct {
     uint32_t collisions;     /**< DUB answers that could not be decoded */
     uint32_t full_discoveries;
     uint32_t bg_discoveries;
-    uint32_t tod_overflow;   /**< devices found while the TOD was full (muted, not listed) */
+    uint32_t tod_overflow;   /**< devices found while the TOD was full (muted, not listed; counted once per run) */
+    uint32_t corrupt_runs;   /**< runs ended by the DUB cap or with branches given up (OLA "tree corrupt") */
 } pm_rdm_ctrl_stats_t;
 
 /** Branch of the binary search (private). */
@@ -154,6 +155,8 @@ struct pm_rdm_ctrl {
     uint8_t unmute_left;
     uint8_t mute_attempts;
     uint16_t disc_gen;             /**< changes whenever discovery is restarted/stopped */
+    uint32_t run_dubs;             /**< DUBs in the current run (cap: see pm_rdm_ctrl.c) */
+    bool run_corrupt;
     /* TOD, sorted by UID */
     uint16_t tod_count;
     pm_uid_t tod[PM_RDM_TOD_MAX];
@@ -164,6 +167,7 @@ struct pm_rdm_ctrl {
     uint16_t stack_depth;
     pm_rdm_branch_t stack[PM_RDM_DISC_STACK];
     pm_uid_t pending_uid;          /**< UID being muted (verify or presence check) */
+    bool pending_outside;          /**< pending_uid came from outside the DUB branch */
     uint16_t presence_idx;
     uint8_t bad_count;
     pm_uid_t bad[PM_RDM_BAD_UIDS];
@@ -177,6 +181,8 @@ struct pm_rdm_ctrl {
     uint32_t inflight_token;
     pm_uid_t inflight_dest;
     pm_uid_t inflight_src;
+    uint8_t inflight_cc;
+    uint16_t inflight_pid;
     pm_rdm_boot_catch_t boot_catch;
     uint32_t next_catch_ms;
     uint32_t last_now_ms;          /**< last now_ms seen (for calls without a clock) */
@@ -195,6 +201,14 @@ void pm_rdm_ctrl_set_background(pm_rdm_ctrl_t *c, bool on, uint32_t interval_ms)
 /** ArtTodControl AtcFlush: clear TOD, start full discovery. */
 void pm_rdm_ctrl_flush(pm_rdm_ctrl_t *c, uint32_t now_ms);
 
+/**
+ * ArtTodControl AtcEnd: end a running discovery (full or background) now. The TOD keeps what was found so far
+ * (on_tod_changed if it changed); the background search, if on, starts again one interval later.
+ * Mapping of the other ArtTodControl commands: AtcFlush -> pm_rdm_ctrl_flush(), AtcIncOn/AtcIncOff ->
+ * pm_rdm_ctrl_set_background(c, true/false, interval).
+ */
+void pm_rdm_ctrl_discovery_stop(pm_rdm_ctrl_t *c, uint32_t now_ms);
+
 /** Queue a request. PM_ERR_FULL when PM_RDM_QUEUE_LEN requests are waiting. */
 pm_err_t pm_rdm_ctrl_submit(pm_rdm_ctrl_t *c, const pm_rdm_request_t *req);
 /** Free queue slots (ArtRdm FifoAvail). */
@@ -202,7 +216,10 @@ uint8_t pm_rdm_ctrl_queue_free(const pm_rdm_ctrl_t *c);
 
 /** Next transaction to put on the line, or false if idle now. */
 bool pm_rdm_ctrl_next(pm_rdm_ctrl_t *c, uint32_t now_ms, pm_rdm_txn_t *out);
-/** Result of the transaction returned by the last next(). For PM_RDM_TXN_BROADCAST pass PM_RDM_RX_TIMEOUT. */
+/** Result of the transaction returned by the last next(). For PM_RDM_TXN_BROADCAST pass PM_RDM_RX_TIMEOUT.
+ *  Every transaction handed out must be finished with exactly one done(); if the port could not put it on the line
+ *  (driver error, port reconfigured), pass PM_RDM_RX_TIMEOUT (rx may be NULL) - it is then handled like a missing
+ *  answer (forwarded request: no on_response; discovery: empty branch / missed DISC_MUTE). */
 void pm_rdm_ctrl_done(pm_rdm_ctrl_t *c, uint32_t now_ms, const pm_rdm_rx_t *rx);
 
 /** TOD access (copy, sorted). Returns the total count. */

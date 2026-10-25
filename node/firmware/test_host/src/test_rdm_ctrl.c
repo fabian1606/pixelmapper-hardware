@@ -109,6 +109,7 @@ static void test_full_counts(void)
             CHECK(!pm_rdm_ctrl_discovery_running(&g_ctrl));
             CHECK(tod_matches_bus());
             CHECK(st.max_period_us <= 1000000u / 30u); /* DMX >= 30 Hz throughout */
+            CHECK_EQ(st.est_violations, 0);
             CHECK(g_rec.tod_events >= (counts[k] ? 1 : 0));
             pm_rdm_ctrl_stats_t s;
             pm_rdm_ctrl_get_stats(&g_ctrl, &s);
@@ -179,6 +180,20 @@ static void test_flags_and_quirks(void)
         CHECK(pm_rdm_ctrl_tod_find(&g_ctrl, &g_bus.dev[deaf].uid, NULL));
     }
 
+    g_context = "responder answering every DUB";
+    setup(150);
+    sim_add_random(&g_bus, 20);
+    int wild = sim_add(&g_bus, pm_uid_make(0x7FF0, 0x77777777));
+    g_bus.dev[wild].ignore_range = true;
+    g_bus.dev[wild].ignore_mute = true;
+    full_discovery(600000, NULL);
+    CHECK(!pm_rdm_ctrl_discovery_running(&g_ctrl));
+    pm_rdm_ctrl_stats_t ws;
+    pm_rdm_ctrl_get_stats(&g_ctrl, &ws);
+    CHECK(ws.dubs < 20000);
+    CHECK_EQ(ws.corrupt_runs, 1);
+    CHECK(pm_rdm_ctrl_tod_find(&g_ctrl, &g_bus.dev[wild].uid, NULL));
+
     g_context = "noisy line";
     for (uint32_t seed = 1; seed <= 3; seed++) {
         setup(200 + seed);
@@ -207,6 +222,16 @@ static void test_tod_limit(void)
     for (int i = 0; i < g_bus.n; i++) muted += g_bus.dev[i].muted;
     CHECK_EQ(muted, 520); /* the overflow devices are muted too (no endless DUB answers) */
     for (unsigned i = 1; i < PM_RDM_TOD_MAX; i++) CHECK(pm_uid_to_u64(&tod[i - 1]) < pm_uid_to_u64(&tod[i]));
+
+    g_context = "TOD full + broken responders";
+    setup(78);
+    sim_add_random(&g_bus, 515);
+    for (int i = 0; i < 8; i++) g_bus.dev[i * 60].ignore_mute = true;
+    full_discovery(3600000, NULL);
+    CHECK(!pm_rdm_ctrl_discovery_running(&g_ctrl));
+    CHECK_EQ(pm_rdm_ctrl_tod(&g_ctrl, NULL, 0), PM_RDM_TOD_MAX);
+    pm_rdm_ctrl_get_stats(&g_ctrl, &s);
+    CHECK_EQ(s.tod_overflow, 3);
     g_context = NULL;
 }
 
@@ -249,10 +274,14 @@ static void test_background(void)
     CHECK(g_rec.tod_events > ev);
     CHECK(tod_matches_bus());
 
-    /* no un-mute in background runs */
+    /* un-mute 3x per background run (OLA incremental discovery) */
     uint32_t bc = g_bus.broadcasts;
+    pm_rdm_ctrl_get_stats(&g_ctrl, &s);
+    uint32_t runs0 = s.bg_discoveries;
     sim_run(&g_bus, &g_ctrl, g_bus.now_ms + 7000, 512, NULL, NULL, NULL);
-    CHECK_EQ(g_bus.broadcasts, bc);
+    pm_rdm_ctrl_get_stats(&g_ctrl, &s);
+    CHECK(s.bg_discoveries > runs0);
+    CHECK(g_bus.broadcasts - bc >= PM_RDM_UNMUTE_REPEATS * (s.bg_discoveries - runs0 - 1));
 
     /* device disappears: gone after its presence check */
     ev = g_rec.tod_events;
@@ -260,6 +289,14 @@ static void test_background(void)
     sim_run(&g_bus, &g_ctrl, g_bus.now_ms + 8000, 512, NULL, NULL, NULL);
     CHECK(!pm_rdm_ctrl_tod_find(&g_ctrl, &g_bus.dev[3].uid, NULL));
     CHECK(g_rec.tod_events > ev);
+    /* ... and comes back when replugged although it never lost power (still muted) */
+    CHECK(g_bus.dev[3].muted);
+    g_bus.dev[3].present = true;
+    ev = g_rec.tod_events;
+    sim_run(&g_bus, &g_ctrl, g_bus.now_ms + 8000, 512, NULL, NULL, NULL);
+    CHECK(pm_rdm_ctrl_tod_find(&g_ctrl, &g_bus.dev[3].uid, NULL));
+    CHECK(g_rec.tod_events > ev);
+    CHECK(tod_matches_bus());
 
     /* device power-cycles (comes back un-muted): stays listed, re-muted, no TOD change */
     sim_power_cycle(&g_bus, 5, 500);
@@ -309,6 +346,15 @@ static void test_presence_misses(void)
     CHECK(!pm_rdm_ctrl_next(&g_ctrl, now, &t)); /* schedules the first background run */
     now += 100;
     pm_rdm_rx_t none = {PM_RDM_RX_TIMEOUT, 0, NULL};
+    for (unsigned k = 0; k < PM_RDM_UNMUTE_REPEATS; k++) { /* background runs start with un-mute too (OLA) */
+        CHECK(pm_rdm_ctrl_next(&g_ctrl, now, &t));
+        CHECK_EQ(t.kind, PM_RDM_TXN_BROADCAST);
+        CHECK_EQ(pm_get_be16(t.data + 21), PM_RDM_PID_DISC_UN_MUTE);
+        sim_transact(&g_bus, &t, &none);
+        pm_rdm_ctrl_done(&g_ctrl, now, NULL);
+    }
+    none.status = PM_RDM_RX_TIMEOUT;
+    none.len = 0;
     for (int k = 0; k < (int)PM_RDM_PRESENCE_MAX_MISSES - 1; k++) {
         CHECK(pm_rdm_ctrl_next(&g_ctrl, now, &t));
         CHECK_EQ(t.kind, PM_RDM_TXN_REQUEST);
@@ -778,8 +824,64 @@ static void test_node_vectors(void)
     g_context = NULL;
 }
 
+static void test_wraparound(void)
+{
+    g_context = "uint32 ms wraparound";
+    setup(900);
+    g_bus.now_us = (uint64_t)0xFFFFF000u * 1000u; /* ms clock wraps after ~4 s */
+    g_bus.now_ms = (uint32_t)(g_bus.now_us / 1000u);
+    sim_add_random(&g_bus, 30);
+    int tube = sim_add(&g_bus, pm_uid_make(0x7FF0, 0x0000ABCD));
+    g_bus.dev[tube].tube = true;
+    pm_rdm_ctrl_set_background(&g_ctrl, true, 1000);
+    pm_rdm_ctrl_set_enabled(&g_ctrl, true, g_bus.now_ms);
+    sim_run(&g_bus, &g_ctrl, g_bus.now_ms + 30000, 512, disc_done, &g_ctrl, NULL);
+    CHECK(tod_matches_bus());
+    CHECK_EQ(pm_rdm_ctrl_boot_catch_start(&g_ctrl, &g_bus.dev[tube].uid, g_bus.now_ms), PM_OK);
+    sim_power_cycle(&g_bus, tube, 1000);
+    sim_run(&g_bus, &g_ctrl, g_bus.now_ms + 10000, 512, caught, &g_ctrl, NULL);
+    CHECK(g_bus.now_ms < 0x10000000u); /* really wrapped */
+    pm_rdm_boot_catch_t bc;
+    pm_rdm_ctrl_boot_catch_status(&g_ctrl, g_bus.now_ms, &bc);
+    CHECK_EQ(bc.state, PM_BOOT_CATCH_STATE_CAUGHT);
+    CHECK(bc.elapsed_ms < 2000);
+    int extra = sim_add(&g_bus, pm_uid_make(0x7FF0, 0x0000ABCE));
+    sim_run(&g_bus, &g_ctrl, g_bus.now_ms + 5000, 512, NULL, NULL, NULL);
+    CHECK(pm_rdm_ctrl_tod_find(&g_ctrl, &g_bus.dev[extra].uid, NULL));
+    CHECK(tod_matches_bus());
+    g_context = NULL;
+}
+
+static void test_discovery_stop(void)
+{
+    g_context = "discovery stop (AtcEnd)";
+    setup(950);
+    sim_add_random(&g_bus, 50);
+    pm_rdm_ctrl_set_background(&g_ctrl, true, 3000);
+    pm_rdm_ctrl_set_enabled(&g_ctrl, true, 0);
+    sim_run(&g_bus, &g_ctrl, 300, 512, NULL, NULL, NULL);
+    CHECK(pm_rdm_ctrl_discovery_running(&g_ctrl));
+    int ev = g_rec.tod_events;
+    uint16_t found = pm_rdm_ctrl_tod(&g_ctrl, NULL, 0);
+    pm_rdm_ctrl_discovery_stop(&g_ctrl, g_bus.now_ms);
+    CHECK(!pm_rdm_ctrl_discovery_running(&g_ctrl));
+    CHECK_EQ(pm_rdm_ctrl_tod(&g_ctrl, NULL, 0), found); /* kept */
+    CHECK_EQ(g_rec.tod_events, ev + 1);
+    uint32_t tx = g_bus.txns;
+    sim_run(&g_bus, &g_ctrl, g_bus.now_ms + 2900, 512, NULL, NULL, NULL);
+    CHECK_EQ(g_bus.txns, tx); /* quiet until the next background run */
+    sim_run(&g_bus, &g_ctrl, g_bus.now_ms + 200, 512, NULL, NULL, NULL);
+    CHECK(pm_rdm_ctrl_discovery_running(&g_ctrl));
+    sim_run(&g_bus, &g_ctrl, g_bus.now_ms + 60000, 512, disc_done, &g_ctrl, NULL);
+    CHECK(tod_matches_bus()); /* background run finds the rest */
+    pm_rdm_ctrl_discovery_stop(&g_ctrl, g_bus.now_ms); /* idle: no-op */
+    g_context = NULL;
+}
+
 void test_rdm_ctrl(void)
 {
+    test_wraparound();
+    test_discovery_stop();
     test_full_counts();
     test_full_edges();
     test_flags_and_quirks();

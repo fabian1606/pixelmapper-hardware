@@ -3,9 +3,11 @@
  *
  * Discovery follows OLA's DiscoveryAgent (rdm-digest.md §3.3):
  *  - full: TOD cleared, DISC_UN_MUTE to broadcast 3x, binary search with DISC_UNIQUE_BRANCH from (0, FFFF:FFFFFFFF).
- *  - background (incremental): DISC_MUTE to every known UID (presence check: PM_RDM_PRESENCE_MAX_MISSES consecutive
- *    misses remove it; the ACK also re-mutes devices that were power-cycled), then the same binary search WITHOUT
- *    un-mute, so only new (un-muted) devices answer.
+ *  - background (incremental, OLA): DISC_UN_MUTE to broadcast 3x, DISC_MUTE to every known UID (presence check:
+ *    PM_RDM_PRESENCE_MAX_MISSES consecutive misses remove it), then the same binary search: only devices that are not
+ *    in the TOD answer (new ones, and ones that were dropped although they are still connected and muted - without
+ *    the un-mute those would never come back until a flush). The TOD is not cleared.
+ *  - every run is capped at DUB_CAP() DUBs (protection against responders that answer every DUB).
  *  - DUB answer that decodes: verify with DISC_MUTE (PM_RDM_MUTE_ATTEMPTS); ACK -> TOD, then DUB the same branch
  *    again. No ACK -> the UID is "bad" (phantom from a collision or broken responder).
  *  - DUB answer that does not decode (collision): split the branch in the middle. A UID that was already muted in
@@ -48,6 +50,9 @@ enum { /* disc_step */
 #define TOD_PUBLIC_MASK ((uint16_t)(0x00FFu | PM_RDM_TOD_HAS_BINDING_UID))
 
 #define MUTE_RESP_MAX (PM_RDM_HEADER_LEN + 8u + 2u)
+
+/* DUB cap of one run: a clean binary search needs < 2 * 48 DUBs per device */
+#define DUB_CAP(c) (2u * 48u * ((uint32_t)(c)->tod_count + (c)->bad_count + 1u) + 64u)
 
 static const pm_uid_t UID_ALL = {{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}};
 
@@ -133,7 +138,7 @@ static bool is_bad(const pm_rdm_ctrl_t *c, const pm_uid_t *uid)
 
 static void push(pm_rdm_ctrl_t *c, uint64_t lo, uint64_t hi)
 {
-    if (c->stack_depth >= PM_RDM_DISC_STACK) return; /* not reachable with 48-bit splits; drop = "tree corrupt" */
+    if (c->stack_depth >= PM_RDM_DISC_STACK) return; /* callers check the room first */
     pm_rdm_branch_t *b = &c->stack[c->stack_depth++];
     b->lo = lo;
     b->hi = hi;
@@ -167,20 +172,19 @@ static void disc_begin(pm_rdm_ctrl_t *c, pm_rdm_disc_mode_t mode)
     c->mute_attempts = 0;
     c->presence_idx = 0;
     for (unsigned i = 0; i < c->tod_count; i++) c->tod_flags[i] &= (uint16_t)~TOD_SEEN;
+    c->run_dubs = 0;
+    c->run_corrupt = false;
     push(c, 0, UID_MAX_U64);
-    if (mode == PM_RDM_DISC_FULL) {
-        c->stats.full_discoveries++;
-        c->unmute_left = PM_RDM_UNMUTE_REPEATS;
-        c->disc_step = STEP_UNMUTE;
-    } else {
-        c->stats.bg_discoveries++;
-        c->disc_step = c->tod_count ? STEP_PRESENCE : STEP_DUB;
-    }
+    if (mode == PM_RDM_DISC_FULL) c->stats.full_discoveries++;
+    else c->stats.bg_discoveries++;
+    c->unmute_left = PM_RDM_UNMUTE_REPEATS;
+    c->disc_step = STEP_UNMUTE;
 }
 
 static void disc_finish(pm_rdm_ctrl_t *c, uint32_t now_ms)
 {
     bool full = c->disc_mode == PM_RDM_DISC_FULL;
+    if (c->run_corrupt) c->stats.corrupt_runs++;
     disc_stop(c);
     if (full || c->tod_dirty) tod_changed(c, now_ms, true);
     c->bg_schedule = true; /* next background run one interval after this one ended */
@@ -250,6 +254,16 @@ void pm_rdm_ctrl_flush(pm_rdm_ctrl_t *c, uint32_t now_ms)
     start_full(c, now_ms);
 }
 
+void pm_rdm_ctrl_discovery_stop(pm_rdm_ctrl_t *c, uint32_t now_ms)
+{
+    c->last_now_ms = now_ms;
+    if (c->disc_mode == PM_RDM_DISC_IDLE) return;
+    bool full = c->disc_mode == PM_RDM_DISC_FULL;
+    disc_stop(c);
+    if (full || c->tod_dirty) tod_changed(c, now_ms, true);
+    c->bg_schedule = true;
+}
+
 pm_err_t pm_rdm_ctrl_submit(pm_rdm_ctrl_t *c, const pm_rdm_request_t *req)
 {
     if (req == NULL || req->len < PM_RDM_HEADER_LEN + 2u || req->len > PM_RDM_MAX_MSG_LEN ||
@@ -273,7 +287,7 @@ static uint32_t est_us(const pm_rdm_ctrl_t *c, pm_rdm_txn_kind_t kind, uint16_t 
     if (kind == PM_RDM_TXN_DUB) return req + PM_RDM_DUB_GAP_US;
     if (kind == PM_RDM_TXN_BROADCAST) return req + PM_RDM_BROADCAST_GAP_US;
     /* response: turnaround + max. break/MAB + bytes + gap before our next packet */
-    uint32_t resp = PM_RDM_RESP_DELAY_MAX_US + 352u + 88u + (uint32_t)max_resp_len * PM_RDM_BYTE_US +
+    uint32_t resp = PM_RDM_RESPONSE_TIMEOUT_US + 352u + 88u + (uint32_t)max_resp_len * PM_RDM_BYTE_US +
                     PM_RDM_BROADCAST_GAP_US;
     return req + (resp > PM_RDM_NO_RESPONSE_GAP_US ? resp : PM_RDM_NO_RESPONSE_GAP_US);
 }
@@ -357,7 +371,7 @@ static bool plan(pm_rdm_ctrl_t *c, uint32_t now_ms, pm_rdm_txn_t *t, uint8_t *in
         switch (c->disc_step) {
         case STEP_UNMUTE:
             if (c->unmute_left == 0) {
-                c->disc_step = STEP_DUB;
+                c->disc_step = c->disc_mode == PM_RDM_DISC_BACKGROUND ? STEP_PRESENCE : STEP_DUB;
                 continue;
             }
             build(c, t, PM_RDM_TXN_BROADCAST, &UID_ALL, PM_RDM_CC_DISCOVERY, PM_RDM_PID_DISC_UN_MUTE, NULL, 0, 0);
@@ -379,6 +393,10 @@ static bool plan(pm_rdm_ctrl_t *c, uint32_t now_ms, pm_rdm_txn_t *t, uint8_t *in
             return true;
         case STEP_DUB:
         default: {
+            if (c->stack_depth && c->run_dubs >= DUB_CAP(c)) {
+                c->stack_depth = 0; /* broken responder on the line: end the run with what we have */
+                c->run_corrupt = true;
+            }
             if (c->stack_depth == 0) {
                 disc_finish(c, now_ms);
                 return false;
@@ -404,6 +422,8 @@ static void commit(pm_rdm_ctrl_t *c, uint32_t now_ms, const pm_rdm_txn_t *t, uin
     c->inflight_tn = t->data[15];
     memcpy(c->inflight_dest.b, t->data + 3, 6);
     memcpy(c->inflight_src.b, t->data + 9, 6);
+    c->inflight_cc = t->data[20];
+    c->inflight_pid = pm_get_be16(t->data + 21);
     switch (inflight) {
     case INF_REQUEST:
     case INF_REQUEST_NORESP:
@@ -421,6 +441,7 @@ static void commit(pm_rdm_ctrl_t *c, uint32_t now_ms, const pm_rdm_txn_t *t, uin
         break;
     case INF_DUB:
         c->stats.dubs++;
+        c->run_dubs++;
         break;
     default:
         break;
@@ -450,8 +471,15 @@ static bool valid_reply(const pm_rdm_ctrl_t *c, const pm_rdm_rx_t *rx, pm_rdm_ms
 {
     if (rx == NULL || rx->status != PM_RDM_RX_OK || rx->data == NULL) return false;
     if (pm_rdm_decode(rx->data, rx->len, m) != PM_OK) return false;
-    return pm_uid_equal(&m->src, &c->inflight_dest) && pm_uid_equal(&m->dest, &c->inflight_src) &&
-           m->tn == c->inflight_tn;
+    if (!pm_uid_equal(&m->src, &c->inflight_dest) || !pm_uid_equal(&m->dest, &c->inflight_src) ||
+        m->tn != c->inflight_tn) {
+        return false;
+    }
+    /* QUEUED_MESSAGE is answered with the PID and CC of the queued response (OLA RDMCommand.cpp) */
+    if (c->inflight_pid == PM_RDM_PID_QUEUED_MESSAGE) {
+        return m->cc == PM_RDM_CC_GET_RESPONSE || m->cc == PM_RDM_CC_SET_RESPONSE;
+    }
+    return m->cc == (uint8_t)(c->inflight_cc + 1u) && m->pid == c->inflight_pid;
 }
 
 static bool mute_ack(const pm_rdm_ctrl_t *c, const pm_rdm_rx_t *rx, uint16_t *flags)
@@ -467,6 +495,15 @@ static bool mute_ack(const pm_rdm_ctrl_t *c, const pm_rdm_rx_t *rx, uint16_t *fl
     return true;
 }
 
+static void branch_no_progress(pm_rdm_ctrl_t *c);
+
+static void add_bad(pm_rdm_ctrl_t *c, const pm_uid_t *uid)
+{
+    if (is_bad(c, uid)) return;
+    if (c->bad_count < PM_RDM_BAD_UIDS) c->bad[c->bad_count++] = *uid;
+    else c->bad[PM_RDM_BAD_UIDS - 1u] = *uid;
+}
+
 static void branch_pop(pm_rdm_ctrl_t *c)
 {
     if (c->stack_depth) c->stack_depth--;
@@ -476,6 +513,14 @@ static void branch_split_mid(pm_rdm_ctrl_t *c)
 {
     pm_rdm_branch_t b = c->stack[c->stack_depth - 1];
     if (b.lo >= b.hi) {
+        if (++c->stack[c->stack_depth - 1].failures >= PM_RDM_BRANCH_MAX_FAILURES) {
+            c->run_corrupt = true;
+            branch_pop(c);
+        }
+        return;
+    }
+    if (c->stack_depth >= PM_RDM_DISC_STACK) { /* no room for two halves: count it as a failure instead */
+        c->run_corrupt = true;
         if (++c->stack[c->stack_depth - 1].failures >= PM_RDM_BRANCH_MAX_FAILURES) branch_pop(c);
         return;
     }
@@ -488,6 +533,11 @@ static void branch_split_mid(pm_rdm_ctrl_t *c)
 static void branch_split_around(pm_rdm_ctrl_t *c, uint64_t u)
 {
     pm_rdm_branch_t b = c->stack[c->stack_depth - 1];
+    if (c->stack_depth >= PM_RDM_DISC_STACK && u > b.lo && u < b.hi) {
+        c->run_corrupt = true;
+        branch_no_progress(c);
+        return;
+    }
     branch_pop(c);
     if (u < b.hi) push(c, u + 1u, b.hi);
     if (u > b.lo) push(c, b.lo, u - 1u);
@@ -496,7 +546,10 @@ static void branch_split_around(pm_rdm_ctrl_t *c, uint64_t u)
 /* A DUB of the top branch brought no new device. */
 static void branch_no_progress(pm_rdm_ctrl_t *c)
 {
-    if (c->stack_depth && ++c->stack[c->stack_depth - 1].attempts >= PM_RDM_BRANCH_MAX_ATTEMPTS) branch_pop(c);
+    if (c->stack_depth && ++c->stack[c->stack_depth - 1].attempts >= PM_RDM_BRANCH_MAX_ATTEMPTS) {
+        c->run_corrupt = true;
+        branch_pop(c);
+    }
 }
 
 static void done_dub(pm_rdm_ctrl_t *c, const pm_rdm_rx_t *rx)
@@ -514,19 +567,34 @@ static void done_dub(pm_rdm_ctrl_t *c, const pm_rdm_rx_t *rx)
         return;
     }
     uint64_t u = pm_uid_to_u64(&uid);
-    if (u < b->lo || u > b->hi) { /* cannot be a genuine answer for this branch */
-        c->stats.collisions++;
-        branch_split_mid(c);
-        return;
-    }
     bool found;
     int i = tod_index(c, &uid, &found);
-    if (is_bad(c, &uid) || (found && (c->tod_flags[i] & TOD_SEEN))) {
+    bool seen = found && (c->tod_flags[i] & TOD_SEEN);
+    if (u < b->lo || u > b->hi) {
+        /* Clean answer with a UID outside the branch: either a phantom from a collision (checksum matched by chance)
+         * or a broken responder that answers every DUB. A known broken responder means nobody else answered:
+         * the branch is empty. A phantom: split like a collision. Unknown: verify with DISC_MUTE first. */
+        c->run_corrupt = true;
+        if (seen) {
+            branch_pop(c);
+        } else if (is_bad(c, &uid)) {
+            c->stats.collisions++;
+            branch_split_mid(c);
+        } else {
+            c->pending_uid = uid;
+            c->pending_outside = true;
+            c->mute_attempts = 0;
+            c->disc_step = STEP_MUTE;
+        }
+        return;
+    }
+    if (is_bad(c, &uid) || seen) {
         /* muted in this run (or never mutable) but still answering: broken responder, search around it */
         branch_split_around(c, u);
         return;
     }
     c->pending_uid = uid;
+    c->pending_outside = false;
     c->mute_attempts = 0;
     c->disc_step = STEP_MUTE;
 }
@@ -535,15 +603,23 @@ static void done_mute(pm_rdm_ctrl_t *c, uint32_t now_ms, const pm_rdm_rx_t *rx)
 {
     uint16_t flags;
     if (mute_ack(c, rx, &flags)) {
-        tod_add(c, &c->pending_uid, (uint16_t)(flags | TOD_SEEN), now_ms); /* full TOD: muted, not listed */
-        if (c->stack_depth) c->stack[c->stack_depth - 1].attempts = 0;
         c->disc_step = STEP_DUB; /* same branch again */
+        if (tod_add(c, &c->pending_uid, (uint16_t)(flags | TOD_SEEN), now_ms)) {
+            if (c->stack_depth) c->stack[c->stack_depth - 1].attempts = 0;
+        } else { /* TOD full: muted but not listed; remember it so it is counted/handled only once */
+            add_bad(c, &c->pending_uid);
+            branch_no_progress(c);
+        }
         return;
     }
     if (++c->mute_attempts < PM_RDM_MUTE_ATTEMPTS) return; /* try again */
-    if (c->bad_count < PM_RDM_BAD_UIDS) c->bad[c->bad_count++] = c->pending_uid;
-    else c->bad[PM_RDM_BAD_UIDS - 1u] = c->pending_uid;
-    branch_no_progress(c);
+    add_bad(c, &c->pending_uid);
+    if (c->pending_outside && c->stack_depth) {
+        c->stats.collisions++; /* phantom from a collision */
+        branch_split_mid(c);
+    } else {
+        branch_no_progress(c);
+    }
     c->disc_step = STEP_DUB;
 }
 

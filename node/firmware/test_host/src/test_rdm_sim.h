@@ -28,6 +28,9 @@ typedef struct {
     /* quirks */
     bool never_ack_mute;     /* answers DUB, never answers DISC_MUTE */
     bool ignore_mute;        /* ACKs DISC_MUTE but keeps answering DUB */
+    bool ignore_range;       /* answers every DUB, whatever the range */
+    /* line timing of its responses (random per device, worst case E1.20 + inline proxy) */
+    uint16_t resp_delay_us, break_us, mab_us;
     /* tube model */
     bool tube;
     bool app_valid;
@@ -50,6 +53,7 @@ typedef struct {
     uint8_t rx[600];
     /* statistics */
     uint32_t txns, dubs, collisions, broadcasts;
+    uint32_t last_us;          /* line time of the last transaction as the bus saw it */
 } sim_bus_t;
 
 void sim_init(sim_bus_t *b, uint32_t seed);
@@ -70,6 +74,7 @@ typedef struct {
     uint32_t frames;
     uint32_t max_period_us;   /* longest break-to-break time */
     uint32_t rdm_txns;
+    uint32_t est_violations;  /* transactions that took longer on the line than their est_us */
 } sim_port_stats_t;
 
 void sim_run(sim_bus_t *b, pm_rdm_ctrl_t *c, uint32_t until_ms, uint16_t slots, bool (*stop)(void *), void *ctx,

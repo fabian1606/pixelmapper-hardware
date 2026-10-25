@@ -41,6 +41,9 @@ int sim_add(sim_bus_t *b, pm_uid_t uid)
     d->present = true;
     d->app_valid = true;
     d->preamble = (uint8_t)(sim_rand(b) % 8u);
+    d->resp_delay_us = (uint16_t)(176u + sim_rand(b) % (PM_RDM_RESPONSE_TIMEOUT_US - 176u + 1u));
+    d->break_us = (uint16_t)(176u + sim_rand(b) % 177u);
+    d->mab_us = (uint16_t)(12u + sim_rand(b) % 77u);
     return b->n++;
 }
 
@@ -129,7 +132,7 @@ static int dev_respond(sim_bus_t *b, sim_dev_t *d, const pm_rdm_msg_t *m, uint8_
             memcpy(lo.b, m->pd, 6);
             memcpy(hi.b, m->pd + 6, 6);
             uint64_t u = pm_uid_to_u64(&d->uid);
-            if (u < pm_uid_to_u64(&lo) || u > pm_uid_to_u64(&hi)) return 0;
+            if (!d->ignore_range && (u < pm_uid_to_u64(&lo) || u > pm_uid_to_u64(&hi))) return 0;
             return pm_rdm_dub_encode(&d->uid, d->preamble, out, 32);
         }
         if ((m->pid != PM_RDM_PID_DISC_MUTE && m->pid != PM_RDM_PID_DISC_UN_MUTE) || m->pdl != 0) return 0;
@@ -181,7 +184,12 @@ void sim_transact(sim_bus_t *b, const pm_rdm_txn_t *t, pm_rdm_rx_t *rx)
     pm_rdm_msg_t m;
     uint8_t one[PM_RDM_MAX_MSG_LEN];
     int count = 0, len = 0;
+    uint32_t slowest = 0;
     b->txns++;
+    uint32_t req_us = 176u + 16u + (uint32_t)t->len * PM_RDM_BYTE_US; /* sim_run uses 176/16 too */
+    if (t->kind == PM_RDM_TXN_DUB) b->last_us = req_us + PM_RDM_DUB_GAP_US;
+    else if (t->kind == PM_RDM_TXN_BROADCAST) b->last_us = req_us + PM_RDM_BROADCAST_GAP_US;
+    else b->last_us = req_us + PM_RDM_NO_RESPONSE_GAP_US;
     if (t->kind == PM_RDM_TXN_DUB) b->dubs++;
     if (t->kind == PM_RDM_TXN_BROADCAST) b->broadcasts++;
     rx->status = PM_RDM_RX_TIMEOUT;
@@ -195,10 +203,16 @@ void sim_transact(sim_bus_t *b, const pm_rdm_txn_t *t, pm_rdm_rx_t *rx)
         for (int k = 0; k < n; k++) b->rx[k] &= one[k]; /* wired AND */
         if (n > len) len = n;
         count++;
+        const sim_dev_t *d = &b->dev[i];
+        uint32_t us = d->resp_delay_us + d->break_us + d->mab_us + (uint32_t)n * PM_RDM_BYTE_US;
+        if (us > slowest) slowest = us;
     }
     if (t->kind == PM_RDM_TXN_BROADCAST || count == 0) return; /* nothing listened for / nothing came */
     rx->len = (uint16_t)len;
     rx->status = PM_RDM_RX_OK;
+    if (t->kind == PM_RDM_TXN_REQUEST && req_us + slowest + PM_RDM_BROADCAST_GAP_US > b->last_us) {
+        b->last_us = req_us + slowest + PM_RDM_BROADCAST_GAP_US;
+    }
     if (count > 1) {
         b->collisions++;
         if (sim_rand(b) % 100u < b->garbage_percent) rx->status = PM_RDM_RX_GARBAGE;
@@ -224,10 +238,11 @@ void sim_run(sim_bus_t *b, pm_rdm_ctrl_t *c, uint32_t until_ms, uint16_t slots, 
         while (pm_rdm_ctrl_next_max(c, b->now_ms, first ? UINT32_MAX : budget, &t)) {
             pm_rdm_rx_t rx;
             sim_transact(b, &t, &rx);
-            b->now_us += t.est_us;
+            if (st && b->last_us > t.est_us) st->est_violations++;
+            b->now_us += b->last_us;
             b->now_ms = (uint32_t)(b->now_us / 1000u);
             pm_rdm_ctrl_done(c, b->now_ms, &rx);
-            budget = budget > t.est_us ? budget - t.est_us : 0;
+            budget = budget > b->last_us ? budget - b->last_us : 0;
             first = false;
             if (st) st->rdm_txns++;
         }
