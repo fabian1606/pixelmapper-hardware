@@ -13,20 +13,14 @@
 
 #include "esp_err.h"
 #include "pm_board.h"
+#include "pm_net_types.h"
 #include "pm_settings.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define PM_NET_DHCP_FALLBACK_MS 5000u
-
-typedef enum {
-    PM_NET_ADDR_NONE = 0,     /**< no link / no address yet */
-    PM_NET_ADDR_DHCP,
-    PM_NET_ADDR_FALLBACK,     /**< DHCP enabled, no lease within 5 s: Art-Net default 2.B.C.D/8 */
-    PM_NET_ADDR_STATIC,
-} pm_net_addr_mode_t;
+/* PM_NET_DHCP_FALLBACK_MS, pm_net_addr_mode_t */
 
 typedef struct {
     bool link_up;
@@ -61,6 +55,14 @@ typedef void (*pm_net_tick_fn)(void *ctx);
 
 /** Open the socket and start the network task (core 0). */
 esp_err_t pm_net_start(pm_net_rx_fn rx, pm_net_tick_fn tick, void *ctx, uint32_t period_ms);
+
+/** Called in the network task when the link state or the IPv4 address changed (DHCP lease, fallback, static). */
+typedef void (*pm_net_change_fn)(void *ctx, const pm_net_status_t *st);
+/** Register the change callback (one; call before pm_net_start). */
+void pm_net_set_change_cb(pm_net_change_fn fn, void *ctx);
+
+/** True when called from the network task (for asserting the single-thread rule of pm_artnet). */
+bool pm_net_in_task(void);
 
 #ifdef __cplusplus
 }

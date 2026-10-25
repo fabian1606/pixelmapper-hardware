@@ -1,0 +1,37 @@
+menu "Pixelmapper Node: Ethernet (pm_net)"
+
+    comment "RMII data pins of the internal EMAC (IO_MUX only on the ESP32-P4)."
+    comment "MDC/MDIO/PHY reset/PHY address/REF_CLK come from pm_board."
+
+    config PM_NET_RMII_TXD0
+        int "RMII TXD0 GPIO (34 or 41)"
+        default 34
+    config PM_NET_RMII_TXD1
+        int "RMII TXD1 GPIO (35 or 42)"
+        default 35
+    config PM_NET_RMII_TX_EN
+        int "RMII TX_EN GPIO (33, 40 or 49)"
+        default 49
+    config PM_NET_RMII_CRS_DV
+        int "RMII CRS_DV GPIO (28, 45 or 51)"
+        default 28
+    config PM_NET_RMII_RXD0
+        int "RMII RXD0 GPIO (29, 46 or 52)"
+        default 29
+        help
+            The Waveshare wiki lists RXD0/RXD1 = 30/29, but the P4 IO_MUX only offers RXD0 on 29/46/52 and
+            RXD1 on 30/47/53 (soc/esp32p4/emac_periph.c), so 29/30 is the only valid pair in that pin group.
+    config PM_NET_RMII_RXD1
+        int "RMII RXD1 GPIO (30, 47 or 53)"
+        default 30
+
+    config PM_NET_TASK_PRIO
+        int "Network task priority"
+        default 10
+    config PM_NET_TASK_STACK
+        int "Network task stack size"
+        default 6144
+    config PM_NET_POST_QUEUE_LEN
+        int "pm_net_post queue length"
+        default 32
+endmenu
