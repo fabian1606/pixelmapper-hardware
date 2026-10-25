@@ -1348,7 +1348,6 @@ async fn e2e_node_rdm_details() {
     let mut rx = ctrl.subscribe();
     let get = |p: u16, d: Vec<u8>| {
         let c = ctrl.clone();
-        let id = id;
         async move { c.rdm_get(&id, pa(1), node, p, &d).await }
     };
 
@@ -2171,5 +2170,92 @@ async fn e2e_differential_node_rdm_and_poll_reply() {
         "{} differences:\n{}",
         diffs.len(),
         diffs.join("\n")
+    );
+}
+
+/// Differential: the queued messages (and status messages) both node implementations collect for the same changes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e2e_differential_queued_messages() {
+    use pixelmapper_net::sim::{SimConfig, SimNode};
+    let vn = vn_or_skip!(&[]);
+    let sim = SimNode::start(SimConfig::default()).await.unwrap();
+    let quiet = |target: SocketAddr| {
+        let mut c = ControllerConfig::local(vec![target]);
+        c.rdm.auto_fetch_queued = false;
+        c.rdm.node_queue_interval = Duration::ZERO;
+        c.rdm.timeout = Duration::from_millis(500);
+        c.auto_tod_request = false;
+        c
+    };
+    let mut lists = Vec::new();
+    for target in [vn.bcast(), sim.local_addr()] {
+        let id = NodeId::Uid(vn.uid);
+        let c = Controller::bind(quiet(target)).await.unwrap();
+        c.wait_for_node(&id, WAIT).await.unwrap();
+        let node = vn.uid;
+        // empty the queue first (boot-time messages)
+        c.fetch_queued_messages(&id, pa(1), node).await.unwrap();
+        c.rdm_set(
+            &id,
+            pa(1),
+            node,
+            pids::PID_PORT2_DMX_BREAK,
+            &200u16.to_be_bytes(),
+        )
+        .await
+        .unwrap();
+        c.art_address_command(&id, 1, ac::AC_MERGE_LTP0)
+            .await
+            .unwrap();
+        c.art_address_command(&id, 1, ac::AC_LED_LOCATE)
+            .await
+            .unwrap();
+        c.rdm_set(&id, pa(1), node, pid::DEVICE_LABEL, b"q")
+            .await
+            .unwrap();
+        c.tod_control(&id, pa(1), ArtTodControl::ATC_INC_OFF)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        c.rdm_set(&id, pa(1), node, pids::PID_PORT3_DMX_RATE, &[30])
+            .await
+            .unwrap();
+        c.art_address_command(&id, 1, ac::AC_LED_NORMAL)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let mut rx = c.subscribe();
+        c.fetch_queued_messages(&id, pa(1), node).await.unwrap();
+        let mut got = Vec::new();
+        while let Ok(Ok(e)) = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+            if let Event::QueuedMessage { message, .. } = e {
+                let st: Vec<String> = message
+                    .status_messages
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|s| {
+                        format!(
+                            "{:04X}/{}/{}",
+                            s.status_message_id, s.data_value1, s.data_value2
+                        )
+                    })
+                    .collect();
+                got.push(format!(
+                    "0x{:04X} {} {}",
+                    message.pid,
+                    pixelmapper_net::to_hex(&message.data),
+                    st.join(",")
+                ));
+            }
+        }
+        c.shutdown();
+        lists.push(got);
+    }
+    sim.shutdown();
+    eprintln!("queued messages: {:?}", lists[0]);
+    assert!(lists[0].len() >= 4, "{:?}", lists[0]);
+    assert_eq!(
+        lists[0], lists[1],
+        "queued messages: firmware (left) vs sim::node (right)"
     );
 }
