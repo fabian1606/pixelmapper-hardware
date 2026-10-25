@@ -1033,13 +1033,27 @@ async fn e2e_6_failsafe_after_4_s() {
     })
     .await
     .expect("data");
-    tokio::time::sleep(Duration::from_millis(3000)).await;
+    // an observer that polled once (Flags bit 1) and then only listens
+    let mut co = config(&vn);
+    co.poll_interval = Duration::ZERO;
+    let obs = Controller::bind(co).await.unwrap();
+    node_when(&obs, &id, |n| n.ports[0].data_active).await;
+    let mut rx = obs.subscribe();
+    tokio::time::sleep(Duration::from_millis(2500)).await;
     assert_eq!(vn.dmx(2), vec![5, 6, 7, 8], "no failsafe before 4 s");
     tokio::time::sleep(Duration::from_millis(1800)).await;
     assert_eq!(vn.dmx(1), vec![5, 6, 7, 8], "hold");
     assert!(vn.dmx(2).iter().all(|&v| v == 0), "zero: {:?}", vn.dmx(2));
     assert!(vn.dmx(3).iter().all(|&v| v == 255), "full: {:?}", vn.dmx(3));
     assert_eq!(&vn.dmx(4)[..4], &[11, 22, 33, 44], "scene");
+    // data loss is reported with an unsolicited ArtPollReply (GoodOutputA bit 7 off, contract §7)
+    let lost = wait_event(&mut rx, WAIT, |e| match e {
+        Event::NodeUpdated { node } if !node.ports[0].data_active => Some(()),
+        _ => None,
+    })
+    .await;
+    assert!(lost.is_some(), "unsolicited ArtPollReply on data loss");
+    obs.shutdown();
     ctrl.shutdown();
 }
 
@@ -1647,6 +1661,39 @@ async fn e2e_artnet_details() {
     ctrl.art_address(&id, pkt).await.unwrap();
     node_when(&ctrl, &id, |n| n.ports[0].port_address == pa(1)).await;
 
+    // ArtInput only acts on inputs: an output port stays as it is (contract §5)
+    ctrl.art_input(&id, 1, &[true]).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        vn.ctl("settings").contains("p1=en1,dir0"),
+        "{}",
+        vn.ctl("settings")
+    );
+    let n = ctrl.node(&id).unwrap();
+    assert!(n.ports[0].rdm_enabled && n.ports[0].direction == PortDirection::Output);
+
+    // names longer than the fields: cut to 17 / 63 characters on both sides
+    let long = "L".repeat(70);
+    let n = ctrl
+        .art_address(
+            &id,
+            ArtAddress {
+                short_name: "abcdefghijklmnopqrstuvwxyz".into(),
+                long_name: long,
+                ..ArtAddress::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(n.short_name, "abcdefghijklmnopq");
+    assert_eq!(n.long_name, "L".repeat(63));
+    let l = ctrl
+        .rdm_get(&id, pa(1), vn.uid, pid::DEVICE_LABEL, &[])
+        .await
+        .unwrap();
+    assert_eq!(decode_label(&l), "abcdefghijklmnopq");
+
     // ArtIpProg: invalid values are ignored, reset goes back to the defaults (DHCP)
     let bad = ArtIpProg {
         command: pixelmapper_net::artnet::IPPROG_ENABLE
@@ -1722,4 +1769,407 @@ async fn e2e_3_tod_subscription_after_node_restart() {
         "no unsolicited ArtTodData after the node restarted (TOD not requested again)"
     );
     ctrl.shutdown();
+}
+
+/// ArtSync: no sync for 4 s -> direct output again; while a port merges ArtSync is ignored (contract §4).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e2e_6_sync_timeout_and_merge() {
+    let vn = vn_or_skip!(&[]);
+    let s = raw();
+    let dest = vn.addr();
+    let dmx = |seq: u8, phys: u8, p: u16, v: u8| {
+        ArtPacket::Dmx(ArtDmx::new(seq, phys, pa(p), vec![v; 4]).unwrap()).encode()
+    };
+    let sync = ArtPacket::Sync(ArtSync::default()).encode();
+    s.send_to(&dmx(1, 0, 1, 1), dest).unwrap();
+    s.send_to(&sync, vn.bcast()).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    s.send_to(&dmx(2, 0, 1, 2), dest).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(vn.dmx(1), vec![1; 4], "sync mode");
+    std::thread::sleep(Duration::from_millis(4300));
+    s.send_to(&dmx(3, 0, 1, 3), dest).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(vn.dmx(1), vec![3; 4], "4 s without ArtSync: direct output");
+
+    // two Physicals of one IP merge, ArtSync still applies (digest §3.3: only streams of different IPs block it)
+    s.send_to(&dmx(4, 0, 2, 10), dest).unwrap();
+    s.send_to(&dmx(5, 1, 2, 20), dest).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    s.send_to(&sync, vn.bcast()).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    s.send_to(&dmx(6, 0, 2, 30), dest).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(vn.dmx(2), vec![20; 4], "held until the next ArtSync");
+    s.send_to(&sync, vn.bcast()).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(vn.dmx(2), vec![30; 4]);
+
+    // streams of two IPs merge (another socket = another peer address at the node): ArtSync is ignored
+    let s2 = raw();
+    s2.send_to(&dmx(1, 0, 3, 40), dest).unwrap();
+    s.send_to(&dmx(7, 0, 3, 50), dest).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    s.send_to(&sync, vn.bcast()).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    s.send_to(&dmx(8, 0, 3, 60), dest).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(
+        vn.dmx(3),
+        vec![60; 4],
+        "HTP 40/60 at once: ArtSync ignored while two IPs merge"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Differential: the firmware (virtual node) against pixelmapper-net's own node model (sim::node)
+// ---------------------------------------------------------------------------------------------------------------
+
+/// Outcome of one RDM request, comparable across implementations.
+fn outcome(r: pixelmapper_net::Result<Vec<u8>>) -> String {
+    match r {
+        Ok(d) => format!("ACK {}", pixelmapper_net::to_hex(&d)),
+        Err(e) => match e.nack_reason() {
+            Some(n) => format!("NACK {:04X}", n.0),
+            None => format!("ERR {}", e.code()),
+        },
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e2e_differential_node_rdm_and_poll_reply() {
+    use pixelmapper_net::controller::RdmRequest;
+    use pixelmapper_net::link::RdmOptions;
+    use pixelmapper_net::rdm::cc;
+    use pixelmapper_net::sim::{SimConfig, SimNode};
+    let vn = vn_or_skip!(&[]);
+    let sim = SimNode::start(SimConfig {
+        long_name: "Pixelmapper Node".into(),
+        ..SimConfig::default()
+    })
+    .await
+    .unwrap();
+    assert_eq!(sim.uid(), vn.uid, "same MAC -> same UID");
+    let c_fw = controller(&vn).await;
+    let mut cs = ControllerConfig::local(vec![sim.local_addr()]);
+    cs.rdm.timeout = Duration::from_millis(500);
+    let c_sim = Controller::bind(cs).await.unwrap();
+    c_sim
+        .wait_for_node(&NodeId::Uid(sim.uid()), WAIT)
+        .await
+        .unwrap();
+    let id = vn.id();
+    let node = vn.uid;
+
+    let mut reqs: Vec<(u8, u16, Vec<u8>, u16)> = Vec::new(); // cc, pid, pd, sub-device
+    let get = |p: u16| (cc::GET, p, vec![], 0u16);
+    for p in [
+        pid::DEVICE_INFO,
+        pid::SUPPORTED_PARAMETERS,
+        pid::SOFTWARE_VERSION_LABEL,
+        pid::DEVICE_MODEL_DESCRIPTION,
+        pid::MANUFACTURER_LABEL,
+        pid::DEVICE_LABEL,
+        pid::PRODUCT_DETAIL_ID_LIST,
+        pid::BOOT_SOFTWARE_VERSION_ID,
+        pid::BOOT_SOFTWARE_VERSION_LABEL,
+        pid::DISPLAY_LEVEL,
+        pid::IDENTIFY_DEVICE,
+        pid::LIST_INTERFACES,
+        pid::FACTORY_DEFAULTS,
+    ] {
+        reqs.push(get(p));
+    }
+    reqs.push((cc::GET, pid::STATUS_MESSAGES, vec![0x02], 0));
+    reqs.push((cc::GET, pid::STATUS_MESSAGES, vec![0x04], 0));
+    for def in pids::PIDS.iter().filter(|p| p.device == pids::Device::Node) {
+        reqs.push(get(def.pid));
+        reqs.push((
+            cc::GET,
+            pid::PARAMETER_DESCRIPTION,
+            def.pid.to_be_bytes().to_vec(),
+            0,
+        ));
+    }
+    for s in pids::STATUS {
+        reqs.push((
+            cc::GET,
+            pid::STATUS_ID_DESCRIPTION,
+            s.id.to_be_bytes().to_vec(),
+            0,
+        ));
+    }
+    // E1.37-2 with the interface id the node lists
+    let ifs = c_fw
+        .rdm_get(&id, pa(1), node, pid::LIST_INTERFACES, &[])
+        .await
+        .unwrap();
+    let ifid = ifs[..4].to_vec();
+    for p in [
+        pid::INTERFACE_LABEL,
+        pid::INTERFACE_HARDWARE_ADDRESS_TYPE1,
+        pid::IPV4_DHCP_MODE,
+        pid::IPV4_CURRENT_ADDRESS,
+        pid::IPV4_STATIC_ADDRESS,
+    ] {
+        reqs.push((cc::GET, p, ifid.clone(), 0));
+    }
+    reqs.push(get(pid::IPV4_DEFAULT_ROUTE));
+    // error cases
+    reqs.push((
+        cc::GET,
+        pid::PARAMETER_DESCRIPTION,
+        pid::DEVICE_INFO.to_be_bytes().to_vec(),
+        0,
+    ));
+    reqs.push((
+        cc::GET,
+        pid::PARAMETER_DESCRIPTION,
+        0x81FFu16.to_be_bytes().to_vec(),
+        0,
+    ));
+    reqs.push((
+        cc::GET,
+        pid::STATUS_ID_DESCRIPTION,
+        0x8FFFu16.to_be_bytes().to_vec(),
+        0,
+    ));
+    reqs.push(get(0x81FF));
+    reqs.push(get(pids::PID_BOOT_CATCH_START));
+    reqs.push((cc::GET, pid::DEVICE_INFO, vec![1], 0));
+    reqs.push((cc::GET, pid::DEVICE_INFO, vec![], 1));
+    reqs.push((cc::SET, pids::PID_PORT1_ENABLED, vec![2], 0));
+    reqs.push((cc::SET, pids::PID_PORT1_ENABLED, vec![1, 1], 0));
+    reqs.push((cc::SET, pids::PID_PORT1_DMX_RATE, vec![45], 0));
+    reqs.push((
+        cc::SET,
+        pids::PID_PORT1_DMX_MBS,
+        101u16.to_be_bytes().to_vec(),
+        0,
+    ));
+    reqs.push((
+        cc::SET,
+        pids::PID_RDM_BG_DISCOVERY_INTERVAL,
+        0u16.to_be_bytes().to_vec(),
+        0,
+    ));
+    reqs.push((cc::SET, pids::PID_DISPLAY_ADDRESS_FORMAT, vec![2], 0));
+    reqs.push((cc::SET, pids::PID_NODE_HW_REVISION, vec![1], 0));
+    reqs.push((cc::SET, pid::DEVICE_INFO, vec![], 0));
+    reqs.push((cc::SET, pid::IDENTIFY_DEVICE, vec![2], 0));
+    reqs.push((cc::SET, pid::DEVICE_LABEL, vec![b'x'; 33], 0));
+    reqs.push((cc::SET, pid::DISPLAY_LEVEL, vec![128], 0));
+    reqs.push(get(pid::DISPLAY_LEVEL));
+    reqs.push((cc::SET, pids::PID_FW_WRITE, vec![0, 0, 0, 0, 1], 0));
+    reqs.push(get(pids::PID_FW_INFO));
+    reqs.push((cc::SET, pids::PID_FW_FINISH, vec![], 0));
+    reqs.push(get(pids::PID_FW_INFO));
+    reqs.push((cc::SET, pids::PID_FW_BEGIN, vec![0; 64], 0));
+    reqs.push(get(pids::PID_FW_INFO));
+    reqs.push((cc::SET, pids::PID_BOOT_CATCH_ABORT, vec![], 0));
+    reqs.push(get(pids::PID_BOOT_CATCH_STATUS));
+    reqs.push((cc::SET, pid::RESET_DEVICE, vec![0x02], 0));
+    reqs.push((cc::SET, pid::FACTORY_DEFAULTS, vec![1], 0));
+    // firmware session: valid begin, write, gap, FW_INFO, write after the gap
+    let img = NodeImage::from_bin(build_test_bin(2000, 0x000200, 1, "0.2.0")).unwrap();
+    reqs.push((cc::SET, pids::PID_FW_BEGIN, img.desc.encode().to_vec(), 0));
+    let mut w = 0u32.to_be_bytes().to_vec();
+    w.extend_from_slice(&img.bin[..100]);
+    reqs.push((cc::SET, pids::PID_FW_WRITE, w, 0));
+    reqs.push(get(pids::PID_FW_INFO));
+    let mut w = 110u32.to_be_bytes().to_vec();
+    w.extend_from_slice(&img.bin[110..120]);
+    reqs.push((cc::SET, pids::PID_FW_WRITE, w, 0));
+    reqs.push(get(pids::PID_FW_INFO));
+    let mut w = 100u32.to_be_bytes().to_vec();
+    w.extend_from_slice(&img.bin[100..120]);
+    reqs.push((cc::SET, pids::PID_FW_WRITE, w, 0));
+    reqs.push(get(pids::PID_FW_INFO));
+    // every settable single-value node PID: max, then GET
+    for def in pids::PIDS
+        .iter()
+        .filter(|p| p.device == pids::Device::Node && p.set_request_pdl.is_some())
+    {
+        let Some(d) = def.desc.filter(|d| d.data_type != 0) else {
+            continue;
+        };
+        let v = d.max;
+        let pd = match d.pdl_size {
+            1 => vec![v as u8],
+            2 => (v as u16).to_be_bytes().to_vec(),
+            _ => v.to_be_bytes().to_vec(),
+        };
+        reqs.push((cc::SET, def.pid, pd, 0));
+        reqs.push(get(def.pid));
+    }
+    reqs.push((cc::SET, pid::DEVICE_LABEL, b"diff label".to_vec(), 0));
+    reqs.push(get(pid::DEVICE_LABEL));
+    reqs.push((cc::SET, pid::IDENTIFY_DEVICE, vec![1], 0));
+    reqs.push(get(pid::IDENTIFY_DEVICE));
+    reqs.push((cc::SET, pid::IDENTIFY_DEVICE, vec![0], 0));
+    let mut st = ifid.clone();
+    st.extend_from_slice(&[10, 7, 7, 7, 24]);
+    reqs.push((cc::SET, pid::IPV4_STATIC_ADDRESS, st, 0));
+    let mut off = ifid.clone();
+    off.push(0);
+    reqs.push((cc::SET, pid::IPV4_DHCP_MODE, off, 0));
+    let mut gw = 1u32.to_be_bytes().to_vec();
+    gw.extend_from_slice(&[10, 7, 7, 1]);
+    reqs.push((cc::SET, pid::IPV4_DEFAULT_ROUTE, gw, 0));
+    reqs.push((cc::GET, pid::IPV4_STATIC_ADDRESS, ifid.clone(), 0));
+    reqs.push((cc::GET, pid::IPV4_DHCP_MODE, ifid.clone(), 0));
+    reqs.push((cc::GET, pid::IPV4_CURRENT_ADDRESS, ifid.clone(), 0));
+    reqs.push(get(pid::IPV4_DEFAULT_ROUTE));
+    reqs.push((cc::SET, pid::INTERFACE_RENEW_DHCP, ifid.clone(), 0));
+    reqs.push((cc::SET, pid::INTERFACE_APPLY_CONFIGURATION, ifid.clone(), 0));
+    reqs.push((cc::GET, pid::IPV4_CURRENT_ADDRESS, ifid.clone(), 0));
+
+    let mut diffs = Vec::new();
+    for (class, p, pd, sub) in reqs {
+        let mk = || RdmRequest {
+            uid: node,
+            command_class: class,
+            pid: p,
+            data: pd.clone(),
+            options: RdmOptions {
+                sub_device: sub,
+                retries: Some(1),
+                ..RdmOptions::default()
+            },
+        };
+        let a = outcome(c_fw.rdm(&id, pa(1), mk()).await);
+        let b = outcome(c_sim.rdm(&NodeId::Uid(node), pa(1), mk()).await);
+        if a != b {
+            diffs.push(format!(
+                "{} 0x{p:04X} {} sub {sub}: firmware {a} | sim {b}",
+                if class == cc::GET { "GET" } else { "SET" },
+                pixelmapper_net::to_hex(&pd)
+            ));
+        }
+    }
+
+    // the same ArtAddress sequence on both, then compare the replies
+    let sid = NodeId::Uid(node);
+    for (bind, cmd) in [
+        (1, ac::AC_MERGE_LTP0),
+        (2, ac::AC_DIRECTION_RX0),
+        (3, ac::AC_RDM_DISABLE0),
+        (4, ac::AC_FAIL_FULL),
+        (4, ac::AC_STYLE_DELTA0),
+        (1, ac::AC_LED_MUTE),
+    ] {
+        c_fw.art_address_command(&id, bind, cmd).await.unwrap();
+        c_sim.art_address_command(&sid, bind, cmd).await.unwrap();
+    }
+    let a = ArtAddress {
+        bind_index: 3,
+        net_switch: ArtAddress::program(2),
+        sub_switch: ArtAddress::program(3),
+        sw_out: [ArtAddress::program(4), 0x7F, 0x7F, 0x7F],
+        short_name: "diff".into(),
+        acn_priority: 150,
+        ..ArtAddress::default()
+    };
+    c_fw.art_address(&id, a.clone()).await.unwrap();
+    c_sim.art_address(&sid, a).await.unwrap();
+    c_fw.art_input(&id, 2, &[true]).await.unwrap();
+    c_sim.art_input(&sid, 2, &[true]).await.unwrap();
+    // ArtIpProgReply bytes: query (the RDM changes above are not applied: applied by APPLY_CONFIGURATION)
+    let (qf, qs) = (
+        c_fw.ip_prog_query(&id).await.unwrap(),
+        c_sim.ip_prog_query(&sid).await.unwrap(),
+    );
+    if qf != qs {
+        diffs.push(format!(
+            "ArtIpProgReply query: firmware {qf:?} | sim {qs:?}"
+        ));
+    }
+    // ArtTodData of an input port / of an RDM-disabled port
+    for p in [pa(2), PortAddress::new(0x234).unwrap()] {
+        let tod = |to: SocketAddr| {
+            let s = raw();
+            let req = ArtTodRequest::for_port_addresses(p.net(), &[p]);
+            s.send_to(&ArtPacket::TodRequest(req).encode(), to).unwrap();
+            collect(&s, Duration::from_millis(300))
+                .into_iter()
+                .filter_map(|x| match x {
+                    ArtPacket::TodData(t) => Some(t),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let (tf, ts) = (tod(vn.addr()), tod(sim.local_addr()));
+        if tf != ts {
+            diffs.push(format!("ArtTodData {p}: firmware {tf:?} | sim {ts:?}"));
+        }
+    }
+
+    // ArtPollReply field by field (BindIndex 1..4)
+    let poll = |to: SocketAddr| {
+        let s = raw();
+        s.send_to(&poll_packet(), to).unwrap();
+        let mut v: Vec<ArtPollReply> = collect(&s, Duration::from_millis(1300))
+            .into_iter()
+            .filter_map(|p| match p {
+                ArtPacket::PollReply(r) => Some(r),
+                _ => None,
+            })
+            .collect();
+        v.sort_by_key(|r| r.bind_index);
+        v
+    };
+    let (rf, rs) = (poll(vn.bcast()), poll(sim.local_addr()));
+    assert_eq!(rf.len(), 4);
+    assert_eq!(rs.len(), 4);
+    for (mut f, mut s) in rf.into_iter().zip(rs) {
+        let strip = |r: &str| r.split(']').nth(1).unwrap_or("").to_string(); // the counter differs
+        f.node_report = strip(&f.node_report);
+        s.node_report = strip(&s.node_report);
+        if f != s {
+            diffs.push(format!(
+                "ArtPollReply bind {}:\n  firmware {f:?}\n  sim      {s:?}",
+                f.bind_index
+            ));
+        }
+    }
+    // ArtRdm FifoMax
+    let fifo = |to: SocketAddr| {
+        let s = raw();
+        let m = pixelmapper_net::rdm::RdmMessage::request(
+            node,
+            Uid::new(pids::ESTA_MANUFACTURER, 0x77),
+            1,
+            1,
+            0,
+            cc::GET,
+            pid::DEVICE_INFO,
+            vec![],
+        );
+        s.send_to(
+            &pixelmapper_net::artnet::ArtRdm::from_message(pa(1), &m).encode(),
+            to,
+        )
+        .unwrap();
+        collect(&s, Duration::from_millis(400))
+            .into_iter()
+            .find_map(|p| match p {
+                ArtPacket::Rdm(r) => Some((r.fifo_avail, r.fifo_max)),
+                _ => None,
+            })
+    };
+    let (ff, fs) = (fifo(vn.addr()), fifo(sim.local_addr()));
+    if ff != fs {
+        diffs.push(format!(
+            "ArtRdm FifoAvail/FifoMax: firmware {ff:?} | sim {fs:?}"
+        ));
+    }
+    c_fw.shutdown();
+    c_sim.shutdown();
+    sim.shutdown();
+    assert!(
+        diffs.is_empty(),
+        "{} differences:\n{}",
+        diffs.len(),
+        diffs.join("\n")
+    );
 }
