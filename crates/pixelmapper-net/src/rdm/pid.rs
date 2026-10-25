@@ -1,0 +1,259 @@
+//! Standard RDM parameter IDs (E1.20, E1.37-1, E1.37-2, E1.37-5 and later, `protocol/rdm-digest.md` §6.1–6.6) and
+//! name lookup that also covers the manufacturer PIDs of [`crate::pids`].
+
+macro_rules! standard_pids {
+    ($($std:literal { $($name:ident = $val:expr,)* })*) => {
+        $($(
+            #[doc = concat!("`", stringify!($name), "` (", $std, ").")]
+            pub const $name: u16 = $val;
+        )*)*
+
+        /// All standard PIDs of this module as `(pid, name)`.
+        pub static STANDARD: &[(u16, &str)] = &[$($(($val, stringify!($name)),)*)*];
+    };
+}
+
+standard_pids! {
+    "E1.20" {
+        DISC_UNIQUE_BRANCH = 0x0001,
+        DISC_MUTE = 0x0002,
+        DISC_UN_MUTE = 0x0003,
+        PROXIED_DEVICES = 0x0010,
+        PROXIED_DEVICE_COUNT = 0x0011,
+        COMMS_STATUS = 0x0015,
+        QUEUED_MESSAGE = 0x0020,
+        STATUS_MESSAGES = 0x0030,
+        STATUS_ID_DESCRIPTION = 0x0031,
+        CLEAR_STATUS_ID = 0x0032,
+        SUB_DEVICE_STATUS_REPORT_THRESHOLD = 0x0033,
+        SUPPORTED_PARAMETERS = 0x0050,
+        PARAMETER_DESCRIPTION = 0x0051,
+        DEVICE_INFO = 0x0060,
+        PRODUCT_DETAIL_ID_LIST = 0x0070,
+        DEVICE_MODEL_DESCRIPTION = 0x0080,
+        MANUFACTURER_LABEL = 0x0081,
+        DEVICE_LABEL = 0x0082,
+        FACTORY_DEFAULTS = 0x0090,
+        LANGUAGE_CAPABILITIES = 0x00A0,
+        LANGUAGE = 0x00B0,
+        SOFTWARE_VERSION_LABEL = 0x00C0,
+        BOOT_SOFTWARE_VERSION_ID = 0x00C1,
+        BOOT_SOFTWARE_VERSION_LABEL = 0x00C2,
+        DMX_PERSONALITY = 0x00E0,
+        DMX_PERSONALITY_DESCRIPTION = 0x00E1,
+        DMX_START_ADDRESS = 0x00F0,
+        SLOT_INFO = 0x0120,
+        SLOT_DESCRIPTION = 0x0121,
+        DEFAULT_SLOT_VALUE = 0x0122,
+        SENSOR_DEFINITION = 0x0200,
+        SENSOR_VALUE = 0x0201,
+        RECORD_SENSORS = 0x0202,
+        DEVICE_HOURS = 0x0400,
+        LAMP_HOURS = 0x0401,
+        LAMP_STRIKES = 0x0402,
+        LAMP_STATE = 0x0403,
+        LAMP_ON_MODE = 0x0404,
+        DEVICE_POWER_CYCLES = 0x0405,
+        DISPLAY_INVERT = 0x0500,
+        DISPLAY_LEVEL = 0x0501,
+        PAN_INVERT = 0x0600,
+        TILT_INVERT = 0x0601,
+        PAN_TILT_SWAP = 0x0602,
+        REAL_TIME_CLOCK = 0x0603,
+        IDENTIFY_DEVICE = 0x1000,
+        RESET_DEVICE = 0x1001,
+        POWER_STATE = 0x1010,
+        PERFORM_SELFTEST = 0x1020,
+        SELF_TEST_DESCRIPTION = 0x1021,
+        CAPTURE_PRESET = 0x1030,
+        PRESET_PLAYBACK = 0x1031,
+    }
+    "E1.37-1" {
+        DMX_BLOCK_ADDRESS = 0x0140,
+        DMX_FAIL_MODE = 0x0141,
+        DMX_STARTUP_MODE = 0x0142,
+        DIMMER_INFO = 0x0340,
+        MINIMUM_LEVEL = 0x0341,
+        MAXIMUM_LEVEL = 0x0342,
+        CURVE = 0x0343,
+        CURVE_DESCRIPTION = 0x0344,
+        OUTPUT_RESPONSE_TIME = 0x0345,
+        OUTPUT_RESPONSE_TIME_DESCRIPTION = 0x0346,
+        MODULATION_FREQUENCY = 0x0347,
+        MODULATION_FREQUENCY_DESCRIPTION = 0x0348,
+        BURN_IN = 0x0440,
+        LOCK_PIN = 0x0640,
+        LOCK_STATE = 0x0641,
+        LOCK_STATE_DESCRIPTION = 0x0642,
+        IDENTIFY_MODE = 0x1040,
+        PRESET_INFO = 0x1041,
+        PRESET_STATUS = 0x1042,
+        PRESET_MERGEMODE = 0x1043,
+        POWER_ON_SELF_TEST = 0x1044,
+    }
+    "E1.37-2" {
+        LIST_INTERFACES = 0x0700,
+        INTERFACE_LABEL = 0x0701,
+        INTERFACE_HARDWARE_ADDRESS_TYPE1 = 0x0702,
+        IPV4_DHCP_MODE = 0x0703,
+        IPV4_ZEROCONF_MODE = 0x0704,
+        IPV4_CURRENT_ADDRESS = 0x0705,
+        IPV4_STATIC_ADDRESS = 0x0706,
+        INTERFACE_RENEW_DHCP = 0x0707,
+        INTERFACE_RELEASE_DHCP = 0x0708,
+        INTERFACE_APPLY_CONFIGURATION = 0x0709,
+        IPV4_DEFAULT_ROUTE = 0x070A,
+        DNS_IPV4_NAME_SERVER = 0x070B,
+        DNS_HOSTNAME = 0x070C,
+        DNS_DOMAIN_NAME = 0x070D,
+    }
+    "E1.37-5" {
+        TEST_DATA = 0x0016,
+        COMMS_STATUS_NSC = 0x0017,
+        MANUFACTURER_URL = 0x00D0,
+        PRODUCT_URL = 0x00D1,
+        FIRMWARE_URL = 0x00D2,
+        SERIAL_NUMBER = 0x00D3,
+        DEVICE_INFO_OFFSTAGE = 0x00D4,
+        DMX_PERSONALITY_ID = 0x00E2,
+        SENSOR_TYPE_CUSTOM = 0x0210,
+        SENSOR_UNIT_CUSTOM = 0x0211,
+        SHIPPING_LOCK = 0x0650,
+        LIST_TAGS = 0x0651,
+        ADD_TAG = 0x0652,
+        REMOVE_TAG = 0x0653,
+        CHECK_TAG = 0x0654,
+        CLEAR_TAGS = 0x0655,
+        DEVICE_UNIT_NUMBER = 0x0656,
+        IDENTIFY_TIMEOUT = 0x1050,
+        POWER_OFF_READY = 0x1051,
+    }
+    "E1.20-2025, unverified" {
+        METADATA_PARAMETER_VERSION = 0x0052,
+        METADATA_JSON = 0x0053,
+        METADATA_JSON_URL = 0x0054,
+        SUPPORTED_PARAMETERS_ENHANCED = 0x0055,
+        CONTROLLER_FLAG_SUPPORT = 0x0056,
+        NACK_DESCRIPTION = 0x0057,
+        PACKED_PID_SUB = 0x0058,
+        PACKED_PID_INDEX = 0x0059,
+        ENUM_LABEL = 0x005A,
+        SELFTEST_ENHANCED = 0x1022,
+    }
+}
+
+/// Name of a PID: standard name (e.g. `"DEVICE_INFO"`) or manufacturer name from `pids.toml`
+/// (e.g. `"BOOT_INFO"`, `"PORT1_ENABLED"`). `None` for unknown PIDs.
+pub fn name(pid: u16) -> Option<&'static str> {
+    STANDARD
+        .iter()
+        .find(|(p, _)| *p == pid)
+        .map(|(_, n)| *n)
+        .or_else(|| {
+            crate::pids::PIDS
+                .iter()
+                .find(|d| d.pid == pid)
+                .map(|d| d.name)
+        })
+}
+
+/// PID for a standard or manufacturer name, case-insensitive. An optional `PID_` prefix is accepted
+/// (`"pid_boot_info"` works like `"BOOT_INFO"`).
+pub fn from_name(s: &str) -> Option<u16> {
+    let s = s.trim();
+    let lookup = |n: &str| {
+        STANDARD
+            .iter()
+            .find(|(_, name)| name.eq_ignore_ascii_case(n))
+            .map(|(p, _)| *p)
+            .or_else(|| {
+                crate::pids::PIDS
+                    .iter()
+                    .find(|d| d.name.eq_ignore_ascii_case(n))
+                    .map(|d| d.pid)
+            })
+    };
+    lookup(s).or_else(|| {
+        let prefix = s.get(..4)?;
+        if prefix.eq_ignore_ascii_case("PID_") {
+            lookup(s.get(4..)?)
+        } else {
+            None
+        }
+    })
+}
+
+/// Parse a PID given as name (see [`from_name`]), hex (`"0x8010"`) or decimal (`"32784"`).
+pub fn parse(s: &str) -> Option<u16> {
+    let t = s.trim();
+    if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        return u16::from_str_radix(hex, 16).ok();
+    }
+    if !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) {
+        return t.parse().ok();
+    }
+    from_name(t)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn table_unique() {
+        let mut pids = HashSet::new();
+        let mut names = HashSet::new();
+        for (p, n) in STANDARD {
+            assert!(pids.insert(*p), "duplicate PID 0x{p:04X}");
+            assert!(names.insert(*n), "duplicate name {n}");
+            assert!(*p < 0x8000, "{n} is not in the ESTA range");
+        }
+        for d in crate::pids::PIDS {
+            assert!(!pids.contains(&d.pid), "{} collides", d.name);
+            assert!(!names.contains(d.name), "{} collides", d.name);
+        }
+    }
+
+    #[test]
+    fn node_standard_pids_known() {
+        for p in crate::pids::NODE_STD_PIDS_REQUIRED
+            .iter()
+            .chain(crate::pids::NODE_STD_PIDS_LISTED)
+        {
+            assert!(
+                STANDARD.iter().any(|(q, _)| q == p),
+                "node standard PID 0x{p:04X} missing"
+            );
+        }
+    }
+
+    #[test]
+    fn lookups() {
+        assert_eq!(name(DEVICE_INFO), Some("DEVICE_INFO"));
+        assert_eq!(name(crate::pids::PID_BOOT_INFO), Some("BOOT_INFO"));
+        assert_eq!(
+            name(crate::pids::PID_PORT3_DMX_RATE),
+            Some("PORT3_DMX_RATE")
+        );
+        assert_eq!(name(0x7FFF), None);
+        assert_eq!(from_name("device_info"), Some(DEVICE_INFO));
+        assert_eq!(from_name("BOOT_INFO"), Some(crate::pids::PID_BOOT_INFO));
+        assert_eq!(from_name("pid_boot_info"), Some(crate::pids::PID_BOOT_INFO));
+        assert_eq!(
+            from_name("Port1_Enabled"),
+            Some(crate::pids::PID_PORT1_ENABLED)
+        );
+        assert_eq!(from_name("NOPE"), None);
+        assert_eq!(from_name("PID_"), None);
+        assert_eq!(from_name("é"), None);
+        assert_eq!(parse("0x8010"), Some(crate::pids::PID_BOOT_INFO));
+        assert_eq!(parse("0X0060"), Some(DEVICE_INFO));
+        assert_eq!(parse("96"), Some(DEVICE_INFO));
+        assert_eq!(parse(" identify_device "), Some(IDENTIFY_DEVICE));
+        assert_eq!(parse("0x10000"), None);
+        assert_eq!(parse("70000"), None);
+        assert_eq!(parse(""), None);
+        assert_eq!(parse("0x"), None);
+    }
+}

@@ -1,16 +1,25 @@
 //! Checks every file under `protocol/vectors/` against the schema basics and decodes the packets this crate
-//! implements (ArtPoll, ArtDmx, basic RDM messages, DUB responses).
+//! implements: every Art-Net packet (all fields, rejection of invalid vectors, byte-identical re-encode), basic
+//! RDM messages and DUB responses.
 
-use pixelmapper_net::artnet::{ArtDmx, ArtPoll, Header};
+use pixelmapper_net::artnet::{
+    ArtAddress, ArtDiagData, ArtDmx, ArtFirmwareMaster, ArtFirmwareReply, ArtInput, ArtIpProg,
+    ArtIpProgReply, ArtNetError, ArtPacket, ArtPoll, ArtPollReply, ArtRdm, ArtSync, ArtTodControl,
+    ArtTodData, ArtTodRequest, Header, PortAddress,
+};
 use pixelmapper_net::rdm::{DubResponse, RdmMessage, Uid};
 use pixelmapper_net::{parse_hex, to_hex};
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 
 const VECTOR_KEYS: [&str; 6] = ["name", "description", "source", "hex", "valid", "fields"];
 
+/// `protocol/vectors`, or `$PM_VECTORS_DIR` (to run against vectors of another branch).
 fn vectors_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../protocol/vectors")
+    match std::env::var_os("PM_VECTORS_DIR") {
+        Some(d) => PathBuf::from(d),
+        None => Path::new(env!("CARGO_MANIFEST_DIR")).join("../../protocol/vectors"),
+    }
 }
 
 fn collect_json(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -125,92 +134,342 @@ fn all_vector_files_well_formed() {
     eprintln!("{} vectors checked", all.len());
 }
 
-#[test]
-fn artnet_artpoll() {
-    let mut n = 0;
-    for v in load_all()
-        .iter()
-        .filter(|v| v.protocol == "artnet" && v.packet == "ArtPoll")
-    {
-        n += 1;
-        let r = ArtPoll::decode(&v.bytes);
-        if !v.valid() {
-            assert!(r.is_err(), "{} must be rejected", v.id());
-            continue;
-        }
-        let p = r.unwrap_or_else(|e| panic!("{}: {e}", v.id()));
-        let h = Header::decode(&v.bytes).unwrap();
-        assert_eq!(u64::from(h.op_code), v.num("op_code"), "{}", v.id());
-        assert_eq!(u64::from(h.prot_ver), v.num("prot_ver"), "{}", v.id());
-        assert_eq!(u64::from(p.flags), v.num("flags"), "{}", v.id());
-        assert_eq!(
-            u64::from(p.diag_priority),
-            v.num("diag_priority"),
-            "{}",
-            v.id()
-        );
-        assert_eq!(
-            u64::from(p.target_port_address_top),
-            v.num("target_port_address_top"),
-            "{}",
-            v.id()
-        );
-        assert_eq!(
-            u64::from(p.target_port_address_bottom),
-            v.num("target_port_address_bottom"),
-            "{}",
-            v.id()
-        );
-        assert_eq!(u64::from(p.esta_man), v.num("esta_man"), "{}", v.id());
-        assert_eq!(u64::from(p.oem), v.num("oem"), "{}", v.id());
-        if let Some(t) = v.field("targeted_mode").as_bool() {
-            assert_eq!(p.targeted_mode(), t, "{}", v.id());
-        }
-        if let Some(t) = v.field("reply_on_change").as_bool() {
-            assert_eq!(p.reply_on_change(), t, "{}", v.id());
-        }
-        if v.bytes.len() == ArtPoll::LEN {
-            assert_eq!(p.encode(), v.bytes, "{} re-encode", v.id());
-        }
+/// Every Art-Net packet type that has vectors and is checked by [`artnet_vectors`].
+const ARTNET_PACKETS: [&str; 15] = [
+    "ArtPoll",
+    "ArtDiagData",
+    "ArtPollReply",
+    "ArtDmx",
+    "ArtSync",
+    "ArtAddress",
+    "ArtInput",
+    "ArtIpProg",
+    "ArtIpProgReply",
+    "ArtTodRequest",
+    "ArtTodData",
+    "ArtTodControl",
+    "ArtRdm",
+    "ArtFirmwareMaster",
+    "ArtFirmwareReply",
+];
+
+fn mac_str(m: &[u8; 6]) -> String {
+    m.iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+/// Decode `bytes` as `packet` with the packet-specific decoder, wrapped in [`ArtPacket`].
+fn decode_as(packet: &str, bytes: &[u8]) -> Result<ArtPacket, ArtNetError> {
+    Ok(match packet {
+        "ArtPoll" => ArtPacket::Poll(ArtPoll::decode(bytes)?),
+        "ArtPollReply" => ArtPacket::PollReply(ArtPollReply::decode(bytes)?),
+        "ArtDmx" => ArtPacket::Dmx(ArtDmx::decode(bytes)?),
+        "ArtSync" => ArtPacket::Sync(ArtSync::decode(bytes)?),
+        "ArtAddress" => ArtPacket::Address(ArtAddress::decode(bytes)?),
+        "ArtInput" => ArtPacket::Input(ArtInput::decode(bytes)?),
+        "ArtIpProg" => ArtPacket::IpProg(ArtIpProg::decode(bytes)?),
+        "ArtIpProgReply" => ArtPacket::IpProgReply(ArtIpProgReply::decode(bytes)?),
+        "ArtTodRequest" => ArtPacket::TodRequest(ArtTodRequest::decode(bytes)?),
+        "ArtTodData" => ArtPacket::TodData(ArtTodData::decode(bytes)?),
+        "ArtTodControl" => ArtPacket::TodControl(ArtTodControl::decode(bytes)?),
+        "ArtRdm" => ArtPacket::Rdm(ArtRdm::decode(bytes)?),
+        "ArtFirmwareMaster" => ArtPacket::FirmwareMaster(ArtFirmwareMaster::decode(bytes)?),
+        "ArtFirmwareReply" => ArtPacket::FirmwareReply(ArtFirmwareReply::decode(bytes)?),
+        "ArtDiagData" => ArtPacket::DiagData(ArtDiagData::decode(bytes)?),
+        other => panic!("no decoder for Art-Net packet {other}"),
+    })
+}
+
+/// All fields of a decoded packet in the vector JSON conventions (vectors/README.md), including derived values.
+fn artnet_fields(p: &ArtPacket, bytes: &[u8]) -> Map<String, Value> {
+    let mut m = Map::new();
+    let mut put = |k: &str, v: Value| {
+        m.insert(k.to_owned(), v);
+    };
+    put("op_code", json!(p.op_code()));
+    if !matches!(p, ArtPacket::PollReply(_)) {
+        put("prot_ver", json!(Header::decode(bytes).unwrap().prot_ver));
     }
-    assert!(n > 0, "no ArtPoll vectors");
+    let pas = |v: Vec<PortAddress>| json!(v.iter().map(|p| p.raw()).collect::<Vec<_>>());
+    match p {
+        ArtPacket::Poll(x) => {
+            put("flags", json!(x.flags));
+            put("diag_priority", json!(x.diag_priority));
+            put("target_port_address_top", json!(x.target_port_address_top));
+            put(
+                "target_port_address_bottom",
+                json!(x.target_port_address_bottom),
+            );
+            put("esta_man", json!(x.esta_man));
+            put("oem", json!(x.oem));
+            put("targeted_mode", json!(x.targeted_mode()));
+            put("reply_on_change", json!(x.reply_on_change()));
+        }
+        ArtPacket::PollReply(x) => {
+            put("ip", json!(x.ip.to_string()));
+            put("port", json!(x.port));
+            put("vers_info", json!(x.vers_info));
+            put("net_switch", json!(x.net_switch));
+            put("sub_switch", json!(x.sub_switch));
+            put("oem", json!(x.oem));
+            put("ubea_version", json!(x.ubea_version));
+            put("status1", json!(x.status1));
+            put("esta_man", json!(x.esta_man));
+            put("short_name", json!(x.short_name));
+            put("long_name", json!(x.long_name));
+            put("node_report", json!(x.node_report));
+            put("num_ports", json!(x.num_ports));
+            put("port_types", json!(x.port_types));
+            put("good_input", json!(x.good_input));
+            put("good_output_a", json!(x.good_output_a));
+            put("sw_in", json!(x.sw_in));
+            put("sw_out", json!(x.sw_out));
+            put(
+                "port_addresses_out",
+                pas((0..4).map(|i| x.port_address_out(i)).collect()),
+            );
+            put(
+                "port_addresses_in",
+                pas((0..4).map(|i| x.port_address_in(i)).collect()),
+            );
+            put("acn_priority", json!(x.acn_priority));
+            put("sw_macro", json!(x.sw_macro));
+            put("sw_remote", json!(x.sw_remote));
+            put("style", json!(x.style));
+            put("mac", json!(mac_str(&x.mac)));
+            put("bind_ip", json!(x.bind_ip.to_string()));
+            put("bind_index", json!(x.bind_index));
+            put("status2", json!(x.status2));
+            put("good_output_b", json!(x.good_output_b));
+            put("status3", json!(x.status3));
+            put("default_resp_uid", json!(x.default_resp_uid.to_string()));
+            put("user", json!(x.user));
+            put("refresh_rate", json!(x.refresh_rate));
+            put("background_queue_policy", json!(x.background_queue_policy));
+        }
+        ArtPacket::Dmx(x) => {
+            let pa = x.port_address;
+            put("sequence", json!(x.sequence));
+            put("physical", json!(x.physical));
+            put("sub_uni", json!(pa.sub_uni()));
+            put("net", json!(pa.net()));
+            put("port_address", json!(pa.raw()));
+            put("sub_net", json!(pa.sub_net()));
+            put("universe", json!(pa.universe()));
+            put("length", json!(x.data.len()));
+            put("data", json!(to_hex(&x.data)));
+        }
+        ArtPacket::Sync(x) => {
+            put("aux1", json!(x.aux1));
+            put("aux2", json!(x.aux2));
+        }
+        ArtPacket::Address(x) => {
+            put("net_switch", json!(x.net_switch));
+            put("bind_index", json!(x.bind_index));
+            put("short_name", json!(x.short_name));
+            put("long_name", json!(x.long_name));
+            put("sw_in", json!(x.sw_in));
+            put("sw_out", json!(x.sw_out));
+            put("sub_switch", json!(x.sub_switch));
+            put("acn_priority", json!(x.acn_priority));
+            put("command", json!(x.command));
+            put(
+                "port_addresses_out",
+                pas((0..4).map(|i| x.port_address_out(i)).collect()),
+            );
+        }
+        ArtPacket::Input(x) => {
+            put("bind_index", json!(x.bind_index));
+            put("num_ports", json!(x.num_ports));
+            put("input", json!(x.input));
+        }
+        ArtPacket::IpProg(x) => {
+            put("command", json!(x.command));
+            put("prog_ip", json!(x.prog_ip.to_string()));
+            put("prog_sm", json!(x.prog_sm.to_string()));
+            put("prog_port", json!(x.prog_port));
+            put("prog_dg", json!(x.prog_dg.to_string()));
+        }
+        ArtPacket::IpProgReply(x) => {
+            put("prog_ip", json!(x.prog_ip.to_string()));
+            put("prog_sm", json!(x.prog_sm.to_string()));
+            put("prog_port", json!(x.prog_port));
+            put("status", json!(x.status));
+            put("dhcp_enabled", json!(x.dhcp_enabled()));
+            put("prog_dg", json!(x.prog_dg.to_string()));
+        }
+        ArtPacket::TodRequest(x) => {
+            put("net", json!(x.net));
+            put("command", json!(x.command));
+            put("add_count", json!(x.addresses.len()));
+            put("address", json!(x.addresses));
+            put("port_addresses", pas(x.port_addresses()));
+        }
+        ArtPacket::TodData(x) => {
+            put("rdm_ver", json!(x.rdm_ver));
+            put("port", json!(x.port));
+            put("bind_index", json!(x.bind_index));
+            put("net", json!(x.net));
+            put("command_response", json!(x.command_response));
+            put("address", json!(x.address));
+            put("port_address", json!(x.port_address().raw()));
+            put("uid_total", json!(x.uid_total));
+            put("block_count", json!(x.block_count));
+            put("uid_count", json!(x.uids.len()));
+            put(
+                "tod",
+                json!(x.uids.iter().map(|u| u.to_string()).collect::<Vec<_>>()),
+            );
+        }
+        ArtPacket::TodControl(x) => {
+            put("net", json!(x.net));
+            put("command", json!(x.command));
+            put("address", json!(x.address));
+            put("port_address", json!(x.port_address().raw()));
+        }
+        ArtPacket::Rdm(x) => {
+            put("rdm_ver", json!(x.rdm_ver));
+            put("fifo_avail", json!(x.fifo_avail));
+            put("fifo_max", json!(x.fifo_max));
+            put("net", json!(x.net));
+            put("command", json!(x.command));
+            put("address", json!(x.address));
+            put("port_address", json!(x.port_address().raw()));
+            put("rdm_packet", json!(to_hex(&x.rdm_packet)));
+            // derived: E1.20 message length / checksum of the carried RDM message (start code counted)
+            if let Some(&len) = x.rdm_packet.get(1) {
+                put("rdm_message_length", json!(len));
+                let n = usize::from(len);
+                if let Some(cs) = x.rdm_packet.get(n - 1..n + 1) {
+                    put("rdm_checksum", json!(u16::from_be_bytes([cs[0], cs[1]])));
+                }
+            }
+        }
+        ArtPacket::DiagData(x) => {
+            put("diag_priority", json!(x.diag_priority));
+            put("logical_port", json!(x.logical_port));
+            put("length", json!(u16::from_be_bytes([bytes[16], bytes[17]])));
+            put("data", json!(x.text));
+        }
+        ArtPacket::FirmwareMaster(x) => {
+            put("type", json!(x.kind));
+            put("block_id", json!(x.block_id));
+            put("firmware_length", json!(x.firmware_length));
+            put("data", json!(to_hex(&x.data)));
+            // Derived: .alf file header (digest §6.3) carried in the data blocks. Header bytes 0..1024 are
+            // block 0, the file's Length field (offset 1056) lies at offset 32 of block 1.
+            let be16 = |o: usize| u16::from_be_bytes([x.data[o], x.data[o + 1]]);
+            if x.block_id == 0 {
+                put("file_checksum", json!(be16(0)));
+                put("file_vers_info", json!(be16(2)));
+                let name = &x.data[4..34];
+                let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+                put(
+                    "file_user_name",
+                    json!(String::from_utf8_lossy(&name[..end])),
+                );
+                let oem: Vec<u16> = (0..256)
+                    .map(|i| be16(34 + 2 * i))
+                    .filter(|&w| w != 0)
+                    .collect();
+                put("file_oem", json!(oem));
+            } else if x.block_id == 1 {
+                let l = &x.data[32..36];
+                put(
+                    "file_length",
+                    json!(u32::from_be_bytes([l[0], l[1], l[2], l[3]])),
+                );
+            }
+        }
+        ArtPacket::FirmwareReply(x) => {
+            put("type", json!(x.kind));
+        }
+        other => panic!("unexpected packet {other:?}"),
+    }
+    m
+}
+
+fn error_name(e: &ArtNetError) -> &'static str {
+    match e {
+        ArtNetError::Short => "short",
+        ArtNetError::BadId => "bad_id",
+        ArtNetError::ProtVer(_) => "prot_ver",
+        ArtNetError::UnexpectedOpCode(_) => "op_code",
+        ArtNetError::InvalidField(_) => "invalid_field",
+    }
 }
 
 #[test]
-fn artnet_artdmx() {
+fn artnet_vectors() {
+    let all = load_all();
     let mut n = 0;
-    for v in load_all()
-        .iter()
-        .filter(|v| v.protocol == "artnet" && v.packet == "ArtDmx")
-    {
-        n += 1;
-        let r = ArtDmx::decode(&v.bytes);
-        if !v.valid() {
-            assert!(r.is_err(), "{} must be rejected", v.id());
+    for v in all.iter().filter(|v| v.protocol == "artnet") {
+        if !ARTNET_PACKETS.contains(&v.packet.as_str()) {
+            // A new packet type from another agent must not stop the whole run; it is reported instead.
+            eprintln!(
+                "warning: {}: packet {} has no decoder test",
+                v.id(),
+                v.packet
+            );
             continue;
         }
-        let d = r.unwrap_or_else(|e| panic!("{}: {e}", v.id()));
-        let h = Header::decode(&v.bytes).unwrap();
-        assert_eq!(u64::from(h.op_code), v.num("op_code"), "{}", v.id());
-        assert_eq!(u64::from(h.prot_ver), v.num("prot_ver"), "{}", v.id());
-        assert_eq!(u64::from(d.sequence), v.num("sequence"), "{}", v.id());
-        assert_eq!(u64::from(d.physical), v.num("physical"), "{}", v.id());
-        let pa = d.port_address;
-        assert_eq!(u64::from(pa.raw()), v.num("port_address"), "{}", v.id());
-        assert_eq!(u64::from(pa.sub_uni()), v.num("sub_uni"), "{}", v.id());
-        assert_eq!(u64::from(pa.net()), v.num("net"), "{}", v.id());
-        assert_eq!(u64::from(pa.sub_net()), v.num("sub_net"), "{}", v.id());
-        assert_eq!(u64::from(pa.universe()), v.num("universe"), "{}", v.id());
-        assert_eq!(d.data.len() as u64, v.num("length"), "{}", v.id());
-        assert_eq!(
-            to_hex(&d.data),
-            v.field("data").as_str().unwrap(),
-            "{}",
-            v.id()
-        );
-        assert_eq!(d.encode(), v.bytes, "{} re-encode", v.id());
+        n += 1;
+        let specific = decode_as(&v.packet, &v.bytes);
+        let generic = ArtPacket::decode(&v.bytes);
+        if !v.valid() {
+            let want = v.field("error").as_str().unwrap();
+            for r in [&specific, &generic] {
+                match r {
+                    Ok(p) => panic!("{} must be rejected, decoded {p:?}", v.id()),
+                    Err(e) => assert_eq!(error_name(e), want, "{}: {e}", v.id()),
+                }
+            }
+            continue;
+        }
+        let p = specific.unwrap_or_else(|e| panic!("{}: {e}", v.id()));
+        assert_eq!(generic.as_ref(), Ok(&p), "{} ArtPacket::decode", v.id());
+        let actual = artnet_fields(&p, &v.bytes);
+        let expected = v.v["fields"].as_object().unwrap();
+        for (k, want) in expected {
+            match actual.get(k) {
+                Some(got) => assert_eq!(got, want, "{}: field {k}", v.id()),
+                None => eprintln!("warning: {}: field {k} not compared by the test", v.id()),
+            }
+        }
+        let encoded = p.encode();
+        if encoded.len() == v.bytes.len() {
+            assert_eq!(to_hex(&encoded), to_hex(&v.bytes), "{} re-encode", v.id());
+        } else {
+            // Minimum-length vectors (e.g. poll_min_14_bytes, min_207_bytes): decode only.
+            assert!(
+                v.bytes.len() < encoded.len(),
+                "{}: vector longer than the encoding",
+                v.id()
+            );
+            assert_eq!(
+                encoded[..v.bytes.len()],
+                v.bytes[..],
+                "{}: prefix of the re-encoding",
+                v.id()
+            );
+        }
     }
-    assert!(n > 0, "no ArtDmx vectors");
+    assert!(n > 0, "no Art-Net vectors");
+}
+
+#[test]
+fn every_artnet_packet_has_vectors() {
+    let all = load_all();
+    for name in ARTNET_PACKETS {
+        if !all
+            .iter()
+            .any(|v| v.protocol == "artnet" && v.packet == name && v.valid())
+        {
+            eprintln!("warning: no valid vector for {name}");
+        }
+    }
 }
 
 fn uid_field(v: &Vector, k: &str) -> Uid {

@@ -8,12 +8,21 @@
 #![warn(missing_docs)]
 
 pub mod artnet;
-pub mod discovery;
+pub mod controller;
+pub mod crc;
+pub mod error;
+pub mod event;
 pub mod flash;
-pub mod node_config;
+pub mod image;
+pub mod link;
 pub mod rdm;
 pub mod sim;
-pub mod tod;
+pub mod state;
+
+pub use controller::{Controller, ControllerConfig, RdmConfig, RdmRequest};
+pub use error::{Error, Result};
+pub use event::{Event, QueuedMessage};
+pub use state::{NodeId, NodeState, PortState};
 
 /// Manufacturer-specific PIDs and constants, generated from `protocol/pids.toml` by `protocol/gen.py`.
 #[allow(missing_docs, dead_code, clippy::all)]
