@@ -1,5 +1,5 @@
 /*
- * test_rdm_sim.h - simulated RS-485 RDM bus with virtual responders for the pm_rdm_ctrl host tests.
+ * sim_bus.h - simulated RS-485 RDM bus with virtual responders (pm_rdm_ctrl host tests, virtual node).
  *
  * Every responder sees each transaction. DUB answers of several responders are combined like a wired AND (each
  * responder picks its own preamble length, so answers may be misaligned), optionally reported as framing garbage.
@@ -11,6 +11,8 @@
 #include "pm_rdm_ctrl.h"
 
 #define SIM_MAX_DEVS 600
+
+struct sim_model; /* optional full device model (sim_model.h): tube app + bootloader or generic fixture */
 
 typedef enum {
     SIM_APP = 0,
@@ -36,6 +38,8 @@ typedef struct {
     bool app_valid;
     sim_mode_t mode;
     uint32_t power_on_ms;    /* off until then */
+    /* full model (NULL = the minimal built-in answers below: DEVICE_INFO, BOOT_INFO, IDENTIFY SET) */
+    struct sim_model *model;
     /* counters */
     uint32_t requests;       /* GET/SET addressed to it */
     uint32_t boot_info_gets;

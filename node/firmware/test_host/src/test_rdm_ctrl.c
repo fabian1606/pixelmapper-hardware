@@ -6,7 +6,7 @@
 #include "pm_rdm_ctrl.h"
 #include "pm_rdm_responder.h"
 #include "test.h"
-#include "test_rdm_sim.h"
+#include "sim_bus.h"
 #include "vectors.h"
 
 typedef struct {
