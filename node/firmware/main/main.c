@@ -530,18 +530,29 @@ static void ui_identify(void *ctx, bool on)
 
 /* ------------------------------------------------------------------------------------------------ rollback */
 
-/** Rollback protection: mark the image valid after 30 s of normal operation (image-format.md §2.3 step 8). */
-static void mark_valid_cb(void *arg)
+/* Rollback protection: mark the image valid after 30 s of normal operation (image-format.md §2.3 step 8). esp_ota is
+ * not thread-safe and the OTA sink (be_begin also marks the image valid) runs in the network task, so the timer only
+ * posts the work there instead of touching otadata from the esp_timer task. */
+static esp_timer_handle_t s_valid_timer;
+
+static void work_mark_valid(void *arg)
 {
     (void)arg;
     if (!pm_ota_pending_verify()) return;
-    if (s_net_ok && s_port_ok) {
-        ESP_LOGI(TAG, "30 s stable: marking firmware valid");
-        pm_ota_mark_valid();
-    } else {
-        ESP_LOGE(TAG, "new firmware not healthy (net %d, ports %d): not marked valid, next reboot rolls back",
-                 s_net_ok, s_port_ok);
+    ESP_LOGI(TAG, "30 s stable: marking firmware valid");
+    esp_err_t e = pm_ota_mark_valid();
+    if (e != ESP_OK) ESP_LOGE(TAG, "mark valid: %s", esp_err_to_name(e));
+}
+
+static void mark_valid_cb(void *arg)
+{
+    (void)arg;
+    if (!(s_net_ok && s_port_ok)) {
+        ESP_LOGE(TAG, "firmware not healthy (net %d, ports %d): not marked valid, a pending update rolls back at the "
+                      "next reboot", s_net_ok, s_port_ok);
+        return;
     }
+    if (pm_net_post(work_mark_valid, NULL) != ESP_OK) esp_timer_start_once(s_valid_timer, 1000ull * 1000); /* retry */
 }
 
 static void shutdown_flush(void) { pm_config_flush(); }
@@ -679,8 +690,7 @@ void app_main(void)
     err = pm_ui_start();
     if (err != ESP_OK) ESP_LOGE(TAG, "pm_ui_start: %s", esp_err_to_name(err));
 
-    static esp_timer_handle_t valid_timer;
     const esp_timer_create_args_t targs = {.callback = mark_valid_cb, .name = "pm_valid"};
-    ESP_ERROR_CHECK(esp_timer_create(&targs, &valid_timer));
-    ESP_ERROR_CHECK(esp_timer_start_once(valid_timer, MARK_VALID_AFTER_US));
+    ESP_ERROR_CHECK(esp_timer_create(&targs, &s_valid_timer));
+    ESP_ERROR_CHECK(esp_timer_start_once(s_valid_timer, MARK_VALID_AFTER_US));
 }
