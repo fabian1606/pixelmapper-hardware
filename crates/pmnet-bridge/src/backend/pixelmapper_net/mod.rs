@@ -52,7 +52,7 @@ use pixelmapper_net::link::RdmOptions;
 use pixelmapper_net::rdm::pd::ParameterDescription;
 use pixelmapper_net::rdm::{cc, pid, Uid};
 use pixelmapper_net::{Controller, ControllerConfig};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
@@ -126,6 +126,19 @@ struct NodeEntry {
     lib_id: net::NodeId,
     /// Where the node's replies come from (ArtDmx destination).
     address: SocketAddr,
+    /// Ports (with their Port-Address) an ArtTodRequest was sent for since the node appeared or rebooted into
+    /// other firmware: the node sends unsolicited ArtTodData only to IPs that requested a TOD (node contract
+    /// §6.1).
+    tod_requested: BTreeSet<(PortRef, u16)>,
+}
+
+/// RDM-capable output ports of a node with their Port-Address (the ports to subscribe to with ArtTodRequest).
+fn tod_ports(node: &NodeState) -> BTreeSet<(PortRef, u16)> {
+    node.ports
+        .iter()
+        .filter(|p| p.direction != PortDirection::Input && p.can_output && p.output.rdm)
+        .map(|p| (p.port, p.output_port_address))
+        .collect()
 }
 
 /// Node table, TODs and bridge status; one lock, never held across `.await`.
@@ -257,29 +270,75 @@ impl Inner {
 
     /// Stores a node state from the library; emits `node` when anything but `lastSeen` changed. Returns the
     /// stored contract state.
+    ///
+    /// Also subscribes to the TOD of every RDM output port that was not requested yet (a node appearing or
+    /// reappearing, BindIndex pages arriving one by one, a changed Port-Address, RDM switched on, a reboot into
+    /// other firmware): one ArtTodRequest per port.
     fn apply_node(&self, n: &net::NodeState) -> NodeState {
-        let mut st = self.net();
-        let state = convert::node_state(n, &st.all_interfaces, now_ms());
-        if let Some(old) = st.nodes.get_mut(&state.node_id) {
-            old.lib_id = n.id;
-            old.address = n.address;
-            if old.state.same_except_last_seen(&state) {
-                old.state.last_seen = state.last_seen;
-                return old.state.clone();
+        let (state, requests) = {
+            let mut st = self.net();
+            let state = convert::node_state(n, &st.all_interfaces, now_ms());
+            let wanted = tod_ports(&state);
+            match st.nodes.get_mut(&state.node_id) {
+                Some(old) => {
+                    old.lib_id = n.id;
+                    old.address = n.address;
+                    if old.state.firmware != state.firmware {
+                        old.tod_requested.clear();
+                    }
+                    let requests: Vec<(PortRef, u16)> =
+                        wanted.difference(&old.tod_requested).copied().collect();
+                    old.tod_requested.extend(requests.iter().copied());
+                    if old.state.same_except_last_seen(&state) {
+                        old.state.last_seen = state.last_seen;
+                        (old.state.clone(), requests)
+                    } else {
+                        old.state = state.clone();
+                        self.emit(Event::Node {
+                            node: state.clone(),
+                        });
+                        (state, requests)
+                    }
+                }
+                None => {
+                    st.nodes.insert(
+                        state.node_id.clone(),
+                        NodeEntry {
+                            state: state.clone(),
+                            lib_id: n.id,
+                            address: n.address,
+                            tod_requested: wanted.clone(),
+                        },
+                    );
+                    self.emit(Event::Node {
+                        node: state.clone(),
+                    });
+                    (state, wanted.into_iter().collect())
+                }
             }
-        }
-        st.nodes.insert(
-            state.node_id.clone(),
-            NodeEntry {
-                state: state.clone(),
-                lib_id: n.id,
-                address: n.address,
-            },
-        );
-        self.emit(Event::Node {
-            node: state.clone(),
-        });
+        };
+        self.request_tods(n.id, requests);
         state
+    }
+
+    /// Sends one ArtTodRequest per listed port (in the background).
+    fn request_tods(&self, lib_id: net::NodeId, ports: Vec<(PortRef, u16)>) {
+        if ports.is_empty() {
+            return;
+        }
+        let Ok(ctrl) = self.ctrl() else {
+            return;
+        };
+        self.spawn(async move {
+            for (port, raw) in ports {
+                let Some(pa) = PortAddress::new(raw) else {
+                    continue;
+                };
+                if let Err(e) = ctrl.tod_request(&lib_id, pa).await {
+                    tracing::debug!("ArtTodRequest for port {port} of {lib_id} not sent: {e}");
+                }
+            }
+        });
     }
 
     /// Removes a node and its TODs; emits `nodeGone`.
@@ -658,7 +717,11 @@ impl std::fmt::Debug for PixelmapperNetBackend {
 impl PixelmapperNetBackend {
     /// Binds the Art-Net socket and starts discovery. Never fails: when the socket cannot be bound, the backend
     /// reports `udp.bound = false` with the reason and retries every [`BackendConfig::bind_retry`].
-    pub async fn start(cfg: BackendConfig) -> Self {
+    ///
+    /// `controller.auto_tod_request` is switched off: the library requests TODs only for the ports of a node's
+    /// first ArtPollReply page, so the adapter sends the ArtTodRequests per port itself.
+    pub async fn start(mut cfg: BackendConfig) -> Self {
+        cfg.controller.auto_tod_request = false;
         let inner = Arc::new(Inner {
             ctrl: RwLock::new(None),
             events: broadcast::channel(1024).0,
