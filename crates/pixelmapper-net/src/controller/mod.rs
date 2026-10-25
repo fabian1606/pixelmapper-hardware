@@ -66,6 +66,9 @@ pub struct RdmConfig {
     pub max_overflow: u32,
     /// Fetch queued messages automatically when a response reports Message Count > 0.
     pub auto_fetch_queued: bool,
+    /// Interval for fetching the queued messages of every node's own responder even without other RDM traffic
+    /// (changes of RDM-only settings by other clients or at the panel, contract §7). `ZERO` disables.
+    pub node_queue_interval: Duration,
 }
 
 impl Default for RdmConfig {
@@ -77,6 +80,7 @@ impl Default for RdmConfig {
             ack_timer_limit: Duration::from_secs(10),
             max_overflow: 64,
             auto_fetch_queued: true,
+            node_queue_interval: Duration::from_secs(2),
         }
     }
 }
@@ -191,6 +195,8 @@ struct TodAssembly {
     blocks: BTreeMap<u8, Vec<Uid>>,
 }
 
+type TodKey = (NodeId, u16);
+
 #[derive(Default)]
 struct State {
     binds: HashMap<(SocketAddr, u8), BindEntry>,
@@ -201,6 +207,7 @@ struct State {
     reply_waiters: Vec<(SocketAddr, oneshot::Sender<()>)>,
     ipprog_waiters: Vec<(SocketAddr, oneshot::Sender<ArtIpProgReply>)>,
     fw_waiters: Vec<(SocketAddr, oneshot::Sender<ArtFirmwareReply>)>,
+    tod_waiters: Vec<(TodKey, oneshot::Sender<Vec<Uid>>)>,
 }
 
 pub(crate) struct Inner {
@@ -442,6 +449,26 @@ impl Controller {
         self.inner
             .send_to(&ArtPacket::TodRequest(p), n.address)
             .await
+    }
+
+    /// ArtTodRequest and wait for the complete answer (all ArtTodData blocks), even if the TOD did not change.
+    /// A TodNak gives an empty list.
+    pub async fn tod_refresh(
+        &self,
+        node: &NodeId,
+        port_address: PortAddress,
+        timeout: Duration,
+    ) -> Result<Vec<Uid>> {
+        let (tx, rx) = oneshot::channel();
+        lock(&self.inner.state)
+            .tod_waiters
+            .push(((*node, port_address.raw()), tx));
+        self.tod_request(node, port_address).await?;
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(u)) => Ok(u),
+            Ok(Err(_)) => Err(Error::Closed),
+            Err(_) => Err(Error::WaitTimeout(timeout, "ArtTodData")),
+        }
     }
 
     /// ArtTodControl with any command (`ArtTodControl::ATC_*`).
@@ -928,7 +955,14 @@ impl Inner {
             .map(|(_, b)| b.id)
             .unwrap_or(NodeId::Addr(src));
         let old = st.tods.insert((node, pa.raw()), uids.clone());
+        let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut st.tod_waiters)
+            .into_iter()
+            .partition(|(k, _)| *k == (node, pa.raw()));
+        st.tod_waiters = rest;
         drop(st);
+        for (_, tx) in mine {
+            let _ = tx.send(uids.clone());
+        }
         if old.as_ref() == Some(&uids) && !nak {
             return;
         }
@@ -1019,6 +1053,7 @@ async fn recv_loop(socket: Arc<UdpSocket>, inner: Weak<Inner>) {
 
 async fn poll_loop(inner: Weak<Inner>) {
     let mut last_poll: Option<Instant> = None;
+    let mut last_queue: Option<Instant> = None;
     loop {
         let Some(me) = inner.upgrade() else {
             return;
@@ -1029,7 +1064,26 @@ async fn poll_loop(inner: Weak<Inner>) {
             last_poll = Some(Instant::now());
         }
         me.expire();
+        let qv = me.cfg.rdm.node_queue_interval;
+        if !qv.is_zero() && last_queue.is_none_or(|t| t.elapsed() >= qv) {
+            last_queue = Some(Instant::now());
+            // Last-writer-wins for RDM-only node settings (contract §7): look into every node's queue.
+            let targets: Vec<(NodeId, SocketAddr, PortAddress, Uid)> = {
+                let st = lock(&me.state);
+                st.nodes
+                    .values()
+                    .filter_map(|n| {
+                        let pa = n.state.ports.first()?.port_address;
+                        Some((n.state.id, n.state.address, pa, n.state.uid?))
+                    })
+                    .collect()
+            };
+            for (id, addr, pa, uid) in targets {
+                let me2 = me.clone();
+                tokio::spawn(async move { rdm_engine::drain_queue(&me2, id, addr, pa, uid).await });
+            }
+        }
         drop(me);
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }

@@ -75,7 +75,8 @@ pub async fn run(o: &Out, a: SimArgs) -> Result<()> {
             )
         },
     );
-    // Without tokio's "signal" feature, Ctrl-C (SIGINT) ends the process with the default handler.
-    std::future::pending::<()>().await;
+    // Run until Ctrl-C, then stop the simulator cleanly.
+    let _ = tokio::signal::ctrl_c().await;
+    sim.shutdown();
     Ok(())
 }
