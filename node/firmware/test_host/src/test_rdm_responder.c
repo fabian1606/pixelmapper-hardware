@@ -792,6 +792,13 @@ static void test_e137_2(void)
     CHECK_EQ(pm_get_be32(g_resp.pd), ID);
     CHECK_EQ(pm_get_be32(g_resp.pd + 4), 0x0A000001u);
     CHECK_NACK(ifc_req(PM_RDM_CC_SET, PM_RDM_PID_IPV4_DEFAULT_ROUTE, 2, gw, 4), PM_NR_DATA_OUT_OF_RANGE);
+    /* interface 0 = "no default route" (digest §6.5): the address is ignored, GET reads back 0 / 0.0.0.0 */
+    CHECK_ACK(ifc_req(PM_RDM_CC_SET, PM_RDM_PID_IPV4_DEFAULT_ROUTE, 0, gw, 4));
+    CHECK_EQ(F.s.ip.gateway, 0);
+    CHECK_ACK(get0(PM_RDM_PID_IPV4_DEFAULT_ROUTE));
+    CHECK_EQ(pm_get_be32(g_resp.pd), 0);
+    CHECK_EQ(pm_get_be32(g_resp.pd + 4), 0);
+    CHECK_ACK(ifc_req(PM_RDM_CC_SET, PM_RDM_PID_IPV4_DEFAULT_ROUTE, ID, gw, 4));
     memset(gw, 0, 4);
     CHECK_ACK(ifc_req(PM_RDM_CC_SET, PM_RDM_PID_IPV4_DEFAULT_ROUTE, 0, gw, 4));
     CHECK_EQ(F.s.ip.gateway, 0);
