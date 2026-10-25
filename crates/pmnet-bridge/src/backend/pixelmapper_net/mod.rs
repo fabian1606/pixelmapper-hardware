@@ -283,7 +283,13 @@ impl Inner {
                 Some(old) => {
                     old.lib_id = n.id;
                     old.address = n.address;
-                    if old.state.firmware != state.firmware {
+                    // A restart (other firmware, or the NodeReport reply counter starting over) forgets the
+                    // node's TOD subscribers.
+                    let restarted = convert::restarted(
+                        convert::report_counter(&old.state.node_report),
+                        convert::report_counter(&state.node_report),
+                    );
+                    if old.state.firmware != state.firmware || restarted {
                         old.tod_requested.clear();
                     }
                     let requests: Vec<(PortRef, u16)> =
@@ -983,9 +989,12 @@ impl NetBackend for PixelmapperNetBackend {
                 .await?;
             last = Some(state);
         }
-        // Nothing to change: the current state.
+        // Nothing to change: the current state. Else the library's latest state (at least as new as the reply;
+        // the event pump may have seen newer replies meanwhile).
         Ok(match last {
-            Some(state) => self.inner.apply_node(&state),
+            Some(state) => self
+                .inner
+                .apply_node(&ctrl.node(&lib_id).unwrap_or(state)),
             None => node,
         })
     }
@@ -1045,7 +1054,9 @@ impl NetBackend for PixelmapperNetBackend {
         let state = self
             .send_with_resend(&node, || ctrl.art_input(&lib_id, bind, &disabled))
             .await?;
-        Ok(self.inner.apply_node(&state))
+        Ok(self
+            .inner
+            .apply_node(&ctrl.node(&lib_id).unwrap_or(state)))
     }
 
     fn image_info(&self, hex: &str) -> Result<FirmwareImageInfo, BackendError> {

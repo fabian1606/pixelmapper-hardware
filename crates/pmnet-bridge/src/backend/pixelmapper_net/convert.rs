@@ -93,6 +93,24 @@ pub(super) fn node_ip(n: &ns::NodeState) -> Ipv4Addr {
 
 /// Merged library node state → contract `NodeState`.
 ///
+/// The reply counter of an Art-Net NodeReport (`#xxxx [yyyy] text`, `yyyy` counts the node's ArtPollReplies from
+/// 1, wrapping after 9999).
+pub(super) fn report_counter(node_report: &str) -> Option<u16> {
+    let rest = node_report.split_once('[')?.1;
+    rest.split_once(']')?.0.trim().parse().ok()
+}
+
+/// Whether the NodeReport counter going from `old` to `new` means the node restarted (it counts from 1 again).
+/// A wrap after 9999 is not a restart; other controllers' polls may advance the counter by a few hundred between
+/// two replies the bridge sees.
+pub(super) fn restarted(old: Option<u16>, new: Option<u16>) -> bool {
+    const SLACK: u16 = 500;
+    match (old, new) {
+        (Some(old), Some(new)) => new < old && !(old > 9999 - SLACK && new < SLACK),
+        _ => false,
+    }
+}
+
 /// Gaps of the library model: `ubeaVersion` is not kept (reported as 0); ports carry one Port-Address (the one of
 /// their current direction), reported as both `outputPortAddress` and `inputPortAddress` (the Pixelmapper Node
 /// keeps one address per port); `lastSeen` is supplied by the caller.
@@ -448,6 +466,16 @@ mod tests {
             Some("en0")
         );
         assert_eq!(interface_for(Ipv4Addr::new(10, 0, 0, 1), &ifs), None);
+    }
+
+    #[test]
+    fn node_report_counter() {
+        assert_eq!(report_counter("#0001 [0012] Power On Tests successful"), Some(12));
+        assert_eq!(report_counter("no counter"), None);
+        assert!(restarted(Some(120), Some(1)), "counts from 1 after a restart");
+        assert!(!restarted(Some(120), Some(121)));
+        assert!(!restarted(Some(9998), Some(3)), "wrap after 9999");
+        assert!(!restarted(None, Some(1)));
     }
 
     #[test]
