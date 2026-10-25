@@ -76,6 +76,8 @@ pub(super) struct FwUpdate {
     pub last_error: u8,
     pub received: u32,
     pub total: u32,
+    /// An update failed since boot: NodeReport "Firmware update failed" (RcFirmwareFail), as pm_node does.
+    pub failed_since_boot: bool,
     session: Option<Session>,
 }
 
@@ -86,6 +88,7 @@ impl Default for FwUpdate {
             last_error: fw_error::NONE,
             received: 0,
             total: 0,
+            failed_since_boot: false,
             session: None,
         }
     }
@@ -115,6 +118,7 @@ impl FwUpdate {
     fn fail(&mut self, code: u8) {
         self.state = fw_state::FAILED;
         self.last_error = code;
+        self.failed_since_boot = true;
         self.session = None;
     }
 
@@ -228,22 +232,20 @@ impl FwUpdate {
     ) -> Result<(), FwRefusal> {
         let source = FwSource::Rdm(src);
         match self.active_source() {
-            None => {
-                self.last_error = fw_error::SEQUENCE;
-                return Err(FwRefusal::OutOfRange);
-            }
+            // no session: SEQUENCE without a state change (pm_ota_session: FW_INFO keeps its state)
+            None => return Err(FwRefusal::OutOfRange),
             Some(s) if s != source => return Err(FwRefusal::Busy),
             Some(_) => {}
         }
         let received = self.received as usize;
         let offset = offset as usize;
+        if offset > received {
+            // gap: NACK, the session continues and FW_INFO is unchanged; the controller may resend from
+            // `received` (pm_rdm_responder h_fw_write checks this before the sink)
+            return Err(FwRefusal::OutOfRange);
+        }
         if let Some(s) = self.session.as_mut() {
             s.last_activity = now;
-        }
-        if offset > received {
-            // the session continues, the controller may resend from `received`
-            self.last_error = fw_error::SEQUENCE;
-            return Err(FwRefusal::OutOfRange);
         }
         let end = offset + data.len();
         if end <= received {
@@ -259,10 +261,7 @@ impl FwUpdate {
     /// RDM SET FW_FINISH: verify; `Ok` → reboot into the new image.
     pub fn rdm_finish(&mut self, src: Uid) -> Result<NewFirmware, FwRefusal> {
         match self.active_source() {
-            None => {
-                self.last_error = fw_error::SEQUENCE;
-                Err(FwRefusal::OutOfRange)
-            }
+            None => Err(FwRefusal::OutOfRange), // SEQUENCE without a state change, as pm_ota_session_finish
             Some(s) if s != FwSource::Rdm(src) => Err(FwRefusal::Busy),
             Some(_) => self.verify().map_err(|code| {
                 self.fail(code);

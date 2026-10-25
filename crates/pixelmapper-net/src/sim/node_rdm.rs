@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 /// DEVICE_MODEL_DESCRIPTION of the node.
 const MODEL_DESCRIPTION: &str = "Pixelmapper Node";
 /// MANUFACTURER_LABEL.
-const MANUFACTURER_LABEL: &str = "Pixelmapper";
+const MANUFACTURER_LABEL: &str = "Prototype";
 /// BOOT_SOFTWARE_VERSION_ID of the simulated (ESP-IDF) bootloader.
 const BOOT_SW_VERSION_ID: u32 = 0x0005_0506;
 /// BOOT_SOFTWARE_VERSION_LABEL.
@@ -427,8 +427,11 @@ impl Node {
         v
     }
 
+    /// Interface 0 + 0.0.0.0 = no default route (E1.37-2, digest §6.5; as the firmware).
     fn ipv4_route(&self) -> Vec<u8> {
-        let mut v = IFACE.to_be_bytes().to_vec();
+        let gw = self.ip.pending.gateway;
+        let iface = if gw.is_unspecified() { 0 } else { IFACE };
+        let mut v = iface.to_be_bytes().to_vec();
         v.extend_from_slice(&self.ip.pending.gateway.octets());
         v
     }

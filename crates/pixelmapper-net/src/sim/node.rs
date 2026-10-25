@@ -17,7 +17,7 @@ use crate::artnet::{
     self, address_command as ac, ArtAddress, ArtDmx, ArtFirmwareMaster, ArtFirmwareReply, ArtInput,
     ArtIpProg, ArtIpProgReply, ArtPacket, ArtPoll, ArtPollReply, ArtRdm, ArtTodControl, ArtTodData,
     ArtTodRequest, PortAddress, IPPROG_DHCP, IPPROG_GATEWAY, IPPROG_IP, IPPROG_MASK, IPPROG_RESET,
-    TOD_FULL,
+    TOD_FULL, TOD_NAK,
 };
 use crate::pids;
 use crate::rdm::pd::{BootCatchStatus, LocalRdmSet};
@@ -46,6 +46,8 @@ const TICK: Duration = Duration::from_millis(1);
 const REFRESH_RATE: u16 = 44;
 /// NodeReport code RcPowerOk.
 const NODE_REPORT_CODE: u16 = 0x0001;
+/// NodeReport RcFirmwareFail (after a failed update, until the next boot; pm_node_fw_progress).
+const NODE_REPORT_FIRMWARE_FAIL: u16 = 0x000E;
 
 /// Current direction of a simulated port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -137,7 +139,7 @@ impl Default for SimConfig {
             ports: [pa(1), pa(2), pa(3), pa(4)],
             reply_delay_max: Duration::ZERO,
             rdm_latency: Duration::from_millis(3),
-            fifo_max: 4,
+            fifo_max: 8,
             reboot_delay: Duration::from_millis(300),
             discovery_interval: Duration::from_millis(100),
             fw_timeout: Duration::from_secs(30),
@@ -184,6 +186,8 @@ pub struct SimPortSnapshot {
     pub rdm_enabled: bool,
     /// Merge mode LTP (else HTP).
     pub merge_ltp: bool,
+    /// Failsafe mode of this port (0 hold, 1 zero, 2 full, 3 scene; ArtAddress per BindIndex, Status3 per reply).
+    pub failsafe: u8,
     /// Two sources are merged right now.
     pub merging: bool,
     /// Output style continuous (else delta).
@@ -220,7 +224,7 @@ pub struct SimSnapshot {
     pub hw_revision: u8,
     /// Indicators (Locate = identify on).
     pub indicators: SimIndicators,
-    /// Failsafe mode (0 hold, 1 zero, 2 full, 3 scene).
+    /// Failsafe mode of port 1 (0 hold, 1 zero, 2 full, 3 scene); per port: [`SimPortSnapshot::failsafe`].
     pub failsafe: u8,
     /// Current IP.
     pub ip: Ipv4Addr,
@@ -294,6 +298,7 @@ pub(super) struct Port {
     pub(super) rdm_enabled: bool,
     pub(super) enabled: bool,
     pub(super) merge_ltp: bool,
+    pub(super) failsafe: u8,
     pub(super) continuous: bool,
     pub(super) bg_discovery: bool,
     pub(super) dmx_break: u16,
@@ -332,6 +337,7 @@ impl Port {
             rdm_enabled: factory.rdm_enabled,
             enabled: factory.enabled,
             merge_ltp: false,
+            failsafe: 0,
             continuous: true,
             bg_discovery: true,
             dmx_break: 0,
@@ -363,6 +369,7 @@ impl Port {
         self.rdm_enabled = self.factory.rdm_enabled;
         self.enabled = self.factory.enabled;
         self.merge_ltp = false;
+        self.failsafe = 0;
         self.continuous = true;
         self.bg_discovery = pid_default(pids::PID_PORT1_RDM_BG_DISCOVERY) != 0;
         self.dmx_break = u16::try_from(pid_default(pids::PID_PORT1_DMX_BREAK)).unwrap_or(176);
@@ -378,6 +385,7 @@ impl Port {
             && self.rdm_enabled == self.factory.rdm_enabled
             && self.enabled == self.factory.enabled
             && !self.merge_ltp
+            && self.failsafe == 0
             && self.continuous
             && u32::from(self.bg_discovery) == pid_default(pids::PID_PORT1_RDM_BG_DISCOVERY)
             && u32::from(self.dmx_break) == pid_default(pids::PID_PORT1_DMX_BREAK)
@@ -601,8 +609,6 @@ pub(super) struct Node {
     pub(super) fw_version: u32,
     pub(super) version_label: String,
     pub(super) indicators: SimIndicators,
-    pub(super) failsafe: u8,
-    pub(super) acn_priority: u8,
     pub(super) ports: [Port; SIM_PORTS],
     pub(super) settings: Settings,
     pub(super) ip: IpState,
@@ -697,8 +703,6 @@ impl Node {
             fw_version: cfg.fw_version,
             version_label: cfg.version_label.clone(),
             indicators: SimIndicators::Normal,
-            failsafe: 0,
-            acn_priority: 100,
             ports,
             settings: Settings::default(),
             ip: IpState {
@@ -781,6 +785,7 @@ impl Node {
         let port = &self.ports[bind];
         let (ip, _) = self.ip.current();
         let pa = port.port_address;
+        let is_input = port.direction == SimDirection::Input;
         let mut port_type = 0u8;
         let mut good_input = 0u8;
         let mut good_a = 0u8;
@@ -805,8 +810,8 @@ impl Node {
         if port.merge_ltp {
             good_a |= 0x02;
         }
-        if !port.rdm_enabled {
-            good_b |= 0x80;
+        if !port.rdm_enabled || is_input {
+            good_b |= 0x80; // RDM off (an input port has no RDM)
         }
         if port.continuous {
             good_b |= 0x40;
@@ -824,7 +829,7 @@ impl Node {
         // Status2: RDM and output style switchable via ArtAddress, 15-bit Port-Address, DHCP capable (+ active)
         let status2 = 0x80 | 0x40 | 0x08 | 0x04 | if self.ip.active.dhcp { 0x02 } else { 0 };
         // Status3: failsafe mode, programmable failsafe, port direction switchable
-        let status3 = (self.failsafe << 6) | 0x20 | 0x08;
+        let status3 = (port.failsafe << 6) | 0x20 | 0x08;
         let fw = self.fw_version;
         ArtPollReply {
             ip,
@@ -843,9 +848,11 @@ impl Node {
             port_types: [port_type, 0, 0, 0],
             good_input: [good_input, 0, 0, 0],
             good_output_a: [good_a, 0, 0, 0],
-            sw_in: [pa.universe(), 0, 0, 0],
-            sw_out: [pa.universe(), 0, 0, 0],
-            acn_priority: self.acn_priority,
+            // only the field of the current direction carries the universe (contract §3 "SwOut bzw. SwIn")
+            sw_in: [if is_input { pa.universe() } else { 0 }, 0, 0, 0],
+            sw_out: [if is_input { 0 } else { pa.universe() }, 0, 0, 0],
+            // no sACN (contract §1): AcnPriority is not used, ArtAddress AcnPriority is ignored
+            acn_priority: 0,
             sw_macro: 0,
             sw_remote: 0,
             style: 0,
@@ -870,10 +877,12 @@ impl Node {
     fn push_reply(&mut self, to: SocketAddr, bind: usize, due: Instant) {
         self.report_counter = self.report_counter % 9999 + 1;
         let mut r = self.poll_reply(bind);
-        r.node_report = format!(
-            "#{NODE_REPORT_CODE:04x} [{:04}] Power On Tests successful",
-            self.report_counter
-        );
+        let (code, text) = if self.fw.failed_since_boot {
+            (NODE_REPORT_FIRMWARE_FAIL, "Firmware update failed")
+        } else {
+            (NODE_REPORT_CODE, "Power On Tests successful")
+        };
+        r.node_report = format!("#{code:04x} [{:04}] {text}", self.report_counter);
         self.send(to, r.encode(), due);
     }
 
@@ -995,9 +1004,6 @@ impl Node {
         if !a.long_name.is_empty() {
             self.long_name = truncate(&a.long_name, LONG_NAME_MAX);
         }
-        if a.acn_priority <= 200 {
-            self.acn_priority = a.acn_priority;
-        }
         let port = &mut self.ports[i];
         let pa = port.port_address;
         let f = port.factory.port_address;
@@ -1023,7 +1029,7 @@ impl Node {
             ac::AC_LED_NORMAL => self.indicators = SimIndicators::Normal,
             ac::AC_LED_MUTE => self.indicators = SimIndicators::Mute,
             ac::AC_LED_LOCATE => self.indicators = SimIndicators::Locate,
-            c @ ac::AC_FAIL_HOLD..=ac::AC_FAIL_SCENE => self.failsafe = c - ac::AC_FAIL_HOLD,
+            c @ ac::AC_FAIL_HOLD..=ac::AC_FAIL_SCENE => port.failsafe = c - ac::AC_FAIL_HOLD,
             _ => self.port_command(i, a.command),
         }
         Some(i)
@@ -1105,7 +1111,7 @@ impl Node {
         let reply = ArtIpProgReply {
             prog_ip: ip,
             prog_sm: mask,
-            prog_port: artnet::PORT,
+            prog_port: 0, // deprecated (Art-Net 4), as the firmware
             status: if self.ip.active.dhcp {
                 ArtIpProgReply::STATUS_DHCP
             } else {
@@ -1136,11 +1142,9 @@ impl Node {
     fn send_tod(&mut self, i: usize, to: SocketAddr, now: Instant) {
         let p = &self.ports[i];
         let pa = p.port_address;
-        let uids = if p.line_active() {
-            p.tod.clone()
-        } else {
-            Vec::new()
-        };
+        // no RDM on the port (off, input, RDM disabled): TodNak, TOD not available (as pm_artnet send_tod)
+        let nak = !p.line_active();
+        let uids = if nak { Vec::new() } else { p.tod.clone() };
         let total = u16::try_from(uids.len()).unwrap_or(u16::MAX);
         let mut chunks: Vec<&[Uid]> = uids.chunks(ArtTodData::MAX_UIDS).collect();
         if chunks.is_empty() {
@@ -1155,7 +1159,7 @@ impl Node {
                     port: 1,
                     bind_index: (i + 1) as u8,
                     net: pa.net(),
-                    command_response: TOD_FULL,
+                    command_response: if nak { TOD_NAK } else { TOD_FULL },
                     address: pa.sub_uni(),
                     uid_total: total,
                     block_count: k as u8,
@@ -1365,8 +1369,6 @@ impl Node {
         self.short_name = truncate(&self.cfg.short_name, SHORT_NAME_MAX);
         self.long_name = truncate(&self.cfg.long_name, LONG_NAME_MAX);
         self.indicators = SimIndicators::Normal;
-        self.failsafe = 0;
-        self.acn_priority = 100;
         self.settings = Settings::default();
         let factory = self.ip.factory;
         self.ip.set_active(factory);
@@ -1383,8 +1385,6 @@ impl Node {
     pub(super) fn at_factory_defaults(&self) -> bool {
         self.short_name == truncate(&self.cfg.short_name, SHORT_NAME_MAX)
             && self.long_name == truncate(&self.cfg.long_name, LONG_NAME_MAX)
-            && self.failsafe == 0
-            && self.acn_priority == 100
             && self.settings == Settings::default()
             && self.ip.active == self.ip.factory
             && self.ports.iter().all(Port::at_factory_settings)
@@ -1400,7 +1400,7 @@ impl Node {
             version_label: self.version_label.clone(),
             hw_revision: self.cfg.hw_revision,
             indicators: self.indicators,
-            failsafe: self.failsafe,
+            failsafe: self.ports[0].failsafe,
             ip,
             netmask,
             gateway: self.ip.active.gateway,
@@ -1414,6 +1414,7 @@ impl Node {
                     enabled: p.enabled,
                     rdm_enabled: p.rdm_enabled,
                     merge_ltp: p.merge_ltp,
+                    failsafe: p.failsafe,
                     merging: p.merging(),
                     continuous: p.continuous,
                     bg_discovery: p.bg_discovery,

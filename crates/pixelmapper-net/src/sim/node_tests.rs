@@ -517,6 +517,7 @@ async fn tod_request_and_unsolicited_tod_data() {
 async fn rdm_fifo_limit_and_lost_answers() {
     let ctl = Ctl::start(SimConfig {
         rdm_latency: Duration::from_millis(40),
+        fifo_max: 4,
         ..Default::default()
     })
     .await;
@@ -539,6 +540,11 @@ async fn rdm_fifo_limit_and_lost_answers() {
     let avail: Vec<u8> = answers.iter().map(|r| r.fifo_avail).collect();
     assert_eq!(avail, vec![1, 2, 3, 4]);
     assert!(answers.iter().all(|r| r.fifo_max == 4));
+    assert_eq!(
+        SimConfig::default().fifo_max,
+        8,
+        "default = PM_RDM_QUEUE_LEN (contract §6.2)"
+    );
     let m = answers[0].message().unwrap();
     assert_eq!(m.src_uid, dev);
     assert_eq!(
@@ -862,11 +868,6 @@ async fn rdm_firmware_update() {
         if off == block {
             // retransmission of an earlier block is ACKed without writing
             assert_ack(&fw_write(&ctl, 0, &img.bin[..block]).await);
-            // gap
-            assert_nack(
-                &fw_write(&ctl, end + 10, &[0; 4]).await,
-                NackReason::DATA_OUT_OF_RANGE,
-            );
         }
         off = end;
     }
@@ -908,11 +909,31 @@ async fn rdm_firmware_update_errors() {
         (info.state, info.last_error),
         (fw_state::FAILED, fw_error::DESC_HW_REV)
     );
-    // write without session
+    // write / finish without session: NACK, FW_INFO unchanged (pm_ota_session)
     assert_nack(
         &fw_write(&ctl, 0, &[1, 2]).await,
         NackReason::DATA_OUT_OF_RANGE,
     );
+    assert_nack(
+        &ctl.set(pids::PID_FW_FINISH, vec![]).await,
+        NackReason::DATA_OUT_OF_RANGE,
+    );
+    assert_eq!(fw_info(&ctl).await.last_error, fw_error::DESC_HW_REV);
+
+    // a gap: NACK, the session continues unchanged (FW_INFO RECEIVING), resending from `received` works
+    let img = test_image(1000, 0x0002_0300, 0b1, "2.3.0");
+    assert_ack(
+        &ctl.set(pids::PID_FW_BEGIN, img.desc.encode().to_vec())
+            .await,
+    );
+    assert_ack(&fw_write(&ctl, 0, &img.bin[..100]).await);
+    assert_nack(
+        &fw_write(&ctl, 110, &img.bin[110..120]).await,
+        NackReason::DATA_OUT_OF_RANGE,
+    );
+    let info = fw_info(&ctl).await;
+    assert_eq!((info.state, info.received), (fw_state::RECEIVING, 100));
+    assert_ack(&fw_write(&ctl, 100, &img.bin[100..120]).await);
 
     // CRC error: a byte changed after the description block
     let img = test_image(1000, 0x0002_0300, 0b1, "2.3.0");
