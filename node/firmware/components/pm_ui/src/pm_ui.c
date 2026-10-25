@@ -9,6 +9,7 @@
  */
 #include "pm_ui.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "driver/gpio.h"
@@ -19,6 +20,7 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "lcd_st7735.h"
@@ -38,7 +40,6 @@ static const char *TAG = "pm_ui";
 #define ENC_COUNTS_PER_DETENT 4    /* x4 decoding of a typical EC11 (one full quadrature cycle per detent) */
 #define ENC_LIMIT 10000
 #define DEBOUNCE_SAMPLES 3         /* 3 x 5 ms */
-#define FACTORY_HOLD_MS 3000
 
 /** Queue item: the event plus a copy of its data (RDM responses). */
 typedef struct {
@@ -58,7 +59,6 @@ static struct {
     int enc_rest;
     uint8_t push_cnt, back_cnt;
     bool push, back;
-    bool factory_reset;
     uint32_t settings_flags; /* SETTINGS_CHANGED never gets lost in a full queue: bit 0 local, bit 1 remote */
     portMUX_TYPE info_lock;
     ui_node_info_t info;
@@ -106,38 +106,45 @@ static void p_restart(void *ctx)
     esp_restart(); /* ui_core calls this ~300 ms after the "Restarting" frame */
 }
 
+/* Settings copies are 2.3 KB each and needed only for a moment: taken from the heap (PSRAM if present) instead of
+ * keeping three static copies in internal RAM. */
+static pm_settings_t *settings_alloc(unsigned n)
+{
+    pm_settings_t *p = heap_caps_malloc(n * sizeof(pm_settings_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!p) p = malloc(n * sizeof(pm_settings_t));
+    if (!p) ESP_LOGE(TAG, "no memory for a settings copy");
+    return p;
+}
+
 static void p_factory(void *ctx, bool keep_network)
 {
     (void)ctx;
-    static pm_settings_t cur, def;
-    pm_config_get(&cur);
-    pm_settings_defaults(&def);
-    def.hw_revision_override = cur.hw_revision_override;
-    if (keep_network) def.ip = cur.ip;
-    pm_config_update(&def, PM_SRC_LOCAL_UI);
+    pm_settings_t *buf = settings_alloc(2);
+    if (!buf) return;
+    pm_settings_t *cur = &buf[0], *def = &buf[1];
+    pm_config_get(cur);
+    pm_settings_defaults(def);
+    def->hw_revision_override = cur->hw_revision_override;
+    if (keep_network) def->ip = cur->ip;
+    pm_config_update(def, PM_SRC_LOCAL_UI);
+    free(buf);
 }
 
 static void p_record_scene(void *ctx, pm_port_idx_t port)
 {
     (void)ctx;
-    static pm_settings_t s;
-    pm_config_get(&s);
-    s.port[port].scene_len = pm_port_output_read(port, s.port[port].scene, sizeof(s.port[port].scene));
-    pm_config_update(&s, PM_SRC_LOCAL_UI);
+    pm_settings_t *s = settings_alloc(1);
+    if (!s) return;
+    pm_config_get(s);
+    s->port[port].scene_len = pm_port_output_read(port, s->port[port].scene, sizeof(s->port[port].scene));
+    pm_config_update(s, PM_SRC_LOCAL_UI);
+    free(s);
 }
 
 static void p_tod_flush(void *ctx, pm_port_idx_t port)
 {
     (void)ctx;
     pm_port_tod_control(port, 0x01 /* ArtTodControl AtcFlush */);
-}
-
-static void p_identify(void *ctx, bool on)
-{
-    (void)ctx;
-    /* TODO(interface): the node's identify state lives in the RDM responder; main needs a hook so that a local
-     * identify is reported via IDENTIFY_DEVICE / ArtPollReply. Until then the panel shows it locally only. */
-    ESP_LOGI(TAG, "identify %s (panel)", on ? "on" : "off");
 }
 
 static const ui_platform_t s_plat = {
@@ -149,7 +156,6 @@ static const ui_platform_t s_plat = {
     .factory_reset = p_factory,
     .record_scene = p_record_scene,
     .tod_flush = p_tod_flush,
-    .identify = p_identify,
 };
 
 /* ------------------------------------------------------------------------------------------------ display */
@@ -277,7 +283,9 @@ esp_err_t pm_ui_init(const pm_board_t *board, const pm_ui_model_t *model)
 {
     S.board = board;
     if (model) S.model = *model;
-    S.q = xQueueCreate(UI_QUEUE_LEN, sizeof(ui_msg_t));
+    /* queue storage (~4.5 KB) in PSRAM if present: only tasks post to it, never an ISR */
+    S.q = xQueueCreateWithCaps(UI_QUEUE_LEN, sizeof(ui_msg_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!S.q) S.q = xQueueCreate(UI_QUEUE_LEN, sizeof(ui_msg_t));
     if (!S.q) return ESP_ERR_NO_MEM;
     /* cache-line aligned so spi_master can DMA from it without a bounce buffer */
     S.strip = heap_caps_aligned_alloc(64, sizeof(uint16_t) * UI_W * UI_STRIP_H, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
@@ -294,24 +302,6 @@ esp_err_t pm_ui_init(const pm_board_t *board, const pm_ui_model_t *model)
     if (S.lcd_ok) {
         boot_screen("starting" UI_G_ELLIPSIS, UI_C_GRAY);
         lcd_st7735_backlight(255);
-    }
-
-    /* factory reset: BACK + push held at power-on for 3 s (docs/plan.md) */
-    if (read_btn(board->input.back) && read_btn(board->input.enc_push)) {
-        int64_t t0 = esp_timer_get_time();
-        boot_screen("Factory reset: keep holding", UI_C_YELLOW);
-        while (read_btn(board->input.back) && read_btn(board->input.enc_push)) {
-            if (esp_timer_get_time() - t0 >= FACTORY_HOLD_MS * 1000ll) {
-                S.factory_reset = true;
-                boot_screen("Factory reset", UI_C_RED);
-                break;
-            }
-            vTaskDelay(pdMS_TO_TICKS(20));
-        }
-        /* wait for the release, but never hang on a stuck/shorted button */
-        for (int i = 0; i < 250 && (read_btn(board->input.back) || read_btn(board->input.enc_push)); i++) {
-            vTaskDelay(pdMS_TO_TICKS(20));
-        }
     }
 
     static ui_node_info_t info;
@@ -351,7 +341,7 @@ void pm_ui_notify(const pm_ui_event_t *ev)
     xQueueSend(S.q, &m, 0); /* never blocks; dropped when full */
 }
 
-bool pm_ui_factory_reset_requested(void) { return S.factory_reset; }
+bool pm_ui_factory_reset_requested(void) { return false; /* pm_config_reset_keys_held() in main */ }
 
 void pm_ui_set_node_info(const pm_uid_t *uid, const uint8_t mac[6], const char *fw_version, uint8_t hw_revision)
 {

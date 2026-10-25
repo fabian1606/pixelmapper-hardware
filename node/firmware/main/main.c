@@ -470,30 +470,10 @@ static void on_net_change(void *ctx, const pm_net_status_t *st)
 
 /* ------------------------------------------------------------------------------------------------ UI model */
 
-static void ui_net_status(void *ctx, uint32_t *ip, uint32_t *mask, uint8_t *mode, bool *link_up)
-{
-    (void)ctx;
-    pm_net_status_t st;
-    pm_net_get_status(&st);
-    *ip = st.ip;
-    *mask = st.mask;
-    *mode = (uint8_t)st.mode;
-    *link_up = st.link_up;
-}
-
 static void ui_port_stats(void *ctx, pm_port_idx_t port, pm_port_stats_t *out)
 {
     (void)ctx;
     pm_port_get_stats(port, out);
-}
-
-static void ui_port_flags(void *ctx, pm_port_idx_t port, bool *data_loss, bool *merging, bool *synced)
-{
-    (void)ctx; (void)port;
-    /* pm_artnet keeps this state and is not thread-safe; a snapshot API is requested (report). */
-    *data_loss = false;
-    *merging = false;
-    *synced = false;
 }
 
 static uint16_t ui_tod_get(void *ctx, pm_port_idx_t port, pm_uid_t *out, uint16_t cap)
@@ -585,8 +565,8 @@ void app_main(void)
     esp_register_shutdown_handler(shutdown_flush);
 
     static const pm_ui_model_t ui_model = {
-        .net_status = ui_net_status, .port_stats = ui_port_stats, .port_flags = ui_port_flags,
-        .tod_get = ui_tod_get, .rdm_request = ui_rdm_request,
+        .port_stats = ui_port_stats, .tod_get = ui_tod_get, .rdm_request = ui_rdm_request,
+        .net_info = NULL, .port_live = NULL, .identify = NULL, /* Phase 2: Paket A wires them (main rewrite) */
     };
     err = pm_ui_init(board, &ui_model);
     if (err != ESP_OK) ESP_LOGE(TAG, "pm_ui_init: %s (running without front panel)", esp_err_to_name(err));

@@ -10,6 +10,7 @@
 
 #include "pm_board.h"
 #include "pm_port_line.h"
+#include "pm_rdm_ctrl.h"
 #include "pm_port_tbuf.h"
 
 static int g_fail, g_checks;
@@ -109,7 +110,7 @@ static void op_tx_start(void *ctx, const uint8_t *data, uint16_t len)
 {
     (void)ctx;
     S.tx_busy = true;
-    S.tx_done_at = S.now + (uint32_t)len * PM_PORT_US_PER_SLOT;
+    S.tx_done_at = S.now + (uint32_t)len * (PM_PORT_US_PER_SLOT + S.line.timing.mbs_us);
     logit(EV_TX, len, data[0]);
     if (data[0] == PM_RDM_START_CODE && S.resp != RESP_NONE) {
         uint32_t t0 = S.tx_done_at + S.resp_delay_us;
@@ -674,6 +675,169 @@ static void test_sched(void)
     CHECK_EQ(pm_port_rdm_estimate_us(&t, 176, 16, 4), 176 + 16 + 38 * 48 + 5800);
 }
 
+/* RDM gate: budget per DMX gap + hand-out policy (pm_port.c service_port) */
+static void test_rdm_budget(void)
+{
+    /* 512 slots at 176/16 us, 40 Hz: 33333 - (192 + 513 * 44 + 176) = 10393 us */
+    CHECK_EQ(pm_port_rdm_budget_us(176, 16, 0, 40, 513), 33333 - (192 + 513 * 44 + 176));
+    /* a discovery DUB (worst discovery step) fits next to a full universe */
+    pm_rdm_txn_t dub = make_txn(PM_RDM_TXN_DUB, 38);
+    CHECK(pm_port_rdm_estimate_us(&dub, 176, 16, 0) <= pm_port_rdm_budget_us(176, 16, 0, 40, 513));
+    CHECK(pm_port_rdm_estimate_us(&dub, 352, 88, 0) <= pm_port_rdm_budget_us(352, 88, 0, 44, 513));
+    /* rate below 30 Hz: the period is the limit */
+    CHECK_EQ(pm_port_rdm_budget_us(176, 16, 0, 10, 513), 100000 - (192 + 513 * 44 + 176));
+    /* MBS makes the frame longer than the floor period: nothing fits */
+    CHECK_EQ(pm_port_rdm_budget_us(176, 16, 30, 40, 513), 0);
+    /* short frame: most of the period */
+    CHECK_EQ(pm_port_rdm_budget_us(176, 16, 0, 40, 25), 33333 - (192 + 25 * 44 + 176));
+
+    CHECK_EQ(pm_port_rdm_max_us(5000, false, 0), 5000);
+    CHECK_EQ(pm_port_rdm_max_us(5000, true, 0), UINT32_MAX);  /* forwarded requests are never held back */
+    CHECK_EQ(pm_port_rdm_max_us(5000, false, PM_PORT_RDM_GATE_STARVE_MS - 1), 5000);
+    CHECK_EQ(pm_port_rdm_max_us(0, false, PM_PORT_RDM_GATE_STARVE_MS), UINT32_MAX);
+
+    sim_reset();
+    CHECK_EQ(pm_port_line_rdm_budget_us(&S.line), pm_port_rdm_budget_us(176, 16, 0, 40, 513));
+    S.frame_len = 101;
+    sim_configure(PM_PORT_LINE_MODE_OUTPUT, 176, 16, 40, true);
+    sim_run(S.now + 30000);
+    CHECK_EQ(pm_port_line_rdm_budget_us(&S.line), pm_port_rdm_budget_us(176, 16, 0, 40, 101));
+}
+
+/* Line FSM + real pm_rdm_ctrl driven like pm_port.c service_port(): continuous discovery load (every DUB collides,
+ * background run every 100 ms) and one forwarded request. DMX must stay >= 30 Hz where the timing allows it. */
+static void run_gate(uint16_t mbs_us, bool gated, uint32_t *worst_us, unsigned *frames, uint32_t *dubs,
+                     uint32_t *req_latency_ms)
+{
+    static pm_rdm_ctrl_t c;
+    static pm_rdm_txn_t txn;
+    sim_reset();
+    S.resp = RESP_DUB_COLLISION;
+    S.resp_delay_us = 300;
+    pm_port_line_timing_t t = {.break_us = 176, .mab_us = 16, .rate_hz = 40, .continuous = true, .mbs_us = mbs_us};
+    pm_port_line_configure(&S.line, PM_PORT_LINE_MODE_OUTPUT, &t, S.now);
+    const pm_uid_t self = {{0x7F, 0xF0, 0x80, 0x00, 0x00, 0x01}};
+    pm_rdm_ctrl_init(&c, 0, &self, NULL);
+    pm_rdm_ctrl_set_timing(&c, 176, 16);
+    pm_rdm_ctrl_set_background(&c, true, 100);
+    uint32_t ms = S.now / 1000u;
+    pm_rdm_ctrl_set_enabled(&c, true, ms);
+    uint32_t handout = ms, t_end = S.now + 3000000u, t_req = S.now + 1500000u, req_at = 0;
+    bool submitted = false;
+    *req_latency_ms = UINT32_MAX;
+    while (pm_port_t_ge(t_end, S.now)) {
+        ms = S.now / 1000u;
+        if (!submitted && pm_port_t_ge(S.now, t_req)) {
+            pm_rdm_request_t r;
+            memset(&r, 0, sizeof r);
+            r.token = 7;
+            pm_rdm_txn_t m = make_txn(PM_RDM_TXN_REQUEST, 26);
+            m.data[20] = 0x20; /* GET */
+            memcpy(r.data, m.data, 26);
+            r.data[3] = 0x12; /* unicast */
+            r.len = 26;
+            CHECK_EQ(pm_rdm_ctrl_submit(&c, &r), PM_OK);
+            submitted = true;
+            req_at = ms;
+        }
+        pm_rdm_rx_t rx;
+        if (pm_port_line_rdm_take(&S.line, &rx)) pm_rdm_ctrl_done(&c, ms, &rx);
+        if (!pm_port_line_rdm_busy(&S.line)) {
+            bool queued = pm_rdm_ctrl_queue_free(&c) < PM_RDM_QUEUE_LEN;
+            uint32_t max_us = gated ? pm_port_rdm_max_us(pm_port_line_rdm_budget_us(&S.line), queued, ms - handout)
+                                    : UINT32_MAX;
+            if (pm_rdm_ctrl_next_max(&c, ms, max_us, &txn)) {
+                handout = ms;
+                if (queued && *req_latency_ms == UINT32_MAX) *req_latency_ms = ms - req_at;
+                CHECK(pm_port_line_rdm_offer(&S.line, &txn, S.now));
+            } else if (!pm_rdm_ctrl_discovery_running(&c) && !queued) {
+                handout = ms;
+            }
+        }
+        sim_run(S.now + 500);
+    }
+    *frames = 0;
+    *worst_us = 0;
+    uint32_t prev = 0;
+    for (unsigned i = 0; i < S.nlog; i++) {
+        if (S.log[i].kind == EV_TX && S.log[i].first == 0x00) {
+            uint32_t b = S.log[i].t - 16 - 176;
+            if (*frames && b - prev > *worst_us) *worst_us = b - prev;
+            prev = b;
+            (*frames)++;
+        }
+    }
+    pm_rdm_ctrl_stats_t st;
+    pm_rdm_ctrl_get_stats(&c, &st);
+    *dubs = st.dubs;
+    CHECK_EQ(st.requests, 1);
+}
+
+static void test_rdm_gate_with_ctrl(void)
+{
+    uint32_t worst, dubs, lat;
+    unsigned frames;
+    /* default timing: every discovery step fits into a gap, no forced slot -> DMX never below 30 Hz */
+    run_gate(0, true, &worst, &frames, &dubs, &lat);
+    printf("  gate mbs 0: %u DMX frames/3 s, worst break-to-break %u us, %u DUBs, request after %u ms\n", frames,
+           (unsigned)worst, (unsigned)dubs, (unsigned)lat);
+    CHECK(worst <= 1000000u / PM_PORT_DMX_FLOOR_HZ + 50u);
+    CHECK(frames >= 3u * PM_PORT_DMX_FLOOR_HZ);
+    CHECK(dubs >= 80); /* about one discovery step per DMX gap */
+    CHECK(lat <= 40);
+    /* MBS 6 us: frame 25.8 ms, gap budget 7.3 ms < a DUB (7.9 ms): no discovery step fits. Ungated, the step is
+     * parked in the line and forced after 4 frames; gated, it is not handed out until the starvation slot, so the
+     * line stays free for a forwarded request. Either way discovery still progresses. */
+    uint32_t worst_u, dubs_u, lat_u;
+    unsigned frames_u;
+    run_gate(6, false, &worst_u, &frames_u, &dubs_u, &lat_u);
+    run_gate(6, true, &worst, &frames, &dubs, &lat);
+    printf("  gate mbs 6: ungated %u frames (worst %u us, %u DUBs), gated %u frames (worst %u us, %u DUBs), "
+           "request after %u / %u ms\n", frames_u, (unsigned)worst_u, (unsigned)dubs_u, frames, (unsigned)worst,
+           (unsigned)dubs, (unsigned)lat_u, (unsigned)lat);
+    CHECK(frames >= frames_u);
+    CHECK(worst <= worst_u);
+    CHECK(dubs >= 10); /* discovery still progresses */
+    CHECK(lat <= 150);
+}
+
+/* Pin tables: no GPIO twice (display vs. RMII vs. ports...), every RMII pin present. */
+static void test_board_pins(void)
+{
+    unsigned tables = 0;
+    for (unsigned rev = 0; rev < 256; rev++) {
+        const pm_board_t *b = pm_board_table((uint8_t)rev);
+        if (!b) continue;
+        tables++;
+        int8_t dup = 0;
+        bool ok = pm_board_pins_unique(b, &dup);
+        if (!ok) printf("  rev %u: GPIO%d used twice\n", rev, dup);
+        CHECK(ok);
+        CHECK_EQ(b->revision, rev);
+        CHECK(b->num_ports <= PM_NUM_PORTS);
+        const pm_board_eth_pins_t *e = &b->eth;
+        CHECK(e->mdc >= 0 && e->mdio >= 0 && e->rmii_clk_in >= 0);
+        CHECK(e->rmii_txd0 >= 0 && e->rmii_txd1 >= 0 && e->rmii_tx_en >= 0);
+        CHECK(e->rmii_rxd0 >= 0 && e->rmii_rxd1 >= 0 && e->rmii_crs_dv >= 0);
+    }
+    CHECK(tables >= 1);
+    const pm_board_t *r0 = pm_board_table(0);
+    CHECK(r0 != NULL);
+    if (r0) {
+        CHECK_EQ(r0->eth.rmii_rxd0, 29); /* P4 IO_MUX: RXD0 only on 29/46/52, RXD1 on 30/47/53 */
+        CHECK_EQ(r0->eth.rmii_rxd1, 30);
+        /* the check itself finds a collision */
+        pm_board_t bad = *r0;
+        bad.display.dc = bad.eth.rmii_txd0;
+        int8_t dup = 0;
+        CHECK(!pm_board_pins_unique(&bad, &dup));
+        CHECK_EQ(dup, r0->eth.rmii_txd0);
+        bad = *r0;
+        bad.port[3].re = 60;
+        CHECK(!pm_board_pins_unique(&bad, &dup));
+    }
+}
+
 static void test_board_rev_code(void)
 {
     uint8_t rev = 99;
@@ -698,7 +862,9 @@ static void test_board_rev_code(void)
 int main(void)
 {
     test_board_rev_code();
+    test_board_pins();
     test_sched();
+    test_rdm_budget();
     test_tbuf();
     test_dmx_output_timing();
     test_short_frame_rate();
@@ -709,6 +875,7 @@ int main(void)
     test_dub();
     test_rdm_load_keeps_dmx_rate();
     test_mode_change_aborts_rdm();
+    test_rdm_gate_with_ctrl();
     test_input();
     printf("pm_port host tests: %d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? EXIT_FAILURE : EXIT_SUCCESS;

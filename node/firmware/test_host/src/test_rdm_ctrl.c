@@ -878,8 +878,60 @@ static void test_discovery_stop(void)
     g_context = NULL;
 }
 
+/* The port engine finishes every transaction it could not complete (port reconfigured, line refused it, driver
+ * error) with done(PM_RDM_RX_TIMEOUT, rx NULL): discovery must still end, the queue drain, BOOT_CATCH go on. */
+static void test_abandoned_txns(void)
+{
+    g_context = "abandoned transactions";
+    setup(970);
+    pm_rdm_ctrl_set_background(&g_ctrl, false, 3000);
+    pm_rdm_ctrl_set_enabled(&g_ctrl, true, 0);
+    for (uint8_t i = 0; i < 3; i++) {
+        pm_rdm_request_t r = make_req(100u + i, pm_uid_make(0x7FF0, 0x2000u + i), PM_RDM_CC_GET,
+                                      PM_RDM_PID_DEVICE_INFO, i);
+        CHECK_EQ(pm_rdm_ctrl_submit(&g_ctrl, &r), PM_OK);
+    }
+    pm_rdm_txn_t t;
+    unsigned n = 0;
+    uint32_t now = 0;
+    for (; n < 200 && pm_rdm_ctrl_next(&g_ctrl, now, &t); n++, now++) pm_rdm_ctrl_done(&g_ctrl, now, NULL);
+    CHECK(n < 200);
+    CHECK(!pm_rdm_ctrl_discovery_running(&g_ctrl));
+    CHECK_EQ(pm_rdm_ctrl_queue_free(&g_ctrl), PM_RDM_QUEUE_LEN);
+    CHECK_EQ(g_rec.responses, 0);
+    pm_rdm_ctrl_stats_t st;
+    pm_rdm_ctrl_get_stats(&g_ctrl, &st);
+    CHECK_EQ(st.requests, 3);
+    CHECK_EQ(st.timeouts, 3);
+    CHECK_EQ(pm_rdm_ctrl_tod(&g_ctrl, NULL, 0), 0);
+
+    /* abandoned in the middle of a run: the next step continues (a DUB counts as an empty branch) */
+    pm_rdm_ctrl_flush(&g_ctrl, now);
+    CHECK(pm_rdm_ctrl_discovery_running(&g_ctrl));
+    pm_rdm_rx_t to = {PM_RDM_RX_TIMEOUT, 0, NULL};
+    for (n = 0; n < 200 && pm_rdm_ctrl_next(&g_ctrl, now, &t); n++, now++) pm_rdm_ctrl_done(&g_ctrl, now, &to);
+    CHECK(!pm_rdm_ctrl_discovery_running(&g_ctrl));
+
+    /* BOOT_CATCH keeps polling when its GETs are abandoned */
+    pm_uid_t target = pm_uid_make(0x7FF0, 0x3000);
+    CHECK_EQ(pm_rdm_ctrl_boot_catch_start(&g_ctrl, &target, now), PM_OK);
+    unsigned gets = 0;
+    for (uint32_t ms = now; ms < now + 200; ms++) {
+        if (pm_rdm_ctrl_next(&g_ctrl, ms, &t)) {
+            gets++;
+            pm_rdm_ctrl_done(&g_ctrl, ms, NULL);
+        }
+    }
+    CHECK(gets >= 9);
+    pm_rdm_boot_catch_t bc;
+    pm_rdm_ctrl_boot_catch_status(&g_ctrl, now + 200, &bc);
+    CHECK_EQ(bc.state, PM_BOOT_CATCH_STATE_RUNNING);
+    g_context = NULL;
+}
+
 void test_rdm_ctrl(void)
 {
+    test_abandoned_txns();
     test_wraparound();
     test_discovery_stop();
     test_full_counts();

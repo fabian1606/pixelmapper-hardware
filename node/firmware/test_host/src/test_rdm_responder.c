@@ -1153,6 +1153,75 @@ static void test_queued_messages(void)
     CHECK_EQ(g_resp.message_count, 0);
 }
 
+/* Phase 2: identify set from outside (ArtAddress Locate, front panel) + panel unlock status per source */
+static void test_set_identify(void)
+{
+    g_context = "set_identify / panel unlock";
+    setup();
+    CHECK(!pm_rdm_responder_identify(R));
+    pm_rdm_responder_set_identify(R, true);
+    CHECK(pm_rdm_responder_identify(R));
+    CHECK_EQ(F.identify_on + F.identify_off, 0); /* no ops->identify: no loop */
+    CHECK_EQ(pm_rdm_responder_message_count(R), 1);
+    CHECK_ACK(get0(PM_RDM_PID_IDENTIFY_DEVICE));
+    CHECK_EQ(g_resp.pdl, 1);
+    CHECK_EQ(resp_value(), 1);
+    pm_rdm_responder_set_identify(R, true); /* no change: nothing queued */
+    CHECK_EQ(pm_rdm_responder_message_count(R), 1);
+    CHECK_ACK(get_u8arg(PM_RDM_PID_QUEUED_MESSAGE, PM_RDM_STATUS_ADVISORY));
+    CHECK_EQ(g_resp.pid, PM_RDM_PID_IDENTIFY_DEVICE);
+    CHECK_EQ(g_resp.cc, PM_RDM_CC_GET_RESPONSE);
+    CHECK_EQ(resp_value(), 1);
+    CHECK_EQ(g_resp.message_count, 0);
+    pm_rdm_responder_set_identify(R, false);
+    CHECK(!pm_rdm_responder_identify(R));
+    CHECK_EQ(pm_rdm_responder_message_count(R), 1);
+    CHECK_ACK(get0(PM_RDM_PID_IDENTIFY_DEVICE));
+    CHECK_EQ(resp_value(), 0);
+    CHECK_ACK(get_u8arg(PM_RDM_PID_QUEUED_MESSAGE, PM_RDM_STATUS_ADVISORY));
+    CHECK_EQ(g_resp.pid, PM_RDM_PID_IDENTIFY_DEVICE);
+    CHECK_EQ(resp_value(), 0);
+    CHECK_EQ(F.identify_on + F.identify_off, 0);
+    /* RDM SET still calls ops->identify, and the state is shared */
+    CHECK_ACK(set_u8(PM_RDM_PID_IDENTIFY_DEVICE, 1));
+    CHECK_EQ(F.identify_on, 1);
+    CHECK(pm_rdm_responder_identify(R));
+    pm_rdm_responder_set_identify(R, false);
+    CHECK_EQ(F.identify_off, 0);
+    CHECK_ACK(get0(PM_RDM_PID_IDENTIFY_DEVICE));
+    CHECK_EQ(resp_value(), 0);
+    pm_rdm_responder_set_identify(NULL, true); /* NULL-safe */
+    CHECK(!pm_rdm_responder_identify(NULL));
+
+    /* PANEL_UNLOCKED_LOCAL only for 1 -> 0 from the local panel */
+    setup();
+    CHECK_ACK(set_u8(PM_PID_PANEL_LOCK, 1)); /* RDM lock + unlock: queued PANEL_LOCK only */
+    CHECK_ACK(set_u8(PM_PID_PANEL_LOCK, 0));
+    CHECK_EQ(pm_rdm_responder_message_count(R), 1);
+    const pm_change_source_t srcs[] = {PM_SRC_ARTNET, PM_SRC_IPPROG, PM_SRC_SYSTEM};
+    for (size_t i = 0; i < sizeof(srcs) / sizeof(srcs[0]); i++) {
+        F.s.panel_lock = true;
+        pm_rdm_responder_settings_changed(R, PM_CHG_PANEL_LOCK, srcs[i]);
+        F.s.panel_lock = false;
+        pm_rdm_responder_settings_changed(R, PM_CHG_PANEL_LOCK, srcs[i]);
+    }
+    CHECK_ACK(get_u8arg(PM_RDM_PID_STATUS_MESSAGES, PM_RDM_STATUS_ADVISORY));
+    CHECK_EQ(g_resp.pdl, 0); /* no status from any non-local source */
+    pm_rdm_responder_settings_changed(R, PM_CHG_PANEL_LOCK, PM_SRC_LOCAL_UI); /* no change: nothing */
+    CHECK_ACK(get_u8arg(PM_RDM_PID_STATUS_MESSAGES, PM_RDM_STATUS_ADVISORY));
+    CHECK_EQ(g_resp.pdl, 0);
+    F.s.panel_lock = true;
+    pm_rdm_responder_settings_changed(R, PM_CHG_PANEL_LOCK, PM_SRC_RDM);
+    F.s.panel_lock = false;
+    pm_rdm_responder_settings_changed(R, PM_CHG_PANEL_LOCK, PM_SRC_LOCAL_UI);
+    CHECK_ACK(get_u8arg(PM_RDM_PID_STATUS_MESSAGES, PM_RDM_STATUS_ADVISORY));
+    CHECK_EQ(g_resp.pdl, 9);
+    CHECK_EQ(pm_get_be16(g_resp.pd + 0), 0); /* sub-device */
+    CHECK_EQ(g_resp.pd[2], PM_RDM_STATUS_ADVISORY);
+    CHECK_EQ(pm_get_be16(g_resp.pd + 3), PM_STATUS_PANEL_UNLOCKED_LOCAL);
+    g_context = NULL;
+}
+
 static void test_status_messages(void)
 {
     g_context = "status messages";
@@ -1406,6 +1475,7 @@ void test_rdm_responder(void)
     test_boot_catch();
     test_local_rdm_set();
     test_queued_messages();
+    test_set_identify();
     test_status_messages();
     test_fw();
     g_context = NULL;

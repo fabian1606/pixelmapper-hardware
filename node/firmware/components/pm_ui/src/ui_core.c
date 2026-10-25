@@ -220,7 +220,7 @@ static struct {
     uint8_t log_n, log_head;
 
     pm_uid_t tod[PM_RDM_TOD_MAX];
-} U;
+} U UI_EXT_BSS;
 
 static const char *const N_MODE[] = {"Off", "Output", "Input"};
 static const char *const N_MERGE[] = {"HTP", "LTP"};
@@ -310,18 +310,43 @@ static void port_stats(uint8_t p, pm_port_stats_t *st)
     if (U.model.port_stats) U.model.port_stats(U.model.ctx, p, st);
 }
 
-static void port_flags(uint8_t p, bool *loss, bool *merging, bool *synced)
+/** What the panel shows for a port: engine counters + live Art-Net state. */
+typedef struct {
+    pm_port_stats_t st;
+    pm_ui_port_live_t live;
+    bool data;      /**< carries data now: output = ArtDmx received and no data loss, input = DMX signal */
+    uint16_t fps;   /**< output: ArtDmx frames/s received, input: DMX frames/s */
+    bool loss;      /**< data loss, failsafe active */
+    bool merging;   /**< two sources merged */
+} port_view_t;
+
+/** Without the port_live callback the live state is derived from the engine counters (an output that sends
+ *  frames counts as receiving), so a minimal model still drives the panel. */
+static void port_view(uint8_t p, port_view_t *v)
 {
-    *loss = *merging = *synced = false;
-    if (U.model.port_flags) U.model.port_flags(U.model.ctx, p, loss, merging, synced);
+    memset(v, 0, sizeof(*v));
+    port_stats(p, &v->st);
+    if (U.model.port_live) {
+        U.model.port_live(U.model.ctx, p, &v->live);
+    } else {
+        v->live.rx_active = v->st.fps > 0;
+        v->live.rx_fps = (uint8_t)(v->st.fps > 255 ? 255 : v->st.fps);
+    }
+    v->loss = v->live.data_loss;
+    v->merging = v->live.merging || v->live.merge_sources >= 2;
+    if (U.s.port[p].direction == PM_PORT_DIR_INPUT) {
+        v->data = v->st.input_signal;
+        v->fps = v->st.fps;
+    } else {
+        v->data = v->live.rx_active && !v->loss;
+        v->fps = v->live.rx_active ? v->live.rx_fps : 0;
+    }
 }
 
-static void net_status(uint32_t *ip, uint32_t *mask, uint8_t *mode, bool *link)
+static void net_info(pm_ui_net_info_t *n)
 {
-    *ip = *mask = 0;
-    *mode = 0;
-    *link = false;
-    if (U.model.net_status) U.model.net_status(U.model.ctx, ip, mask, mode, link);
+    memset(n, 0, sizeof(*n));
+    if (U.model.net_info) U.model.net_info(U.model.ctx, n);
 }
 
 static uint16_t tod_get(uint8_t p, pm_uid_t *out, uint16_t cap)
@@ -338,12 +363,9 @@ static bool port_is_input(uint8_t p) { return U.s.port[p].enabled && U.s.port[p]
 static bool port_has_data(uint8_t p)
 {
     if (!U.s.port[p].enabled) return false;
-    pm_port_stats_t st;
-    bool loss, merging, synced;
-    port_stats(p, &st);
-    port_flags(p, &loss, &merging, &synced);
-    if (port_is_input(p)) return st.input_signal;
-    return st.fps > 0 && !loss;
+    port_view_t v;
+    port_view(p, &v);
+    return v.data;
 }
 
 static void settings_fresh(pm_settings_t *out)
@@ -500,13 +522,11 @@ static void fapply(uint8_t f, uint8_t p, int32_t v)
         U.net.dhcp = v == 0;
         U.net_staged = true;
         if (v && U.net.static_ip == 0) { /* switching to static: start from the address in use */
-            uint32_t ip, mask;
-            uint8_t mode;
-            bool link;
-            net_status(&ip, &mask, &mode, &link);
-            if (ip) {
-                U.net.static_ip = ip;
-                U.net.static_mask = mask;
+            pm_ui_net_info_t n;
+            net_info(&n);
+            if (n.ip) {
+                U.net.static_ip = n.ip;
+                U.net.static_mask = n.mask;
             }
         }
         return;
@@ -516,7 +536,7 @@ static void fapply(uint8_t f, uint8_t p, int32_t v)
     if (f == F_NET_GW) { U.net.gateway = (uint32_t)v; U.net_staged = true; return; }
     if (f == F_IDENTIFY) {
         U.identify = v != 0;
-        if (U.plat.identify) U.plat.identify(U.plat.ctx, U.identify);
+        if (U.model.identify) U.model.identify(U.model.ctx, U.identify); /* panel only, not PM_UI_EV_IDENTIFY */
         U.flash_t = U.now;
         return;
     }
@@ -580,11 +600,11 @@ static void fapply_confirm(uint8_t f, uint8_t p, int32_t v, uint8_t pop)
         }
         snprintf(d->line[2], sizeof(d->line[2]), "Check the patch.");
     } else {
-        pm_port_stats_t st;
-        port_stats(p, &st);
+        port_view_t pv;
+        port_view(p, &pv);
         open_dialog(A_APPLY_FIELD, f == F_P_MODE ? "Port mode" : "Port-Address", false);
         snprintf(d->line[0], sizeof(d->line[0]), "Port %u is %s", p + 1u, port_is_input(p) ? "receiving" : "sending");
-        snprintf(d->line[1], sizeof(d->line[1]), "data (%u fps).", (unsigned)st.fps);
+        snprintf(d->line[1], sizeof(d->line[1]), "data (%u fps).", (unsigned)pv.fps);
         if (f == F_P_MODE) {
             snprintf(d->line[2], sizeof(d->line[2]), "%s", port_is_input(p) ? "Input stops." : "Output stops.");
         } else {
@@ -682,7 +702,7 @@ static void dialog_execute(void)
         toast(UI_C_WHITE, "P%u scene recorded", d->port + 1u);
         break;
     case A_RESET_PORT: {
-        static pm_settings_t def; /* 2.4 KB: not on the UI task stack */
+        static pm_settings_t def UI_EXT_BSS; /* 2.4 KB: not on the UI task stack */
         pm_settings_t *s = &U.tmp;
         settings_fresh(s);
         pm_settings_defaults(&def);
@@ -803,10 +823,8 @@ static void add_info(const char *label, const char *value, uint16_t color)
 
 static void port_status_line(uint8_t p, char *buf, size_t n, uint16_t *color)
 {
-    pm_port_stats_t st;
-    bool loss, merging, synced;
-    port_stats(p, &st);
-    port_flags(p, &loss, &merging, &synced);
+    port_view_t v;
+    port_view(p, &v);
     const pm_port_settings_t *ps = &U.s.port[p];
     *color = UI_C_GRAY;
     if (since(U.err_t[p], ERR_SHOW_MS)) {
@@ -817,16 +835,16 @@ static void port_status_line(uint8_t p, char *buf, size_t n, uint16_t *color)
     } else if (U.tube_pct[p] >= 0) {
         snprintf(buf, n, UI_G_DOWN " Tube update %d%%", U.tube_pct[p]);
         *color = UI_C_CYAN;
-    } else if (loss) {
+    } else if (v.loss) {
         snprintf(buf, n, "No data " UI_G_MIDDOT " %s", N_FAILSAFE[ps->failsafe & 3]);
         *color = UI_C_YELLOW;
     } else if (port_is_input(p)) {
-        if (st.input_signal) snprintf(buf, n, "%ufps input", (unsigned)st.fps);
+        if (v.st.input_signal) snprintf(buf, n, "%ufps input", (unsigned)v.fps);
         else snprintf(buf, n, "No DMX signal");
     } else {
         char rdm[12] = "";
-        if (ps->rdm_enabled) snprintf(rdm, sizeof(rdm), " %uRDM", (unsigned)st.tod_count);
-        snprintf(buf, n, "%ufps %s%s%s", (unsigned)st.fps, N_MERGE[ps->merge & 1], merging ? " 2src" : "", rdm);
+        if (ps->rdm_enabled) snprintf(rdm, sizeof(rdm), " %uRDM", (unsigned)v.st.tod_count);
+        snprintf(buf, n, "%ufps %s%s%s", (unsigned)v.fps, N_MERGE[ps->merge & 1], v.merging ? " 2src" : "", rdm);
     }
 }
 
@@ -932,16 +950,14 @@ static void build(const frame_t *f)
         add_action("Reset port" UI_G_ELLIPSIS, A_RESET_PORT, p, UI_C_WHITE);
         break;
     case L_NET: {
-        uint32_t ip, mask;
-        uint8_t mode;
-        bool link;
-        net_status(&ip, &mask, &mode, &link);
+        pm_ui_net_info_t ni;
+        net_info(&ni);
         add_field("Mode", F_NET_MODE, 0);
         if (U.net.dhcp) {
-            fmt_ip(v, sizeof(v), ip);
-            add_info("IP", ip ? v : "-", UI_C_GRAY);
-            fmt_ip(v2, sizeof(v2), mask);
-            add_info("Mask", mask ? v2 : "-", UI_C_GRAY);
+            fmt_ip(v, sizeof(v), ni.ip);
+            add_info("IP", ni.ip ? v : "-", UI_C_GRAY);
+            fmt_ip(v2, sizeof(v2), ni.mask);
+            add_info("Mask", ni.mask ? v2 : "-", UI_C_GRAY);
         } else {
             add_field("IP", F_NET_IP, 0);
             add_field("Mask", F_NET_MASK, 0);
@@ -952,19 +968,17 @@ static void build(const frame_t *f)
         break;
     }
     case L_NET_INFO: {
-        uint32_t ip, mask;
-        uint8_t mode;
-        bool link;
+        pm_ui_net_info_t ni;
         static const char *const modes[] = {"-", "DHCP", "Fallback", "Static"};
-        net_status(&ip, &mask, &mode, &link);
-        add_info("Link", link ? "Up" : "Down", link ? UI_C_WHITE : UI_C_RED);
-        add_info("State", modes[mode & 3], mode == PM_NET_ADDR_FALLBACK_UI ? UI_C_YELLOW : UI_C_WHITE);
-        fmt_ip(v, sizeof(v), ip);
+        net_info(&ni);
+        add_info("Link", ni.link_up ? "Up" : "Down", ni.link_up ? UI_C_WHITE : UI_C_RED);
+        add_info("State", modes[ni.mode & 3], ni.mode == PM_NET_ADDR_FALLBACK_UI ? UI_C_YELLOW : UI_C_WHITE);
+        fmt_ip(v, sizeof(v), ni.ip);
         add_info("IP", v, UI_C_WHITE);
-        fmt_ip(v, sizeof(v), mask);
+        fmt_ip(v, sizeof(v), ni.mask);
         add_info("Mask", v, UI_C_WHITE);
-        fmt_ip(v, sizeof(v), U.s.ip.gateway);
-        add_info("Gateway", U.s.ip.gateway ? v : "-", UI_C_WHITE);
+        fmt_ip(v, sizeof(v), ni.gateway); /* in use (DHCP or static), not the stored setting */
+        add_info("Gateway", ni.gateway ? v : "-", UI_C_WHITE);
         add_info("MAC", NULL, UI_C_GRAY);
         snprintf(v, sizeof(v), "%02X:%02X:%02X:%02X:%02X:%02X", U.info.mac[0], U.info.mac[1], U.info.mac[2],
                  U.info.mac[3], U.info.mac[4], U.info.mac[5]);
@@ -1175,17 +1189,15 @@ static void path(char *out, size_t n)
 
 typedef enum { PS_OFF, PS_IDLE, PS_OUT, PS_IN, PS_LOSS, PS_ERR } port_state_t;
 
-static port_state_t port_state(uint8_t p, pm_port_stats_t *st, bool *loss, bool *merging)
+static port_state_t port_state(uint8_t p, port_view_t *v)
 {
-    bool synced;
-    port_stats(p, st);
-    port_flags(p, loss, merging, &synced);
+    port_view(p, v);
     const pm_port_settings_t *ps = &U.s.port[p];
     if (!ps->enabled || p >= PM_NUM_PORTS) return PS_OFF;
     if (since(U.err_t[p], ERR_SHOW_MS)) return PS_ERR;
-    if (*loss) return PS_LOSS;
-    if (ps->direction == PM_PORT_DIR_INPUT) return st->input_signal ? PS_IN : PS_IDLE;
-    return st->fps > 0 ? PS_OUT : PS_IDLE;
+    if (v->loss) return PS_LOSS;
+    if (ps->direction == PM_PORT_DIR_INPUT) return v->data ? PS_IN : PS_IDLE;
+    return v->data ? PS_OUT : PS_IDLE;
 }
 
 static bool blink(uint32_t period_ms) { return (U.now / (period_ms / 2)) % 2 == 0; }
@@ -1219,9 +1231,8 @@ static void draw_status_bar(void)
     }
     for (uint8_t p = 0; p < PM_NUM_PORTS; p++) {
         int x = p * 25;
-        pm_port_stats_t st;
-        bool loss, merging;
-        port_state_t s = port_state(p, &st, &loss, &merging);
+        port_view_t v;
+        port_state_t s = port_state(p, &v);
         char d[2] = {(char)('1' + p), 0};
         uint16_t bg = UI_C_BLACK, fg = UI_C_WHITE, frame = 0;
         bool has_frame = false;
@@ -1241,8 +1252,8 @@ static void draw_status_bar(void)
         ui_text(x + 3, 0, UI_FONT_N, fg, d);
         ui_text(x + 12, 0, UI_FONT_N, fg, s == PS_ERR ? "!" : dir_glyph(p));
         /* activity edge (bottom 3 px) */
-        if (st.rdm_requests != U.rdm_cnt[p]) {
-            U.rdm_cnt[p] = st.rdm_requests;
+        if (v.st.rdm_requests != U.rdm_cnt[p]) {
+            U.rdm_cnt[p] = v.st.rdm_requests;
             U.rdm_t[p] = U.now ? U.now : 1;
         }
         if (U.tube_pct[p] >= 0) {
@@ -1253,10 +1264,10 @@ static void draw_status_bar(void)
         }
     }
     /* system zone: link, IP mode, lock, update/error (x 104..159, 14 px each) */
-    uint32_t ip, mask;
-    uint8_t mode;
-    bool link;
-    net_status(&ip, &mask, &mode, &link);
+    pm_ui_net_info_t ni;
+    net_info(&ni);
+    bool link = ni.link_up;
+    uint8_t mode = ni.mode;
     int x = 104;
     ui_text(x + 3, 0, UI_FONT_N, link ? UI_C_GREEN : UI_C_RED, link ? UI_G_LINK : UI_G_NOLINK);
     x += 14;
@@ -1398,10 +1409,11 @@ static void draw_home(void)
     if (since(U.toast_t, TOAST_MS) && !c1) {
         ui_text(2, y, UI_FONT_S, U.toast_color, U.toast);
     } else {
-        uint32_t ip, mask;
-        uint8_t mode;
-        bool link;
-        net_status(&ip, &mask, &mode, &link);
+        pm_ui_net_info_t ni;
+        net_info(&ni);
+        uint32_t ip = ni.ip, mask = ni.mask;
+        uint8_t mode = ni.mode;
+        bool link = ni.link_up;
         char line[40], ips[20];
         uint16_t c = c1 ? UI_C_BLACK : UI_C_WHITE;
         if (!link) {
@@ -1423,9 +1435,8 @@ static void draw_home(void)
     for (uint8_t p = 0; p < PM_NUM_PORTS; p++) {
         y = 44 + p * 21;
         bool cur = U.home_cur == 2 + p;
-        pm_port_stats_t st;
-        bool loss, merging;
-        port_state_t s = port_state(p, &st, &loss, &merging);
+        port_view_t v;
+        port_state_t s = port_state(p, &v);
         if (cur) ui_fill(0, y, UI_W, 21, UI_C_WHITE);
         int ty = y + 3;
         uint16_t base = cur ? UI_C_BLACK : UI_C_WHITE;
@@ -1452,8 +1463,7 @@ static void draw_home(void)
         bool hl = (U.rmask & PM_CHG_PORT(PM_CHG_P_ADDRESS, p)) && since(U.rmask_t, REMOTE_HL_MS);
         ui_text(26, ty, UI_FONT_N, hl && !cur ? UI_C_ORANGE : base, a);
         char fps[8];
-        bool data = port_is_input(p) ? st.input_signal : (st.fps > 0 && !loss);
-        if (data) snprintf(fps, sizeof(fps), "%u", (unsigned)(st.fps > 99 ? 99 : st.fps));
+        if (v.data) snprintf(fps, sizeof(fps), "%u", (unsigned)(v.fps > 99 ? 99 : v.fps));
         else snprintf(fps, sizeof(fps), "--");
         ui_text_r(126, ty, UI_FONT_N, base, fps);
         /* tag: ERR > failsafe > tube update > merge > RDM count */
@@ -1465,9 +1475,9 @@ static void draw_home(void)
             snprintf(tag, sizeof(tag), "%s", fs[U.s.port[p].failsafe & 3]);
             tc = UI_C_YELLOW;
         } else if (U.tube_pct[p] >= 0) { snprintf(tag, sizeof(tag), UI_G_DOWN "%d", U.tube_pct[p]); tc = UI_C_CYAN; }
-        else if (merging) snprintf(tag, sizeof(tag), "MRG");
-        else if (port_is_output(p) && U.s.port[p].rdm_enabled && st.tod_count) {
-            snprintf(tag, sizeof(tag), "R%u", (unsigned)(st.tod_count > 99 ? 99 : st.tod_count));
+        else if (v.merging) snprintf(tag, sizeof(tag), "MRG");
+        else if (port_is_output(p) && U.s.port[p].rdm_enabled && v.st.tod_count) {
+            snprintf(tag, sizeof(tag), "R%u", (unsigned)(v.st.tod_count > 99 ? 99 : v.st.tod_count));
         }
         if (cur) tc = UI_C_BLACK;
         if (tag[0]) ui_text_r(X_VAL_END + 2, ty, UI_FONT_N, tc, tag);
@@ -1560,12 +1570,10 @@ static void draw_ip(void)
         else ui_frame(116, 94, 40, 16, UI_C_GRAY);
         ui_text_c(116, 40, 94, UI_FONT_N, 1, ok ? UI_C_BLACK : UI_C_WHITE, "OK");
     }
-    uint32_t ip, mask;
-    uint8_t mode;
-    bool link;
-    net_status(&ip, &mask, &mode, &link);
+    pm_ui_net_info_t ni;
+    net_info(&ni);
     char b[32], a[20];
-    fmt_ip(a, sizeof(a), e->field == F_NET_GW ? U.s.ip.gateway : ip);
+    fmt_ip(a, sizeof(a), e->field == F_NET_GW ? ni.gateway : ni.ip); /* what is in use right now */
     snprintf(b, sizeof(b), "active: %s", a);
     ui_text(2, 84, UI_FONT_S, UI_C_GRAY, b);
     ui_text(2, 98, UI_FONT_S, UI_C_CYAN, UI_G_DOT " staged");
@@ -1718,11 +1726,9 @@ static void open_editor(uint8_t f, uint8_t p)
         U.ie.field = f;
         uint32_t v = f == F_NET_IP ? U.net.static_ip : U.net.gateway;
         if (f == F_NET_IP && v == 0) {
-            uint32_t ip, mask;
-            uint8_t mode;
-            bool link;
-            net_status(&ip, &mask, &mode, &link);
-            v = ip;
+            pm_ui_net_info_t ni;
+            net_info(&ni);
+            v = ni.ip;
         }
         for (int i = 0; i < 4; i++) U.ie.oct[i] = (uint8_t)(v >> (24 - 8 * i));
         U.ie.mode = AE_QUICK;
@@ -2430,18 +2436,18 @@ static void update_backlight(void)
 
 static void watch_live(void)
 {
-    uint32_t ip, mask;
-    uint8_t mode;
-    bool link;
-    net_status(&ip, &mask, &mode, &link);
+    pm_ui_net_info_t ni;
+    net_info(&ni);
+    bool link = ni.link_up;
     if (link != U.link_prev) {
         log_add(link ? "Link up" : "Link down");
         if (!link) wake();
         U.link_prev = link;
     }
     for (uint8_t p = 0; p < PM_NUM_PORTS; p++) {
-        bool loss, merging, synced;
-        port_flags(p, &loss, &merging, &synced);
+        port_view_t v;
+        port_view(p, &v);
+        bool loss = v.loss;
         if (loss != U.loss_prev[p]) {
             log_add(loss ? "P%u data lost" : "P%u data back", p + 1u);
             if (loss) wake();

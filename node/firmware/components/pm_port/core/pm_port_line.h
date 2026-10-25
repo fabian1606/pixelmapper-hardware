@@ -105,6 +105,27 @@ pm_port_sched_t pm_port_sched_decide(const pm_port_sched_in_t *in, uint32_t *wak
 /** Expected line time of an RDM transaction (break + MAB + request + response window/backoff). */
 uint32_t pm_port_rdm_estimate_us(const pm_rdm_txn_t *t, uint16_t break_us, uint16_t mab_us, uint16_t mbs_us);
 
+#define PM_PORT_RDM_GATE_STARVE_MS 133u        /**< discovery step not handed out for this long (4 frames at the
+                                                    30 Hz floor): hand out the next one without a budget */
+
+/**
+ * RDM line time that fits into one gap between two DMX frames of `frame_len` bytes (start code + slots) without
+ * the DMX rate dropping below PM_PORT_DMX_FLOOR_HZ (or below the configured rate if that is lower):
+ * max(period, 1/30 s) - (break + MAB + frame_len * (44 us + MBS) + PM_PORT_RDM_GAP_US). 0 if nothing fits.
+ */
+uint32_t pm_port_rdm_budget_us(uint16_t break_us, uint16_t mab_us, uint16_t mbs_us, uint8_t rate_hz,
+                               uint16_t frame_len);
+
+/**
+ * max_us for pm_rdm_ctrl_next_max() (docs/plan.md: "Die DMX-Rate bleibt über ca. 30 Hz"):
+ *  - a forwarded request is waiting (ArtRdm, panel): UINT32_MAX - requests are never held back by the node; the
+ *    line scheduler fits them into a gap or forces them after PM_PORT_RDM_STARVE_FRAMES frames.
+ *  - otherwise (discovery, presence check, BOOT_CATCH): `budget_us`, so these steps only go out when they fit
+ *    next to the DMX frame; after PM_PORT_RDM_GATE_STARVE_MS without a hand-out (budget too small for any step,
+ *    e.g. long MBS) UINT32_MAX, so discovery still progresses (slowly, with the line's forced slot).
+ */
+uint32_t pm_port_rdm_max_us(uint32_t budget_us, bool request_queued, uint32_t ms_since_handout);
+
 /* ------------------------------------------------------------------------------------------------ line FSM */
 
 typedef enum {
@@ -172,6 +193,7 @@ typedef struct {
 
     bool dmx_started;
     uint32_t last_dmx_start;
+    uint16_t last_dmx_len;          /**< bytes of the last DMX frame (start code + slots), for the RDM budget */
     uint8_t frames_since_rdm;
     bool cur_rdm;                   /**< packet in flight is the RDM transaction */
     const uint8_t *cur_data;
@@ -210,6 +232,9 @@ bool pm_port_line_rdm_offer(pm_port_line_t *l, const pm_rdm_txn_t *t, uint32_t n
 bool pm_port_line_rdm_busy(const pm_port_line_t *l);
 /** Take the result (rx->data points into the line, valid until the next offer). */
 bool pm_port_line_rdm_take(pm_port_line_t *l, pm_rdm_rx_t *rx);
+
+/** pm_port_rdm_budget_us() for the current timing and the last DMX frame length (513 before the first frame). */
+uint32_t pm_port_line_rdm_budget_us(const pm_port_line_t *l);
 
 /** Re-run the scheduler now (call after new output data in delta mode or other external changes). */
 void pm_port_line_poke(pm_port_line_t *l, uint32_t now);

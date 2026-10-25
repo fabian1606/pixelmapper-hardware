@@ -32,7 +32,7 @@ static struct {
     void *ctx;
     uint32_t tile_crc[UI_TILES_Y][UI_TILES_X];
     bool valid;
-} G;
+} G UI_EXT_BSS;
 
 static const ui_font_t *font_of(ui_font_id_t f) { return f == UI_FONT_S ? &ui_font_6x8 : &ui_font_8x16b; }
 

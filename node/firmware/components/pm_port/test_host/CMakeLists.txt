@@ -1,5 +1,5 @@
 # Host tests of the hardware-independent part of pm_port (line FSM, frame scheduler, triple buffer)
-# and the pm_board revision-code decoder.
+# with the real pm_rdm_ctrl (RDM gate), the pm_board revision-code decoder and the pin-table self-check.
 #
 #   cmake -S node/firmware/components/pm_port/test_host -B node/firmware/components/pm_port/test_host/build -G Ninja
 #   cmake --build node/firmware/components/pm_port/test_host/build
@@ -18,7 +18,11 @@ add_executable(test_pm_port
     test_pm_port.c
     ${COMP}/core/pm_port_line.c
     ${COMP}/core/pm_port_tbuf.c
-    ${COMPONENTS}/pm_board/src/pm_board_rev.c)
+    ${COMPONENTS}/pm_board/src/pm_board_rev.c
+    ${COMPONENTS}/pm_board/src/pm_board_tables.c
+    ${COMPONENTS}/pm_rdm/src/pm_rdm.c
+    ${COMPONENTS}/pm_rdm/src/pm_rdm_ctrl.c
+    ${COMPONENTS}/pm_protocol/src/pm_types.c)
 target_include_directories(test_pm_port PRIVATE
     ${COMP}/core
     ${COMPONENTS}/pm_board/include

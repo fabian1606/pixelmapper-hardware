@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "pm_rdm.h"
+#include "ui_gfx.h" /* UI_EXT_BSS */
 
 #define QLEN 16
 #define REFRESH_MS 30000u
@@ -34,7 +35,7 @@ static struct {
     pm_uid_t pers_uid;
     ui_rdm_res_t result;
     uint16_t result_pid;
-} R;
+} R UI_EXT_BSS;
 
 void ui_rdm_init(const pm_uid_t *self, ui_rdm_send_fn send, void *ctx)
 {
