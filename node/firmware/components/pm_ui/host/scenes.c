@@ -59,7 +59,7 @@ static void sc_home_states(void)
     F.stats[2].input_signal = false;
     F.stats[2].fps = 0;
     F.settings.port[3].enabled = true;
-    F.stats[3].fps = 0;
+    F.rx_fps[3] = 0;
     remote_settings(&F.settings, PM_SRC_LOCAL_UI);
     sim_run(3200);
     snap("home-error-idle-ports");
@@ -76,7 +76,7 @@ static void sc_port(void)
     snap("6.3-port-advanced");
     keys("L R1 P");
     F.loss[1] = true;
-    F.stats[1].fps = 0;
+    F.rx_fps[1] = 0;
     sim_run(200);
     snap("6.3-port-detail-dataloss");
 }
@@ -92,7 +92,7 @@ static void sc_port_input(void)
 /* 6.4 */
 static void sc_addr(void)
 {
-    F.stats[0].fps = 0; /* no data on port 1: no confirmation */
+    F.rx_fps[0] = 0; /* no data on port 1: no confirmation */
     keys("R1 P P");
     snap("6.4-address-quick-edit");
     keys("R3");
@@ -120,7 +120,7 @@ static void sc_addr_confirm(void)
 static void sc_addr_15(void)
 {
     F.settings.address_format = 1;
-    F.stats[0].fps = 0;
+    F.rx_fps[0] = 0;
     remote_settings(&F.settings, PM_SRC_LOCAL_UI);
     keys("W100 R1 P P F12");
     snap("6.4-address-15bit");
@@ -275,7 +275,7 @@ static void sc_remote(void)
 
 static void sc_conflict(void)
 {
-    F.stats[0].fps = 0;
+    F.rx_fps[0] = 0;
     keys("R1 P P R4");
     pm_settings_t s = S();
     s.port[0].address = PM_PA_MAKE(0, 1, 4);
@@ -326,6 +326,10 @@ static void sc_update(void)
     snap("6.10-tube-update-home");
     keys("R1 P");
     snap("6.10-tube-update-port");
+    tu.value = -1; /* finished: the progress disappears */
+    post_event(tu);
+    sim_run(100);
+    snap("6.10-tube-update-done");
 }
 
 /* 6.11 */
@@ -363,6 +367,46 @@ static void sc_identify(void)
     sim_align(500);
     sim_run(40);
     snap("6.12-identify-in-menu");
+    HCHECK(F.identify_calls == 0); /* PM_UI_EV_IDENTIFY from main is never mirrored back */
+    pm_ui_event_t off = {.type = PM_UI_EV_IDENTIFY, .value = 0};
+    post_event(off);
+    sim_run(50);
+    /* Node > Identify on the panel calls model->identify */
+    keys("L P R2 P P R1 P");
+    sim_run(50);
+    snap("6.12-identify-panel-on");
+    HCHECK(F.identify_calls == 1 && F.identify);
+}
+
+/* Model with every callback NULL (main without network/Art-Net yet): nothing may crash. */
+static void sc_null_model(void)
+{
+    static const pm_ui_model_t empty = {0};
+    sim_reset_model(&empty);
+    sim_run(200);
+    snap("null-model-home");
+    keys("R1 R1 P");
+    snap("null-model-port");
+    sim_reset_model(&empty);
+    keys("R1 R-1 P R1 R1 R1 P");
+    snap("null-model-network-info");
+    keys("L P R2 P P R1 P");
+    sim_run(50);
+    HCHECK(F.identify_calls == 0);
+}
+
+/* Live Art-Net state from port_live: received fps (not the engine rate), merge sources, data loss. */
+static void sc_live(void)
+{
+    F.rx_fps[0] = 25; /* engine still sends 40 fps */
+    F.merging[0] = true;
+    F.synced[1] = true;
+    F.rx_fps[1] = 0;  /* output without Art-Net: "--", white frame */
+    sim_run(100);
+    snap("live-home-rx-fps");
+    HCHECK(F.stats[0].fps == 40);
+    keys("R1 P");
+    snap("live-port-merge");
 }
 
 static void sc_menus(void)
@@ -445,7 +489,10 @@ const scene_t g_scenes[] = {
     {"remote_page", "Remote change hides the field that is being edited.", sc_remote_page},
     {"update", "Node firmware update (full screen) and tube update on a port (6.10).", sc_update},
     {"lock", "Panel locked by Pixelmapper, edit attempt, unlock with BACK + push 3 s (6.11).", sc_lock},
-    {"identify", "Identify / Art-Net Locate: the status bar blinks (6.12).", sc_identify},
+    {"identify", "Identify / Art-Net Locate: the status bar blinks (6.12); Node > Identify on the panel.",
+     sc_identify},
+    {"null_model", "Model with all callbacks NULL: home, port page, network info.", sc_null_model},
+    {"live", "port_live: received Art-Net fps on home, merge sources, output without Art-Net.", sc_live},
     {"menus", "Main menu, display, node, system, info and event pages (4.2).", sc_menus},
     {"regress", "Review regressions: 5 % brightness, lock closes editors, identify off on BACK long.", sc_regress},
     {"mute", "Art-Net LED Mute switches the display off; dimming after the timeout.", sc_mute},

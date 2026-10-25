@@ -17,6 +17,7 @@
 #define SCALE 4
 
 fake_t F;
+int g_host_fail;
 
 static uint32_t s_now;
 static uint16_t s_fb[UI_H][UI_W];
@@ -150,21 +151,23 @@ static void p_tod_flush(void *ctx, pm_port_idx_t port)
     queue_event(&ev, 500);
 }
 
-static void p_identify(void *ctx, bool on)
+/* ------------------------------------------------------------------------------------------------ model */
+
+static void m_identify(void *ctx, bool on)
 {
     (void)ctx;
     F.identify = on;
+    F.identify_calls++;
 }
 
-/* ------------------------------------------------------------------------------------------------ model */
-
-static void m_net(void *ctx, uint32_t *ip, uint32_t *mask, uint8_t *mode, bool *link)
+static void m_net(void *ctx, pm_ui_net_info_t *out)
 {
     (void)ctx;
-    *ip = F.link ? F.ip : 0;
-    *mask = F.link ? F.mask : 0;
-    *mode = F.link ? F.net_mode : 0;
-    *link = F.link;
+    out->ip = F.link ? F.ip : 0;
+    out->mask = F.link ? F.mask : 0;
+    out->gateway = F.link ? F.gateway : 0;
+    out->mode = F.link ? F.net_mode : 0;
+    out->link_up = F.link;
 }
 
 static void m_stats(void *ctx, pm_port_idx_t p, pm_port_stats_t *out)
@@ -174,12 +177,15 @@ static void m_stats(void *ctx, pm_port_idx_t p, pm_port_stats_t *out)
     out->tod_count = F.n_dev[p];
 }
 
-static void m_flags(void *ctx, pm_port_idx_t p, bool *loss, bool *merging, bool *synced)
+static void m_live(void *ctx, pm_port_idx_t p, pm_ui_port_live_t *out)
 {
     (void)ctx;
-    *loss = F.loss[p];
-    *merging = F.merging[p];
-    *synced = F.synced[p];
+    out->rx_active = F.rx_fps[p] > 0;
+    out->rx_fps = F.rx_fps[p];
+    out->merge_sources = (uint8_t)(F.merging[p] ? 2 : F.rx_fps[p] ? 1 : 0);
+    out->data_loss = F.loss[p];
+    out->merging = F.merging[p];
+    out->synced = F.synced[p];
 }
 
 static uint16_t m_tod(void *ctx, pm_port_idx_t p, pm_uid_t *out, uint16_t cap)
@@ -276,13 +282,13 @@ static esp_err_t m_rdm(void *ctx, pm_port_idx_t p, uint32_t token, const uint8_t
 }
 
 static const pm_ui_model_t s_model = {
-    .net_status = m_net, .port_stats = m_stats, .port_flags = m_flags, .tod_get = m_tod, .rdm_request = m_rdm,
+    .port_stats = m_stats, .tod_get = m_tod, .rdm_request = m_rdm, .net_info = m_net, .port_live = m_live,
+    .identify = m_identify,
 };
 
 static const ui_platform_t s_plat = {
     .now_ms = p_now, .settings_get = p_settings_get, .settings_set = p_settings_set, .backlight = p_backlight,
     .restart = p_restart, .factory_reset = p_factory, .record_scene = p_record_scene, .tod_flush = p_tod_flush,
-    .identify = p_identify,
 };
 
 /* ------------------------------------------------------------------------------------------------ display */
@@ -468,9 +474,12 @@ static void fake_defaults(void)
     F.link = true;
     F.ip = 0xC0A864D9u; /* 192.168.100.217 */
     F.mask = 0xFFFFFF00u;
+    F.gateway = 0xC0A86401u; /* 192.168.100.1 */
     F.net_mode = 1; /* DHCP */
-    F.stats[0].fps = 44;
-    F.stats[1].fps = 44;
+    F.stats[0].fps = 40; /* the engine sends at the port rate; home shows the received Art-Net rate */
+    F.stats[1].fps = 40;
+    F.rx_fps[0] = 44;
+    F.rx_fps[1] = 44;
     F.merging[1] = true;
     F.stats[2].fps = 30;
     F.stats[2].input_signal = true;
@@ -494,7 +503,13 @@ static void fake_defaults(void)
                                .pers_count = 4, .label = "", .dead = true};
 }
 
-void sim_reset(void)
+static void reset_with(const pm_ui_model_t *model);
+
+void sim_reset(void) { reset_with(&s_model); }
+
+void sim_reset_model(const pm_ui_model_t *model) { reset_with(model); }
+
+static void reset_with(const pm_ui_model_t *model)
 {
     fake_defaults();
     s_now = 1000;
@@ -508,7 +523,7 @@ void sim_reset(void)
     uint8_t mac[6] = {0x30, 0xED, 0xA0, 0xA1, 0xB2, 0xC3};
     memcpy(info.mac, mac, 6);
     snprintf(info.fw_version, sizeof(info.fw_version), "0.1.0");
-    ui_core_init(&s_plat, &s_model, &info);
+    ui_core_init(&s_plat, model, &info);
     sim_run(200);
     s_sent_since_snap = 0;
 }
@@ -536,5 +551,6 @@ int main(int argc, char **argv)
         write_sheet(g_scenes[i].name);
     }
     if (s_index) fclose(s_index);
-    return 0;
+    if (g_host_fail) printf("%d scene check(s) failed\n", g_host_fail);
+    return g_host_fail ? 1 : 0;
 }

@@ -12,6 +12,16 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* Large static state of the UI modules (display list, UI state, RDM cache: ~21 KB). On the target it goes to PSRAM
+ * when CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY is set (EXT_RAM_BSS_ATTR, otherwise empty); only the UI task
+ * touches it, never an ISR, and nothing in it is a DMA buffer (the strip buffer comes from pm_ui.c). */
+#ifdef ESP_PLATFORM
+#include "esp_attr.h"
+#define UI_EXT_BSS EXT_RAM_BSS_ATTR
+#else
+#define UI_EXT_BSS
+#endif
+
 #define UI_W 160
 #define UI_H 128
 #define UI_STRIP_H 16

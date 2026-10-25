@@ -35,9 +35,8 @@ typedef struct {
     void (*record_scene)(void *ctx, pm_port_idx_t port);
     /** Full RDM discovery (ArtTodControl flush) of a port. */
     void (*tod_flush)(void *ctx, pm_port_idx_t port);
-    /** Panel identify on/off (local identify; same state as RDM IDENTIFY_DEVICE of the node). */
-    void (*identify)(void *ctx, bool on);
 } ui_platform_t;
+/* Panel identify goes to pm_ui_model_t.identify (main mirrors it to the RDM responder / ArtPollReply). */
 
 void ui_core_init(const ui_platform_t *plat, const pm_ui_model_t *model, const ui_node_info_t *info);
 void ui_core_set_info(const ui_node_info_t *info);

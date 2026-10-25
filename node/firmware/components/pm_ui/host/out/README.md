@@ -244,6 +244,7 @@ Node firmware update (full screen) and tube update on a port (6.10).
 | `6.10-node-firmware-update.png` | ![](6.10-node-firmware-update.png) |
 | `6.10-tube-update-home.png` | ![](6.10-tube-update-home.png) |
 | `6.10-tube-update-port.png` | ![](6.10-tube-update-port.png) |
+| `6.10-tube-update-done.png` | ![](6.10-tube-update-done.png) |
 
 ## lock
 
@@ -259,13 +260,33 @@ Panel locked by Pixelmapper, edit attempt, unlock with BACK + push 3 s (6.11).
 
 ## identify
 
-Identify / Art-Net Locate: the status bar blinks (6.12).
+Identify / Art-Net Locate: the status bar blinks (6.12); Node > Identify on the panel.
 
 | file | screen |
 |---|---|
 | `6.12-identify-bar-on.png` | ![](6.12-identify-bar-on.png) |
 | `6.12-identify-bar-off.png` | ![](6.12-identify-bar-off.png) |
 | `6.12-identify-in-menu.png` | ![](6.12-identify-in-menu.png) |
+| `6.12-identify-panel-on.png` | ![](6.12-identify-panel-on.png) |
+
+## null_model
+
+Model with all callbacks NULL: home, port page, network info.
+
+| file | screen |
+|---|---|
+| `null-model-home.png` | ![](null-model-home.png) |
+| `null-model-port.png` | ![](null-model-port.png) |
+| `null-model-network-info.png` | ![](null-model-network-info.png) |
+
+## live
+
+port_live: received Art-Net fps on home, merge sources, output without Art-Net.
+
+| file | screen |
+|---|---|
+| `live-home-rx-fps.png` | ![](live-home-rx-fps.png) |
+| `live-port-merge.png` | ![](live-port-merge.png) |
 
 ## menus
 
