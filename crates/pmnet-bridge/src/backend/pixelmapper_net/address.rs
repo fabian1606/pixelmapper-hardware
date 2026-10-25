@@ -2,9 +2,10 @@
 //!
 //! Rules: one Command per packet; names and Port-Addresses travel with the first packet of their BindIndex;
 //! fields left out are "no change" (0x7F switches, empty names). Names and the indicator are node-wide and go to
-//! the lowest BindIndex. Failsafe, failsafe scene, cancel merge and reset-RX-flags are kept per BindIndex by the
-//! Pixelmapper Node (one port per BindIndex), so they go to every BindIndex of the node. The packets are library
-//! values (`ArtAddress`); `pixelmapper-net` encodes them.
+//! the lowest BindIndex. A port's failsafe mode and scene recording go to its BindIndex (the AcFail* commands
+//! have no port number: Art-Net 4 nodes keep them per BindIndex, the Pixelmapper Node has one port per
+//! BindIndex). Cancel merge and reset-RX-flags are node-wide intents and go to every BindIndex of the node. The
+//! packets are library values (`ArtAddress`); `pixelmapper-net` encodes them.
 
 use crate::protocol::{
     ArtAddressArgs, ArtAddressPort, Failsafe, MergeMode, NodeState, OutputProtocol, OutputStyle,
@@ -41,17 +42,6 @@ pub(super) fn plan(args: &ArtAddressArgs, node: &NodeState) -> Vec<ArtAddress> {
         p.base.long_name = args.long_name.clone().unwrap_or_default();
     }
     let mut per_bind = Vec::new();
-    if let Some(f) = args.failsafe {
-        per_bind.push(match f {
-            Failsafe::Hold => ac::AC_FAIL_HOLD,
-            Failsafe::Zero => ac::AC_FAIL_ZERO,
-            Failsafe::Full => ac::AC_FAIL_FULL,
-            Failsafe::Scene => ac::AC_FAIL_SCENE,
-        });
-    }
-    if args.record_failsafe_scene {
-        per_bind.push(ac::AC_FAIL_RECORD);
-    }
     if args.cancel_merge {
         per_bind.push(ac::AC_CANCEL_MERGE);
     }
@@ -124,7 +114,8 @@ fn set_addresses(base: &mut ArtAddress, change: &ArtAddressPort) {
     }
 }
 
-/// Port commands for port `index` of its BindIndex: direction first, then merge, RDM, style, protocol, clear.
+/// Port commands for port `index` of its BindIndex: direction first, then merge, RDM, style, protocol, clear,
+/// then the BindIndex's failsafe mode and scene recording.
 fn port_commands(change: &ArtAddressPort) -> Vec<u8> {
     let i = change.port.index.min(3);
     let mut out = Vec::new();
@@ -172,6 +163,17 @@ fn port_commands(change: &ArtAddressPort) -> Vec<u8> {
     if change.clear_output {
         out.push(ac::AC_CLEAR_OP0 + i);
     }
+    if let Some(f) = change.failsafe {
+        out.push(match f {
+            Failsafe::Hold => ac::AC_FAIL_HOLD,
+            Failsafe::Zero => ac::AC_FAIL_ZERO,
+            Failsafe::Full => ac::AC_FAIL_FULL,
+            Failsafe::Scene => ac::AC_FAIL_SCENE,
+        });
+    }
+    if change.record_failsafe_scene {
+        out.push(ac::AC_FAIL_RECORD);
+    }
     out
 }
 
@@ -188,8 +190,6 @@ mod tests {
             short_name: None,
             long_name: None,
             ports: Vec::new(),
-            failsafe: None,
-            record_failsafe_scene: false,
             indicator: None,
             cancel_merge: false,
             reset_rx_flags: false,
@@ -207,6 +207,8 @@ mod tests {
             output_style: None,
             protocol: None,
             clear_output: false,
+            failsafe: None,
+            record_failsafe_scene: false,
         }
     }
 
@@ -260,10 +262,15 @@ mod tests {
     }
 
     #[test]
-    fn per_bind_node_commands() {
+    fn node_wide_and_per_port_commands() {
         let a = ArtAddressArgs {
-            failsafe: Some(Failsafe::Zero),
+            cancel_merge: true,
             indicator: Some(SetIndicator::Locate),
+            ports: vec![ArtAddressPort {
+                failsafe: Some(Failsafe::Zero),
+                record_failsafe_scene: true,
+                ..port(3)
+            }],
             ..args()
         };
         let p = plan(&a, &node());
@@ -271,11 +278,13 @@ mod tests {
         assert_eq!(
             cmds,
             vec![
-                (1, ac::AC_FAIL_ZERO),
+                (1, ac::AC_CANCEL_MERGE),
                 (1, ac::AC_LED_LOCATE),
-                (2, ac::AC_FAIL_ZERO),
+                (2, ac::AC_CANCEL_MERGE),
                 (3, ac::AC_FAIL_ZERO),
-                (4, ac::AC_FAIL_ZERO)
+                (3, ac::AC_FAIL_RECORD),
+                (3, ac::AC_CANCEL_MERGE),
+                (4, ac::AC_CANCEL_MERGE)
             ]
         );
     }

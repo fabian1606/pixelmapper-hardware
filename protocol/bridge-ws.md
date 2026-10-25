@@ -1,12 +1,23 @@
 # Bridge WebSocket Protocol — `pmnet serve` ↔ Pixelmapper
 
-Status: **1.0.0 candidate**, 2026-10-24. **This file is the authoritative contract** (milestone M3.1 of the Art-Net/RDM plan, `pixelmapper/architecture/artnet-rdm-implementation-plan.md`). The copy in the Pixelmapper repo (`architecture/artnet-bridge-ws-protocol.md`) points here.
+Status: **1.0.0 candidate, revision 2**, 2026-10-26. **This file is the authoritative contract** (milestone M3.1 of the Art-Net/RDM plan, `pixelmapper/architecture/artnet-rdm-implementation-plan.md`). The copy in the Pixelmapper repo (`architecture/artnet-bridge-ws-protocol.md`) points here.
 
 Implementations: the bridge is `crates/pmnet-bridge` (binary `pmnet-bridge serve` until the `pmnet` CLI embeds it as `pmnet serve`; Rust types in `src/protocol/`). The app side is the TypeScript mirror in the Pixelmapper repo, `extensions/connector-artnet/bridge/protocol-model.ts`, `protocol-messages.ts` and `frame-set.ts`. Every change here is made in both, and the other way round.
 
 The bridge owns every Art-Net/RDM packet, timer and procedure (plan D2). Pixelmapper sends **intents** and receives **state**. All state follows the node contract's last-writer-wins rule (D5): events and results report what the network said, never what was requested.
 
 “Node contract” below = [`contract.md`](contract.md) in this folder (with [`artnet4-digest.md`](artnet4-digest.md), [`rdm-digest.md`](rdm-digest.md), [`pids.toml`](pids.toml)). “Plan” = the Art-Net/RDM implementation plan in the Pixelmapper repo.
+
+**Changelog** (the wire version stays `1.0.0` until release; clients compare the major only):
+
+- *Revision 2 (2026-10-26)*, after the end-to-end test against the firmware (`docs/e2e-findings.md`) and the
+  `pixelmapper-net` adapter: the failsafe mode is **per port** (`NodeStatus.failsafe` → `PortState.failsafe`,
+  `artAddress` `failsafe`/`recordFailsafeScene` moved into `ports[]`); a port without RDM answers TodNak
+  (`Tod.available: false`); clarifications of `nodeId` for simulators, `node` events per BindIndex page and
+  NodeReport counter, TOD subscription after restarts, `todRequest`/`todControl` results, `artAddress` routing,
+  `ipProg` DHCP arguments, `rdmDescribe` cache, `rdmQueued` (one queue for all controllers), ArtSync rule;
+  implementation notes of `pmnet-bridge` (§11).
+- *Revision 1 (2026-10-24)*: first candidate.
 
 The key words MUST, SHOULD and MAY are used as in RFC 2119. Bit positions of Art-Net fields are given for orientation; the **Art-Net 4 specification and ANSI E1.20 are binding** for positions, polarity and encoding.
 
@@ -87,7 +98,7 @@ The bridge writes events and results to one ordered channel per connection. A re
 
 | Name | Format | Notes |
 |---|---|---|
-| `nodeId` | `"7FF0:8A1B2C3D"` (UID), else `"mac:02:7f:f0:1b:2c:3d"`, else `"ip:2.0.0.5"` | Stable identity of a node (plan D6): the RDM UID from `DefaultRespUID`; the MAC when the UID is all-zero; the IP only when both are zero (not stable — documented fallback). Replies with the same IP are merged across `BindIndex` values. |
+| `nodeId` | `"7FF0:8A1B2C3D"` (UID), else `"mac:02:7f:f0:1b:2c:3d"`, else `"ip:2.0.0.5"` | Stable identity of a node (plan D6): the RDM UID from `DefaultRespUID`; the MAC when the UID is all-zero; the IP only when both are zero (not stable — documented fallback; a node that does not use UDP port 6454, i.e. a simulator, gets `"ip:127.0.0.1:50000"`). Replies with the same IP are merged across `BindIndex` values. |
 | `uid` | `"7FF0:74B6510C"` | RDM UID: manufacturer (4 hex digits) `:` device (8 hex digits), **uppercase**. Broadcasts: `"FFFF:FFFFFFFF"`, manufacturer broadcast `"7FF0:FFFFFFFF"`. |
 | `port` | `{ "bind": 1, "index": 0 }` | `bind` = `BindIndex` of the ArtPollReply (1–255; 0 is reported as 1), `index` = port within that reply (0–3). The Pixelmapper Node sends **one port per BindIndex** (node contract §3), so its ports are `{bind: 1…4, index: 0}`; other Art-Net 4 nodes may report up to 4 ports per BindIndex. |
 | `portAddress` | integer 0–32767 | 15-bit Port-Address: `net << 8 \| subNet << 4 \| universe`. Port-Address 0 is deprecated in Art-Net 4 (factory setting of the node: 1–4). |
@@ -106,7 +117,8 @@ TypeScript notation; `?` = key may be missing.
 
 ```ts
 interface NetInterface { name: string; ip: string; mask: string; mac: string | null }
-interface UdpState { bound: boolean; port: number; error: string | null } // port 6454; error e.g. "address in use"
+interface UdpState { bound: boolean; port: number; error: string | null } // port: the bound local UDP port (6454);
+                                 // error e.g. "Address already in use"; an unbound socket is retried, `bridgeStatus` follows
 ```
 
 ### NodeState
@@ -149,8 +161,7 @@ interface NodeStatus {
   squawking: boolean;            // Status2 bit 5
   outputStyleSwitchable: boolean;// Status2 bit 6 (output style via ArtAddress)
   rdmSwitchable: boolean;        // Status2 bit 7 (RDM on/off via ArtAddress)
-  failsafe: 'hold' | 'zero' | 'full' | 'scene';          // Status3 bits 7–6
-  failsafeProgrammable: boolean; // Status3 bit 5
+  failsafeProgrammable: boolean; // Status3 bit 5 (the failsafe mode itself is per port: PortState.failsafe)
   llrp: boolean;                 // Status3 bit 4
   portDirectionSwitchable: boolean; // Status3 bit 3
   rdmnet: boolean;               // Status3 bit 2
@@ -166,7 +177,10 @@ interface PortState {
   direction: 'output' | 'input' | 'both' | 'none'; // from PortTypes bits 7/6; with Status3 bit 3 set they show the
                                  // CURRENT direction (node contract §3), so a switchable port is 'output' or 'input'
   outputPortAddress: number;     // NetSwitch, SubSwitch, SwOut[i]
-  inputPortAddress: number;      // NetSwitch, SubSwitch, SwIn[i]
+  inputPortAddress: number;      // NetSwitch, SubSwitch, SwIn[i]; the Pixelmapper Node fills only the field of the
+                                 // current direction, the other has universe 0 (node contract §3)
+  failsafe: 'hold' | 'zero' | 'full' | 'scene' | null; // Status3 bits 7–6 of this port's ArtPollReply (the failsafe
+                                 // mode is per BindIndex, i.e. per port on the Pixelmapper Node); null = not known
   output: {
     data: boolean;               // GoodOutputA bit 7: ArtDmx/sACN is being output as DMX
     merging: boolean;            // GoodOutputA bit 3
@@ -194,7 +208,8 @@ interface Tod {
   nodeId: string;
   port: { bind: number; index: number };
   portAddress: number;           // Port-Address the ArtTodData was sent for
-  available: boolean;            // false when the node answered TodNak
+  available: boolean;            // false when the node answered TodNak: TOD not available, e.g. a port without RDM
+                                 // (port off, input, or RDM disabled; node contract §6.1)
   uids: string[];                // complete list over all blocks (UidTotal), sorted ascending; [] when !available
 }
 ```
@@ -305,6 +320,7 @@ interface FirmwareImageInfo {    // tube image trailer at 0x17F0 (node contract 
 }
 
 type FlashPhase = 'entering' | 'writing' | 'verifying' | 'finishing' | 'confirming' | 'done' | 'failed' | 'cancelled';
+// entering: checking the device and entering the bootloader; verifying includes rewriting pages whose CRC differed
 
 interface FlashJob {
   jobId: string;
@@ -314,7 +330,7 @@ interface FlashJob {
   phase: FlashPhase;
   pagesDone: number;             // pages written (all-0xFF pages are skipped and not counted)
   pagesTotal: number;
-  rewrites: number;              // chunks rewritten after an APP_CRC mismatch
+  rewrites: number;              // pages rewritten after an APP_CRC mismatch (all pages of the differing chunks)
   inBootloader: boolean;         // true while the tube runs its bootloader (also after failed/cancelled)
   image: FirmwareImageInfo;
   error: { code: ErrorCode; message: string } | null; // set when phase = failed
@@ -332,10 +348,10 @@ Events are sent only to connections that completed the handshake.
 |---|---|---|
 | `hello` | `bridge: string` (pmnet semver), `protocol: string` (semver), `interfaces: NetInterface[]`, `udp: UdpState` | first message of every connection |
 | `bridgeStatus` | `interfaces: NetInterface[]`, `udp: UdpState` | an interface or the UDP socket state changed |
-| `node` | `node: NodeState` | node first seen, and whenever any field other than `lastSeen` changes (unsolicited ArtPollReply, IP change, merged BindIndex reply). When a node appears (or reappears after `nodeGone`/a restart) the bridge sends one ArtTodRequest per port: the node only sends unsolicited ArtTodData to IPs that requested a TOD before (node contract §6.1) |
+| `node` | `node: NodeState` | node first seen, and whenever any field other than `lastSeen` changes (unsolicited ArtPollReply, IP change, merged BindIndex reply). The BindIndex pages of a node arrive one by one, so a new node's ports usually come in several `node` events. `nodeReport` carries the node's ArtPollReply counter (`#0001 [0123] …`), so a node typically changes once per poll cycle. The bridge sends one ArtTodRequest per RDM output port when the node appears or reappears after `nodeGone`, when a port appears, changes its Port-Address or gets RDM switched on, and after a restart (other firmware, or the NodeReport counter starting over): the node only sends unsolicited ArtTodData to IPs that requested a TOD before (node contract §6.1) |
 | `nodeGone` | `nodeId: string`, `lastSeen: number` | no reply for 3 consecutive poll cycles; the node and its TODs leave the bridge's table |
 | `tod` | `Tod` fields (`nodeId`, `port`, `portAddress`, `available`, `uids`) | every completely assembled ArtTodData set (requested or unsolicited); the app diffs |
-| `rdmQueued` | `nodeId`, `port`, `uid`, `subDevice`, `pid`, `data` (hex), `value?: RdmValue` | a queued message fetched with QUEUED_MESSAGE (the bridge fetches whenever a response's message count is > 0, node contract §6.3). Its content is the GET response of the changed PID — e.g. `LOCAL_RDM_SET` (0x8150) after an RDM SET from the node's display, upon which the app re-reads that PID at the device (node contract §7) |
+| `rdmQueued` | `nodeId`, `port`, `uid`, `subDevice`, `pid`, `data` (hex), `value?: RdmValue` | a queued message fetched with QUEUED_MESSAGE (the bridge fetches whenever a response's message count is > 0, node contract §6.3). Its content is the GET response of the changed PID — e.g. `LOCAL_RDM_SET` (0x8150) after an RDM SET from the node's display, upon which the app re-reads that PID at the device (node contract §7). The node has **one** queue for all controllers (node contract §6.3): another controller may fetch a message first, so `rdmQueued` is best effort — the app also re-reads the node's settings PIDs on `node` events that change the node and every 30–60 s |
 | `diag` | `nodeId: string \| null`, `ip`, `priority: 'low' \| 'medium' \| 'high' \| 'critical' \| 'volatile'`, `logicalPort: number`, `text` | ArtDiagData received (DpLow 0x10, DpMed 0x40, DpHigh 0x80, DpCritical 0xE0, DpVolatile 0xF0) |
 | `flashProgress` | `job: FlashJob` | every phase change, and at most 10×/s while writing/verifying |
 | `log` | `level: 'debug' \| 'info' \| 'warn' \| 'error'`, `text`, `nodeId?: string` | bridge diagnostics worth showing (bind errors, malformed packets, retries exhausted, event stream resynchronized). Warnings about a connection's own malformed binary messages go to that connection only, at most one per second |
@@ -353,7 +369,7 @@ Examples:
   "style": "node", "refreshRate": 44, "status": { "indicator": "normal", "...": "…" },
   "raw": { "status1": 226, "status2": 14, "status3": 40 },
   "ports": [{ "port": { "bind": 1, "index": 0 }, "protocol": "dmx512", "canOutput": true, "canInput": false,
-              "direction": "output", "outputPortAddress": 1, "inputPortAddress": 1,
+              "direction": "output", "outputPortAddress": 1, "inputPortAddress": 0, "failsafe": "hold",
               "output": { "data": true, "merging": false, "merge": "htp", "shortCircuit": false, "sacn": false,
                           "rdm": true, "style": "continuous", "discoveryRunning": false, "backgroundDiscovery": true },
               "input": { "data": false, "disabled": false, "errors": false, "sacn": false } },
@@ -383,8 +399,8 @@ Common RDM addressing arguments: `nodeId`, `port`, `uid`, `subDevice?` (default 
 | `poll` | – | `{}` — sends an ArtPoll now (on top of the 2.5–3 s cycle) | `udpUnavailable` |
 | `addPollTarget` | `ip` | `{}` — the bridge also unicasts every ArtPoll to `ip` while this connection lives (manual add by IP, nodes outside the broadcast domain) | – |
 | `removePollTarget` | `ip` | `{}` | – |
-| `todRequest` | `nodeId`, `port` | `{}` — ArtTodRequest; the answer arrives as `tod` | `unknownNode`, `unknownPort` |
-| `todControl` | `nodeId`, `port`, `action: 'flush' \| 'end' \| 'incOn' \| 'incOff'` | `{}` — ArtTodControl `AtcFlush` (clear TOD + full discovery; the new TOD arrives as `tod`), `AtcEnd`, `AtcIncOn`/`AtcIncOff` (background discovery of the port on/off) | `unknownNode`, `unknownPort` |
+| `todRequest` | `nodeId`, `port` | `{}` — ArtTodRequest; the answer arrives as `tod`, also when the TOD did not change | `unknownNode`, `unknownPort` |
+| `todControl` | `nodeId`, `port`, `action: 'flush' \| 'end' \| 'incOn' \| 'incOff'` | `{}` — ArtTodControl `AtcFlush` (clear TOD + full discovery; the new TOD arrives as `tod` — when it did not change, the bridge re-requests it after ~3 s and sends that), `AtcEnd`, `AtcIncOn`/`AtcIncOff` (background discovery of the port on/off) | `unknownNode`, `unknownPort` |
 | `rdmGet` | RDM addressing, `pid`, `data?` (hex) or `value?` (argument, see `RdmValue`) | `{ data: string, value?: RdmValue }` | `unknownNode`, `unknownPort`, `timeout`, `nack`, `badResponse` |
 | `rdmSet` | RDM addressing, `pid`, exactly one of `data` (hex) / `value` | `{ data: string, value?: RdmValue, broadcast?: true }` | as `rdmGet` |
 | `rdmDescribe` | RDM addressing (unicast `uid`), `refresh?: boolean` | `RdmDeviceDescription` | `unknownNode`, `unknownPort`, and the DEVICE_INFO failure (`timeout`, `nack`, `badResponse`) |
@@ -400,7 +416,7 @@ Common RDM addressing arguments: `nodeId`, `port`, `uid`, `subDevice?` (default 
 ### Semantics
 
 - **RDM transactions** (node contract §6.2, plan M1.5): per port at most min(4, `FifoAvail` of the node's last ArtRdm) requests in flight, 500 ms response timeout, 2 retries → `timeout`. `ACK_TIMER` is waited out and the response fetched as E1.20 requires; `ACK_OVERFLOW` is reassembled; the app only sees the final ACK or NACK. Requests to broadcast UIDs return `{ data: "", broadcast: true }` right after sending. A NACK reports `details.nackReason` (number) and `details.nackName` (`UNKNOWN_PID`, `FORMAT_ERROR`, `HARDWARE_FAULT`, `PROXY_REJECT`, `WRITE_PROTECT`, `UNSUPPORTED_COMMAND_CLASS`, `DATA_OUT_OF_RANGE`, `BUFFER_FULL`, `PACKET_SIZE_UNSUPPORTED`, `SUB_DEVICE_OUT_OF_RANGE`, `PROXY_BUFFER_FULL`, `ACTION_NOT_SUPPORTED`, else `"0x…"`).
-- **`rdmDescribe`** reads DEVICE_INFO, SUPPORTED_PARAMETERS, the labels, software/boot versions, DMX_PERSONALITY_DESCRIPTION for every personality, SLOT_INFO/SLOT_DESCRIPTION/DEFAULT_SLOT_VALUE for the current personality and PARAMETER_DESCRIPTION for every manufacturer PID. Only a DEVICE_INFO failure fails the command; other failures go to `errors` and the field is `null`/`[]`. Descriptions of personalities and parameters MAY be cached per (`uid`, `softwareVersionId`); `refresh: true` bypasses the cache. After `rdmDescribe`, the bridge knows the PARAMETER_DESCRIPTIONs of that device and decodes `value` for its manufacturer PIDs.
+- **`rdmDescribe`** reads DEVICE_INFO, SUPPORTED_PARAMETERS, the labels, software/boot versions, DMX_PERSONALITY_DESCRIPTION for every personality, SLOT_INFO/SLOT_DESCRIPTION/DEFAULT_SLOT_VALUE for the current personality and PARAMETER_DESCRIPTION for every manufacturer PID. Only a DEVICE_INFO failure fails the command; other failures go to `errors` and the field is `null`/`[]`. Descriptions of personalities and parameters MAY be cached per (`uid`, `softwareVersionId`); `refresh: true` bypasses the cache (`pmnet-bridge` keys the cache by `uid` and `subDevice` and reuses it while `softwareVersionId` and SUPPORTED_PARAMETERS are unchanged). Without DMX_PERSONALITY_DESCRIPTION, `personalities` still lists 1…`personalityCount` with `description: null`; the `footprint` is then only known for the current personality (DEVICE_INFO), else 0. After `rdmDescribe`, the bridge knows the PARAMETER_DESCRIPTIONs of that device and decodes `value` for its manufacturer PIDs.
 - **`artAddress`** arguments (all optional except `nodeId`):
 
   ```ts
@@ -416,17 +432,17 @@ Common RDM addressing arguments: `nodeId`, `port`, `uid`, `subDevice?` (default 
       outputStyle?: 'delta' | 'continuous';                   // AcStyleDelta/Const
       protocol?: 'artnet' | 'sacn';                           // AcArtNetSel/AcAcnSel
       clearOutput?: true;                                     // AcClearOp
+      failsafe?: 'hold' | 'zero' | 'full' | 'scene';          // AcFailHold/Zero/Full/Scene to the port's BindIndex
+      recordFailsafeScene?: true;                             // AcFailRecord to the port's BindIndex
     }[];
-    failsafe?: 'hold' | 'zero' | 'full' | 'scene';            // AcFailHold/Zero/Full/Scene
-    recordFailsafeScene?: true;                               // AcFailRecord
     indicator?: 'normal' | 'mute' | 'locate';                 // AcLedNormal/Mute/Locate
     cancelMerge?: true;                                       // AcCancelMerge
     resetRxFlags?: true;                                      // AcResetRxFlags
   }
   ```
 
-  `shortName` ≤ 17 and `longName` ≤ 63 bytes, else `badRequest`; each port at most once. The bridge sends as many ArtAddress packets as needed (one Command per packet; names and addresses with the first packet of each BindIndex) and answers with the node state from the node's ArtPollReply to the last packet (`timeout` after 1 s and one resend). Ports of one BindIndex share NetSwitch and SubSwitch: every written address and the current address of every port of that BindIndex that is *not* written must have the same bits 14–4 — otherwise the bridge sends nothing and answers `invalidPortAddress` (to move all ports to another Sub-Net, write all of them in one command). Fields left out are sent as “no change”.
-- **`ipProg`**: ArtIpProg with the corresponding Command bits; the answer is the ArtIpProgReply. The node then replies to polls from its new IP with the same `nodeId` (`node` event). An `ipProg` with only `nodeId` (no other field) is a **read**: the bridge sends ArtIpProg with Command = 0 (no programming, per the Art-Net spec) and answers with the node's current IP, mask, gateway and DHCP state from the ArtIpProgReply — this is how clients read mask and gateway, which ArtPollReply does not carry.
+  `shortName` ≤ 17 and `longName` ≤ 63 bytes, else `badRequest`; each port at most once. The bridge sends as many ArtAddress packets as needed (one Command per packet; names and addresses with the first packet of each BindIndex) and answers with the node state from the node's ArtPollReply to the last packet (`timeout` after 1 s and one resend). Ports of one BindIndex share NetSwitch and SubSwitch: every written address and the current address of every port of that BindIndex that is *not* written must have the same bits 14–4 — otherwise the bridge sends nothing and answers `invalidPortAddress` (to move all ports to another Sub-Net, write all of them in one command). Fields left out are sent as “no change”. Names and `indicator` go to the lowest BindIndex of the node. `failsafe` and `recordFailsafeScene` go to the port's BindIndex (the AcFail* commands carry no port number: a node with several ports per BindIndex applies them to all ports of that BindIndex). `cancelMerge` and `resetRxFlags` go to every BindIndex of the node. An `artAddress` without any change sends nothing and answers with the current state.
+- **`ipProg`**: ArtIpProg with the corresponding Command bits; the answer is the ArtIpProgReply. The node then replies to polls from its new IP with the same `nodeId` (`node` event). An `ipProg` with only `nodeId` (no other field) is a **read**: the bridge sends ArtIpProg with Command = 0 (no programming, per the Art-Net spec) and answers with the node's current IP, mask, gateway and DHCP state from the ArtIpProgReply — this is how clients read mask and gateway, which ArtPollReply does not carry. `dhcp: true` cannot be combined with `ip`, `mask`, `gateway` or `resetToDefault` (the node ignores them when DHCP is switched on) and `dhcp: false` needs `ip` (Art-Net switches DHCP off by programming a static IP); both are answered `badRequest` with `details.field: "dhcp"`.
 - **`flash`** (plan M2.2, node contract §9.1): before answering, the bridge parses the image (`invalidImage`), reads DEVICE_INFO (manufacturer and model must match the trailer → else `deviceMismatch`; `softwareVersionId` > image `versionId` without `allowDowngrade` → `downgrade` with `details: { current, image }`). A tube already in its bootloader (no DEVICE_INFO, but BOOT_INFO answers with matching manufacturer/model) is accepted and continues at “enter” step 4. One job per (`nodeId`, `port`) at a time (`busy`); ports run in parallel. The job belongs to the bridge: it continues when the connection drops, and progress goes to every connection.
 
 ### DmxRoute
@@ -453,7 +469,7 @@ One binary message carries one **frame set**: all universes of one rendered fram
 | 4 | 2 | `count` (u16 LE) |
 | 6 | … | `count` entries: `route` (u16 LE), `length` (u16 LE, 1–512), `length` DMX slot bytes (slot 1 first, no start code) |
 
-The bridge, for every entry: looks up `route` in this connection's table (unknown routes are skipped), pads an odd `length` with one zero byte (ArtDmx needs an even length, 2–512), and sends **ArtDmx unicast** to the route's node IP (or `ip`) with the route's Port-Address and a sequence number per (destination IP, Port-Address) counting 1–255 (never 0). `Physical` is constant per connection (the bridge numbers its connections 0, 1, 2, … mod 256): merge sources are IP + Physical (node contract §4), so two app windows are two merge sources instead of one flickering source. After the set, if flag bit 0 is set, it sends **ArtSync as a broadcast** (Art-Net 4 forbids unicast ArtSync) on every interface that carried ArtDmx of the set. Nodes ignore ArtSync while they merge a port or when it does not come from the IP of the last ArtDmx. Malformed messages (bad magic, unknown kind, truncated entries, `length` 0 or > 512) are dropped as a whole with a `log` warning; bytes after the last entry are ignored.
+The bridge, for every entry: looks up `route` in this connection's table (unknown routes are skipped), pads an odd `length` with one zero byte (ArtDmx needs an even length, 2–512), and sends **ArtDmx unicast** to the route's node IP (or `ip`) with the route's Port-Address and a sequence number per (destination IP, Port-Address) counting 1–255 (never 0). `Physical` is constant per connection (the bridge numbers its connections 0, 1, 2, … mod 256): merge sources are IP + Physical (node contract §4), so two app windows are two merge sources instead of one flickering source. After the set, if flag bit 0 is set, it sends **ArtSync as a broadcast** (Art-Net 4 forbids unicast ArtSync) on every interface that carried ArtDmx of the set. Nodes ignore ArtSync while they merge streams of **different IPs** on a port (two connections of one bridge are one IP with two Physicals and do not block it) or when it does not come from the IP of the last ArtDmx (node contract §4). Malformed messages (bad magic, unknown kind, truncated entries, `length` 0 or > 512) are dropped as a whole with a `log` warning; bytes after the last entry are ignored.
 
 - **Refresh:** if the app sends no new data for a route for 1 s, the bridge re-sends that route's last data (followed by ArtSync when the set that carried it asked for one), every 1 s while idle, so the node's failsafe (~4 s) does not trigger while Pixelmapper is open but idle. Closing the connection drops its routes and stops the re-sending.
 - **Rate:** the app sends one frame set per rendered frame (its render rate, up to ~60 sets/s) and SHOULD drop sets while the WebSocket's send buffer is backed up (never queue). The bridge sends ArtDmx to a node at most at the node's `RefreshRate` (44 Hz when it reports 0), coalescing faster sets per route (latest data wins), and at most one ArtSync per sent set. Binary messages before the handshake completed are ignored.
@@ -498,7 +514,7 @@ App-side codes (never sent by the bridge, used by the TypeScript client): `notCo
 | ArtPoll | broadcast to every interface's subnet broadcast **and** `2.255.255.255` when an interface is in 2.0.0.0/8 (never 255.255.255.255), every 2.5–3 s, `Flags` bit 1 set; replies arrive unicast with up to 1 s random delay (node contract §3) |
 | Node gone | no reply for 3 poll cycles |
 | RDM | 500 ms timeout, 2 retries, ≤ min(4, FifoAvail) in flight per port |
-| TOD | one ArtTodRequest per port when a node appears/reappears (subscribes to unsolicited ArtTodData) |
+| TOD | one ArtTodRequest per RDM output port when a node or port appears/reappears and after a node restart (subscribes to unsolicited ArtTodData); after `AtcFlush` an unchanged TOD is re-requested after ~3 s |
 | ArtAddress / ArtIpProg / ArtInput | answer within 1 s, one resend |
 | DMX refresh | last data re-sent after 1 s without new data, then every 1 s |
 | DMX rate | ArtDmx per route at most at the node's `RefreshRate` (44 Hz for 0 and for `ip` routes); faster sets coalesce, latest data wins |
@@ -509,3 +525,19 @@ App-side codes (never sent by the bridge, used by the TypeScript client): `notCo
 - DMX input (node input ports → Pixelmapper) as binary kind `0x02`.
 - Authentication beyond `Origin` (token in the URL?) for multi-user machines.
 - The hosted app origins for the default allow-list (`HOSTED_ORIGINS` in `crates/pmnet-bridge/src/server/origin.rs`; until then `--allow-origin`).
+
+## 11. Implementation notes (`pmnet-bridge` 0.1 on `pixelmapper-net`)
+
+Where the bridge reports less than this contract describes, because `pixelmapper-net` does not keep the data yet:
+
+- `NodeState.ubeaVersion` is 0; `NetInterface.mac` is `null`.
+- `PortState.failsafe` is known only for the ports of the lowest BindIndex (the library keeps Status3 of that reply);
+  the other ports report `null`.
+- A port carries one Port-Address: the field of its current direction gets it, the other one Net/Sub-Net with
+  universe 0 (exact for the Pixelmapper Node, node contract §3).
+- `lastSeen` is the time the bridge last processed an ArtPollReply that changed the node (with the NodeReport counter
+  that is about every poll cycle).
+- ArtSync goes to every broadcast target of the bridge (each interface's directed broadcast and 2.255.255.255, or the
+  `--broadcast` targets), not only to the interfaces that carried ArtDmx of the set.
+- `RdmStatusMessage.text` is filled for the manufacturer status ids of `pids.toml`; E1.20 Table B-2 texts are not
+  available yet (`null`).

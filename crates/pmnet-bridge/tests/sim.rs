@@ -306,6 +306,36 @@ async fn discovery_rdm_configuration_dmx_and_tods() {
     assert_eq!(r["result"]["node"]["shortName"], "Bridge Test");
     assert_eq!(sim.snapshot().short_name, "Bridge Test");
 
+    // Per-port settings: the failsafe mode of port 1 (BindIndex 1), RDM off on port 4, whose TOD then is a TodNak.
+    let r = c
+        .ok(
+            "artAddress",
+            json!({"nodeId": node_id, "ports": [
+                {"port": port(1), "failsafe": "zero"},
+                {"port": port(4), "rdm": false}
+            ]}),
+        )
+        .await;
+    assert_eq!(r["node"]["ports"][3]["output"]["rdm"], false);
+    let snap = sim.snapshot();
+    assert_eq!((snap.ports[0].failsafe, snap.ports[1].failsafe), (1, 0));
+    assert!(!snap.ports[3].rdm_enabled);
+    let nodes = c.ok("nodes", json!({})).await;
+    let ports = &nodes["nodes"][0]["ports"];
+    assert_eq!(ports[0]["failsafe"], "zero");
+    assert_eq!(
+        ports[1]["failsafe"],
+        Value::Null,
+        "pixelmapper-net keeps Status3 of the lowest BindIndex only"
+    );
+    c.ok("todRequest", json!({"nodeId": node_id, "port": port(4)}))
+        .await;
+    let tod = tod_event(&mut c, 4).await;
+    assert_eq!(
+        (tod["available"].clone(), tod["uids"].clone()),
+        (json!(false), json!([]))
+    );
+
     // ipProg with only nodeId reads (ArtIpProg Command 0) and changes nothing.
     let before = sim.snapshot();
     let r = c.ok("ipProg", json!({"nodeId": node_id})).await;

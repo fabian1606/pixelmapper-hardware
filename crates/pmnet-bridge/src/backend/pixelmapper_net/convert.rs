@@ -93,30 +93,16 @@ pub(super) fn node_ip(n: &ns::NodeState) -> Ipv4Addr {
 
 /// Merged library node state → contract `NodeState`.
 ///
-/// The reply counter of an Art-Net NodeReport (`#xxxx [yyyy] text`, `yyyy` counts the node's ArtPollReplies from
-/// 1, wrapping after 9999).
-pub(super) fn report_counter(node_report: &str) -> Option<u16> {
-    let rest = node_report.split_once('[')?.1;
-    rest.split_once(']')?.0.trim().parse().ok()
-}
-
-/// Whether the NodeReport counter going from `old` to `new` means the node restarted (it counts from 1 again).
-/// A wrap after 9999 is not a restart; other controllers' polls may advance the counter by a few hundred between
-/// two replies the bridge sees.
-pub(super) fn restarted(old: Option<u16>, new: Option<u16>) -> bool {
-    const SLACK: u16 = 500;
-    match (old, new) {
-        (Some(old), Some(new)) => new < old && !(old > 9999 - SLACK && new < SLACK),
-        _ => false,
-    }
-}
-
-/// Gaps of the library model: `ubeaVersion` is not kept (reported as 0); ports carry one Port-Address (the one of
-/// their current direction), reported as both `outputPortAddress` and `inputPortAddress` (the Pixelmapper Node
-/// keeps one address per port); `lastSeen` is supplied by the caller.
+/// Gaps of the library model: `ubeaVersion` is not kept (reported as 0). A port carries one Port-Address, the one
+/// of its current direction; the field of the other direction gets Net and Sub-Net with universe 0, as the
+/// Pixelmapper Node reports it (node contract §3). Status3 is kept only from the reply with the lowest BindIndex,
+/// so a port's `failsafe` is known only for that BindIndex (`None` for the others). `lastSeen` is supplied by the
+/// caller.
 pub(super) fn node_state(n: &ns::NodeState, interfaces: &[Interface], last_seen: u64) -> NodeState {
     let ip = node_ip(n);
     let switchable = n.status3.direction_switchable;
+    let root = n.ports.iter().map(|p| p.bind_index).min();
+    let root_failsafe = failsafe(n.status3.failsafe);
     NodeState {
         node_id: node_id(&n.id),
         uid: n.uid.map(uid_to_bridge),
@@ -138,7 +124,14 @@ pub(super) fn node_state(n: &ns::NodeState, interfaces: &[Interface], last_seen:
             status2: n.status2.raw,
             status3: n.status3.raw,
         },
-        ports: n.ports.iter().map(|p| port_state(p, switchable)).collect(),
+        ports: n
+            .ports
+            .iter()
+            .map(|p| {
+                let failsafe = (Some(p.bind_index) == root).then_some(root_failsafe);
+                port_state(p, switchable, failsafe)
+            })
+            .collect(),
         last_seen,
     }
 }
@@ -183,12 +176,6 @@ fn node_status(n: &ns::NodeState) -> NodeStatus {
         squawking: s2.squawking,
         output_style_switchable: s2.output_style_switchable,
         rdm_switchable: s2.rdm_switchable,
-        failsafe: match s3.failsafe {
-            ns::Failsafe::Hold => Failsafe::Hold,
-            ns::Failsafe::Zero => Failsafe::Zero,
-            ns::Failsafe::Full => Failsafe::Full,
-            ns::Failsafe::Scene => Failsafe::Scene,
-        },
         failsafe_programmable: s3.failsafe_programmable,
         llrp: s3.llrp,
         port_direction_switchable: s3.direction_switchable,
@@ -198,8 +185,22 @@ fn node_status(n: &ns::NodeState) -> NodeStatus {
     }
 }
 
+/// Status3 failsafe mode.
+fn failsafe(f: ns::Failsafe) -> Failsafe {
+    match f {
+        ns::Failsafe::Hold => Failsafe::Hold,
+        ns::Failsafe::Zero => Failsafe::Zero,
+        ns::Failsafe::Full => Failsafe::Full,
+        ns::Failsafe::Scene => Failsafe::Scene,
+    }
+}
+
 /// One port; the flags are decoded from the raw GoodInput/GoodOutputA/GoodOutputB bytes (contract §4).
-fn port_state(p: &ns::PortState, direction_switchable: bool) -> PortState {
+fn port_state(
+    p: &ns::PortState,
+    direction_switchable: bool,
+    failsafe: Option<Failsafe>,
+) -> PortState {
     let (gi, ga, gb) = (p.good_input, p.good_output_a, p.good_output_b);
     let direction = if p.can_output && p.can_input && !direction_switchable {
         // Fixed ports with both bits do both; with Status3 bit 3 the bits show the current direction.
@@ -210,6 +211,14 @@ fn port_state(p: &ns::PortState, direction_switchable: bool) -> PortState {
             ns::PortDirection::Input => PortDirection::Input,
             ns::PortDirection::None => PortDirection::None,
         }
+    };
+    // Only the field of the current direction carries the universe (node contract §3); fixed ports doing both
+    // directions report one address for both.
+    let pa = p.port_address.raw();
+    let (output_port_address, input_port_address) = match direction {
+        PortDirection::Output => (pa, pa & 0x7FF0),
+        PortDirection::Input => (pa & 0x7FF0, pa),
+        PortDirection::Both | PortDirection::None => (pa, pa),
     };
     PortState {
         port: PortRef::new(p.bind_index, p.index),
@@ -226,8 +235,9 @@ fn port_state(p: &ns::PortState, direction_switchable: bool) -> PortState {
         can_output: p.can_output,
         can_input: p.can_input,
         direction,
-        output_port_address: p.port_address.raw(),
-        input_port_address: p.port_address.raw(),
+        output_port_address,
+        input_port_address,
+        failsafe,
         output: PortOutputState {
             data: ga & 0x80 != 0,
             merging: ga & 0x08 != 0,
@@ -410,8 +420,16 @@ mod tests {
         );
         assert!(n.status.rdm_capable && n.status.port_address_15_bit);
         assert!(n.status.dhcp_capable && n.status.dhcp_configured);
-        assert_eq!(n.status.failsafe, Failsafe::Zero);
         assert!(n.status.failsafe_programmable && n.status.port_direction_switchable);
+        assert_eq!(
+            n.ports[0].failsafe,
+            Some(Failsafe::Zero),
+            "root reply's Status3"
+        );
+        assert_eq!(
+            n.ports[1].failsafe, None,
+            "Status3 of other pages is not kept"
+        );
         assert_eq!(n.raw.status3, 0x68);
         assert_eq!(n.last_seen, 42);
         assert_eq!(n.ports.len(), 4);
@@ -419,7 +437,7 @@ mod tests {
         assert_eq!(p.port, PortRef::new(3, 0));
         assert_eq!(p.protocol, PortProtocol::Dmx512);
         assert_eq!(p.direction, PortDirection::Output);
-        assert_eq!((p.output_port_address, p.input_port_address), (3, 3));
+        assert_eq!((p.output_port_address, p.input_port_address), (3, 0));
         assert!(p.output.data && p.output.merging && !p.output.short_circuit);
         assert_eq!(p.output.merge, MergeMode::Ltp);
         assert!(!p.output.rdm, "GoodOutputB bit 7 set = RDM off");
@@ -466,16 +484,6 @@ mod tests {
             Some("en0")
         );
         assert_eq!(interface_for(Ipv4Addr::new(10, 0, 0, 1), &ifs), None);
-    }
-
-    #[test]
-    fn node_report_counter() {
-        assert_eq!(report_counter("#0001 [0012] Power On Tests successful"), Some(12));
-        assert_eq!(report_counter("no counter"), None);
-        assert!(restarted(Some(120), Some(1)), "counts from 1 after a restart");
-        assert!(!restarted(Some(120), Some(121)));
-        assert!(!restarted(Some(9998), Some(3)), "wrap after 9999");
-        assert!(!restarted(None, Some(1)));
     }
 
     #[test]

@@ -68,7 +68,7 @@ pub enum PortAddressAuthority {
     Network,
 }
 
-/// Failsafe mode (Status3 bits 7–6, ArtAddress AcFail*).
+/// Failsafe mode of a port (Status3 bits 7–6 of the port's ArtPollReply, ArtAddress AcFail* to its BindIndex).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[allow(missing_docs)]
@@ -113,7 +113,7 @@ pub struct NodeStatus {
     pub squawking: bool,
     pub output_style_switchable: bool,
     pub rdm_switchable: bool,
-    pub failsafe: Failsafe,
+    /// Status3 bit 5 of the root reply (the mode itself is per port: [`PortState::failsafe`]).
     pub failsafe_programmable: bool,
     pub llrp: bool,
     pub port_direction_switchable: bool,
@@ -218,6 +218,8 @@ pub struct PortState {
     pub output_port_address: u16,
     /// NetSwitch, SubSwitch, SwIn[i].
     pub input_port_address: u16,
+    /// Failsafe mode (Status3 bits 7–6 of this port's reply); `None` when not known.
+    pub failsafe: Option<Failsafe>,
     pub output: PortOutputState,
     pub input: PortInputState,
 }

@@ -15,14 +15,15 @@
 //! | `NetBackend` | pixelmapper-net | Notes |
 //! |---|---|---|
 //! | `status` | `controller::interfaces()` (re-read every 5 s), `Controller::bind` / `local_addr` | bind failure → `udp.bound = false` + `udp.error`, retried every 5 s; `bridgeStatus` on change |
-//! | `snapshot`, `subscribe` | `Event::NodeUpdated` / `NodeGone` / `TodChanged` → own table; `Controller::nodes()` / `tod()` after (re)attach and on lag | node id `UID` / `mac:` / `ip:`; ports `{bind, index}` ↔ Port-Address via the node's ports; one ArtTodRequest per RDM output port on appearance (`auto_tod_request`) |
+//! | `snapshot`, `subscribe` | `Event::NodeUpdated` / `NodeGone` / `TodChanged` → own table; `Controller::nodes()` / `tod()` after (re)attach and on lag | node id `UID` / `mac:` / `ip:`; ports `{bind, index}` ↔ Port-Address via the node's ports; `PortState.failsafe` from the root reply's Status3 (other BindIndex pages: `null`) |
+//! | TOD subscription | `tod_request()` per port, `state::report_counter*` | the adapter sends one ArtTodRequest per RDM output port when a node/port appears, a Port-Address changes, RDM is switched on or the node restarts (`auto_tod_request` off: the library covers only the ports of the first reply page) |
 //! | `poll_now`, `set_poll_targets` | `poll_now()` (spawned), `set_poll_targets()` | targets survive a later bind |
 //! | `tod_request` | `tod_refresh()` (spawned) | the library reports only *changed* TODs; an unchanged answer is emitted by the adapter |
 //! | `tod_control` | `tod_control(ATC_*)` | after a flush that leaves the TOD unchanged, the TOD is re-requested and emitted after `tod_settle` |
 //! | `rdm_get`, `rdm_set` | `rdm(&id, pa, RdmRequest { options.sub_device })` | value codec in `values` (contract §4 table, PARAMETER_DESCRIPTION cache, `pids.toml`) |
 //! | `rdm_describe` | `rdm()` + `rdm::pd` codecs | per-PID `errors`; personalities/parameter descriptions cached per (`uid`, `subDevice`, `softwareVersionId`) |
-//! | `art_address` | `art_address(&id, ArtAddress)` per planned packet | 1 s + one resend each; `node` event before returning |
-//! | `ip_prog` | `ip_prog_change(&id, IpProgChange)` (`Command = 0` for a read) | 1 s + one resend |
+//! | `art_address` | `art_address(&id, ArtAddress)` per planned packet | 1 s + one resend each; per-port failsafe to the port's BindIndex; `node` event before returning |
+//! | `ip_prog` | `ip_prog_query(&id)` (only `nodeId`: Command = 0), else `ip_prog_change(&id, IpProgChange)` | 1 s + one resend |
 //! | `art_input` | `art_input(&id, bind, disabled)` | 1 s + one resend; `node` event before returning |
 //! | `image_info`, `flash_*` | `TubeImage::parse_hex`, `flash_tube_with()` → `FlashJob` | checks before the job; progress ≤ 10/s |
 //! | `send_dmx` | `try_send_dmx(dest, pa, data, physical)`, `try_send_sync()` | non-blocking; frames for unknown nodes dropped |
@@ -285,10 +286,13 @@ impl Inner {
                     old.address = n.address;
                     // A restart (other firmware, or the NodeReport reply counter starting over) forgets the
                     // node's TOD subscribers.
-                    let restarted = convert::restarted(
-                        convert::report_counter(&old.state.node_report),
-                        convert::report_counter(&state.node_report),
-                    );
+                    let restarted = match (
+                        net::state::report_counter(&old.state.node_report),
+                        net::state::report_counter(&state.node_report),
+                    ) {
+                        (Some(prev), Some(now)) => net::state::report_counter_restarted(prev, now),
+                        _ => false,
+                    };
                     if old.state.firmware != state.firmware || restarted {
                         old.tod_requested.clear();
                     }
@@ -418,13 +422,14 @@ impl Inner {
                 let mut sorted: Vec<RdmUid> = uids.iter().map(|u| uid_to_bridge(*u)).collect();
                 sorted.sort();
                 let key = (node_id(&n.id), PortRef::new(p.bind_index, p.index));
-                let known = self
-                    .net()
-                    .tods
-                    .get(&key)
-                    .is_some_and(|t| t.available && t.uids == sorted);
+                let stored = self.net().tods.get(&key).cloned();
+                // The library keeps a TodNak as an empty list: an empty TOD of a port without RDM was a TodNak
+                // (node contract §6.1), and a stored TodNak stays.
+                let nak = uids.is_empty()
+                    && (!p.rdm_enabled || stored.as_ref().is_some_and(|t| !t.available));
+                let known = stored.is_some_and(|t| t.available != nak && t.uids == sorted);
                 if !known {
-                    self.apply_tod(&n.id, p.port_address, &uids, false);
+                    self.apply_tod(&n.id, p.port_address, &uids, nak);
                 }
             }
         }
@@ -604,7 +609,7 @@ fn ports_for(node: &NodeState, pa: PortAddress) -> Vec<PortRef> {
     }
     node.ports
         .iter()
-        .filter(|p| p.output_port_address == pa.raw())
+        .filter(|p| p.input_port_address == pa.raw() || p.output_port_address == pa.raw())
         .map(|p| p.port)
         .collect()
 }
@@ -836,23 +841,62 @@ impl PixelmapperNetBackend {
     }
 
     /// Sends a configuration packet and waits for the node's reply: 1 s, one resend, then `timeout`.
-    async fn send_with_resend<F, Fut>(
+    ///
+    /// With `settle`, the answer is the library's node state once it changed in more than the NodeReport counter
+    /// (at most one more reply timeout): the library takes *any* ArtPollReply from the node's address as the
+    /// answer, so a reply to a poll that crossed the packet would report the state from before it.
+    async fn send_config<F, Fut>(
         &self,
+        ctrl: &Controller,
+        lib_id: net::NodeId,
         node: &NodeId,
+        settle: bool,
         mut send: F,
     ) -> Result<net::NodeState, BackendError>
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = net::Result<Option<net::NodeState>>>,
     {
+        let before = ctrl.node(&lib_id);
+        let mut events = ctrl.subscribe();
+        let mut answer = None;
         for _ in 0..2 {
             match send().await {
-                Ok(Some(state)) => return Ok(state),
+                Ok(Some(state)) => {
+                    answer = Some(state);
+                    break;
+                }
                 Ok(None) => continue,
                 Err(e) => return Err(backend_error(e, node, None)),
             }
         }
-        Err(BackendError::Timeout)
+        let answer = answer.ok_or(BackendError::Timeout)?;
+        let latest = ctrl.node(&lib_id).unwrap_or(answer);
+        let Some(before) = before.filter(|_| settle) else {
+            return Ok(latest);
+        };
+        let changed = |s: &net::NodeState| {
+            let mut b = before.clone();
+            b.node_report.clone_from(&s.node_report);
+            b != *s
+        };
+        if changed(&latest) {
+            return Ok(latest);
+        }
+        let wait = self.inner.cfg.controller.reply_timeout;
+        let _ = tokio::time::timeout(wait, async {
+            loop {
+                match events.recv().await {
+                    Ok(net::Event::NodeUpdated { node }) if node.id == lib_id && changed(&node) => {
+                        return
+                    }
+                    Ok(_) | Err(RecvError::Lagged(_)) => {}
+                    Err(RecvError::Closed) => return,
+                }
+            }
+        })
+        .await;
+        Ok(ctrl.node(&lib_id).unwrap_or(latest))
     }
 }
 
@@ -982,19 +1026,21 @@ impl NetBackend for PixelmapperNetBackend {
             .get(&req.node_id)
             .map(|e| e.state.clone())
             .ok_or_else(|| BackendError::UnknownNode(req.node_id.clone()))?;
+        let packets = address::plan(&req, &node);
+        let count = packets.len();
         let mut last = None;
-        for packet in address::plan(&req, &node) {
+        for (i, packet) in packets.into_iter().enumerate() {
+            let settle = i + 1 == count;
             let state = self
-                .send_with_resend(&req.node_id, || ctrl.art_address(&lib_id, packet.clone()))
+                .send_config(&ctrl, lib_id, &req.node_id, settle, || {
+                    ctrl.art_address(&lib_id, packet.clone())
+                })
                 .await?;
             last = Some(state);
         }
-        // Nothing to change: the current state. Else the library's latest state (at least as new as the reply;
-        // the event pump may have seen newer replies meanwhile).
+        // Nothing to change: the current state.
         Ok(match last {
-            Some(state) => self
-                .inner
-                .apply_node(&ctrl.node(&lib_id).unwrap_or(state)),
+            Some(state) => self.inner.apply_node(&state),
             None => node,
         })
     }
@@ -1027,10 +1073,13 @@ impl NetBackend for PixelmapperNetBackend {
         };
         let mut result = Err(BackendError::Timeout);
         for _ in 0..2 {
-            result = ctrl
-                .ip_prog_change(&lib_id, &change)
-                .await
-                .map_err(|e| backend_error(e, &req.node_id, None));
+            // Only `nodeId`: a read (ArtIpProg Command = 0).
+            let reply = if change.is_query() {
+                ctrl.ip_prog_query(&lib_id).await
+            } else {
+                ctrl.ip_prog_change(&lib_id, &change).await
+            };
+            result = reply.map_err(|e| backend_error(e, &req.node_id, None));
             if result != Err(BackendError::Timeout) {
                 break;
             }
@@ -1052,11 +1101,11 @@ impl NetBackend for PixelmapperNetBackend {
     ) -> Result<NodeState, BackendError> {
         let (ctrl, lib_id) = self.inner.resolve(&node)?;
         let state = self
-            .send_with_resend(&node, || ctrl.art_input(&lib_id, bind, &disabled))
+            .send_config(&ctrl, lib_id, &node, true, || {
+                ctrl.art_input(&lib_id, bind, &disabled)
+            })
             .await?;
-        Ok(self
-            .inner
-            .apply_node(&ctrl.node(&lib_id).unwrap_or(state)))
+        Ok(self.inner.apply_node(&state))
     }
 
     fn image_info(&self, hex: &str) -> Result<FirmwareImageInfo, BackendError> {
