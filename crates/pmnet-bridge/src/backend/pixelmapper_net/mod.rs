@@ -14,20 +14,20 @@
 //!
 //! | `NetBackend` | pixelmapper-net | Notes |
 //! |---|---|---|
-//! | `status` | `controller::interfaces()` (re-read every 5 s), `Controller::bind` / `local_addr` | bind failure → `udp.bound = false` + `udp.error`, retried every 5 s; `bridgeStatus` on change |
-//! | `snapshot`, `subscribe` | `Event::NodeUpdated` / `NodeGone` / `TodChanged` → own table; `Controller::nodes()` / `tod()` after (re)attach and on lag | node id `UID` / `mac:` / `ip:`; ports `{bind, index}` ↔ Port-Address via the node's ports; `PortState.failsafe` from the root reply's Status3 (other BindIndex pages: `null`) |
-//! | TOD subscription | `tod_request()` per port, `state::report_counter*` | the adapter sends one ArtTodRequest per RDM output port when a node/port appears, a Port-Address changes, RDM is switched on or the node restarts (`auto_tod_request` off: the library covers only the ports of the first reply page) |
+//! | `status` | `controller::interfaces()` / `interface_macs()` (re-read every 5 s), `Controller::bind` / `local_addr` | bind failure → `udp.bound = false` + `udp.error`, retried every 5 s; `bridgeStatus` on change; changed interfaces → `set_broadcast_targets(&[])` (default broadcasts recomputed unless `--broadcast` was given) |
+//! | `snapshot`, `subscribe` | `Event::NodeUpdated` / `NodeGone` → own table, `subscribe_tods()` → TODs; `Controller::nodes()` / `tod()` after (re)attach and on lag | node id `UID` / `mac:` / `ip:`; ports `{bind, index}` ↔ Port-Address via the node's ports; `PortState.failsafe` and the Port-Address fields from each port's own reply (`status3`, `sw_out`, `sw_in`) |
+//! | TOD subscription | `ControllerConfig::auto_tod_request` (forced on), `tod_request()` | the library sends one ArtTodRequest per RDM output port of every page when a node appears, a new Port-Address shows up or the node restarts; the adapter adds one when a known port becomes an RDM output port again (RDM switched on, direction to output) or changes its Port-Address, which the library requests only once per node lifetime |
 //! | `poll_now`, `set_poll_targets` | `poll_now()` (spawned), `set_poll_targets()` | targets survive a later bind |
-//! | `tod_request` | `tod_refresh()` (spawned) | the library reports only *changed* TODs; an unchanged answer is emitted by the adapter |
-//! | `tod_control` | `tod_control(ATC_*)` | after a flush that leaves the TOD unchanged, the TOD is re-requested and emitted after `tod_settle` |
-//! | `rdm_get`, `rdm_set` | `rdm(&id, pa, RdmRequest { options.sub_device })` | value codec in `values` (contract §4 table, PARAMETER_DESCRIPTION cache, `pids.toml`) |
+//! | `tod_request` | `tod_request()` | every complete answer arrives through `subscribe_tods()` (also an unchanged TOD or a TodNak) → `tod` |
+//! | `tod_control` | `tod_control(ATC_*)` | after a flush, the TOD is requested once more when the node sent none within `tod_settle` |
+//! | `rdm_get`, `rdm_set` | `rdm(&id, pa, RdmRequest { options.sub_device })` | value codec in `values` (contract §4 table, PARAMETER_DESCRIPTION cache, `pids::PID_META`) |
 //! | `rdm_describe` | `rdm()` + `rdm::pd` codecs | per-PID `errors`; personalities/parameter descriptions cached per (`uid`, `subDevice`, `softwareVersionId`) |
-//! | `art_address` | `art_address(&id, ArtAddress)` per planned packet | 1 s + one resend each; per-port failsafe to the port's BindIndex; `node` event before returning |
+//! | `art_address` | `art_address(&id, ArtAddress)` per planned packet | answer = the ArtPollReply of the addressed BindIndex; 1 s + one resend each; per-port failsafe to the port's BindIndex; `node` event before returning |
 //! | `ip_prog` | `ip_prog_query(&id)` (only `nodeId`: Command = 0), else `ip_prog_change(&id, IpProgChange)` | 1 s + one resend |
-//! | `art_input` | `art_input(&id, bind, disabled)` | 1 s + one resend; `node` event before returning |
-//! | `image_info`, `flash_*` | `TubeImage::parse_hex`, `flash_tube_with()` → `FlashJob` | checks before the job; progress ≤ 10/s |
+//! | `art_input` | `art_input(&id, bind, disabled)` | answer = the ArtPollReply of that BindIndex; 1 s + one resend; `node` event before returning |
+//! | `image_info`, `flash_*` | `TubeImage::parse_hex`, `flash_tube_with()` → `FlashJob` | checks before the job; progress ≤ 10/s; error code and `inBootloader` from `Error::flash_error()` |
 //! | `send_dmx` | `try_send_dmx(dest, pa, data, physical)`, `try_send_sync()` | non-blocking; frames for unknown nodes dropped |
-//! | events | `Event::Diag` → `diag`, `QueuedMessage` → `rdmQueued`, `FlashProgress` → `flashProgress` | bind errors and lag → `log` |
+//! | events | `Event::Diag` → `diag`, `QueuedMessage` → `rdmQueued` (status texts from `rdm::status`), `FlashProgress` → `flashProgress` | bind errors and lag → `log` |
 
 mod address;
 pub(crate) mod convert;
@@ -42,7 +42,7 @@ use super::{
 use crate::protocol::{
     ArtAddressArgs, BridgeStatus, Diag, Event, FirmwareImageInfo, FlashJob, FlashPhase, HexData,
     IpProgArgs, IpProgReply, LogEntry, LogLevel, NodeId, NodeState, PortDirection, PortRef,
-    RdmDeviceDescription, RdmQueued, RdmUid, Tod, TodAction, UdpState,
+    PortState, RdmDeviceDescription, RdmQueued, RdmUid, Tod, TodAction, UdpState,
 };
 use convert::{backend_error, node_id, uid_to_bridge, uid_to_net};
 use pixelmapper_net as net;
@@ -75,10 +75,8 @@ pub struct BackendConfig {
     pub bind_retry: Duration,
     /// How often the local interfaces are re-read (`bridgeStatus` on change).
     pub interface_poll: Duration,
-    /// After `todControl flush`: how long to wait for the node's new TOD before re-requesting it.
+    /// After `todControl flush`: how long to wait for the node's new TOD before requesting it.
     pub tod_settle: Duration,
-    /// How long a TOD re-request waits for ArtTodData.
-    pub tod_timeout: Duration,
 }
 
 impl BackendConfig {
@@ -90,7 +88,6 @@ impl BackendConfig {
             bind_retry: Duration::from_secs(5),
             interface_poll: Duration::from_secs(5),
             tod_settle: Duration::from_secs(3),
-            tod_timeout: Duration::from_secs(2),
         }
     }
 
@@ -127,19 +124,33 @@ struct NodeEntry {
     lib_id: net::NodeId,
     /// Where the node's replies come from (ArtDmx destination).
     address: SocketAddr,
-    /// Ports (with their Port-Address) an ArtTodRequest was sent for since the node appeared or rebooted into
-    /// other firmware: the node sends unsolicited ArtTodData only to IPs that requested a TOD (node contract
-    /// §6.1).
-    tod_requested: BTreeSet<(PortRef, u16)>,
 }
 
-/// RDM-capable output ports of a node with their Port-Address (the ports to subscribe to with ArtTodRequest).
-fn tod_ports(node: &NodeState) -> BTreeSet<(PortRef, u16)> {
-    node.ports
+/// An output port with RDM switched on (a port to subscribe to with ArtTodRequest).
+fn rdm_output(p: &PortState) -> bool {
+    p.direction != PortDirection::Input && p.can_output && p.output.rdm
+}
+
+/// Port-Addresses to request a TOD for after a node update: ports of a known node that became RDM output ports
+/// (RDM switched on, direction switched to output) or changed their output Port-Address. The node sends
+/// unsolicited ArtTodData only on a TOD change (node contract §6.1), and the library's automatic ArtTodRequest asks
+/// for every Port-Address only once until the node restarts, so without this the app would not learn the TOD of
+/// such a port (contract §5 `node`). New nodes, ports and Port-Addresses alone are the library's (a changed
+/// Port-Address the library has not seen yet is requested by both: one extra `tod`).
+fn tod_resubscriptions(old: &NodeState, new: &NodeState) -> Vec<PortAddress> {
+    let pas: BTreeSet<u16> = new
+        .ports
         .iter()
-        .filter(|p| p.direction != PortDirection::Input && p.can_output && p.output.rdm)
-        .map(|p| (p.port, p.output_port_address))
-        .collect()
+        .filter(|p| rdm_output(p))
+        .filter(|p| {
+            old.ports
+                .iter()
+                .find(|o| o.port == p.port)
+                .is_some_and(|o| !rdm_output(o) || o.output_port_address != p.output_port_address)
+        })
+        .map(|p| p.output_port_address)
+        .collect();
+    pas.into_iter().filter_map(PortAddress::new).collect()
 }
 
 /// Node table, TODs and bridge status; one lock, never held across `.await`.
@@ -270,43 +281,22 @@ impl Inner {
     // ── Node table ────────────────────────────────────────────────────────────────────────────────────────────
 
     /// Stores a node state from the library and emits `node` (the library reports only changed states; the
-    /// server filters changes of `lastSeen` and the NodeReport reply counter, which still serves the restart
-    /// detection below). Returns the stored contract state.
+    /// server filters changes of `lastSeen` and the NodeReport reply counter). Returns the stored contract state.
     ///
-    /// Also subscribes to the TOD of every RDM output port that was not requested yet (a node appearing or
-    /// reappearing, BindIndex pages arriving one by one, a changed Port-Address, RDM switched on, a reboot into
-    /// other firmware): one ArtTodRequest per port.
+    /// The library subscribes to the TODs of new nodes, new Port-Addresses and restarted nodes itself; ports of a
+    /// known node that became RDM output ports or changed their Port-Address are requested here
+    /// ([`tod_resubscriptions`]).
     fn apply_node(&self, n: &net::NodeState) -> NodeState {
         let (state, requests) = {
             let mut st = self.net();
             let state = convert::node_state(n, &st.all_interfaces, now_ms());
-            let wanted = tod_ports(&state);
-            match st.nodes.get_mut(&state.node_id) {
+            let requests = match st.nodes.get_mut(&state.node_id) {
                 Some(old) => {
+                    let requests = tod_resubscriptions(&old.state, &state);
                     old.lib_id = n.id;
                     old.address = n.address;
-                    // A restart (other firmware, or the NodeReport reply counter starting over) forgets the
-                    // node's TOD subscribers.
-                    let restarted = match (
-                        net::state::report_counter(&old.state.node_report),
-                        net::state::report_counter(&state.node_report),
-                    ) {
-                        (Some(prev), Some(now)) => net::state::report_counter_restarted(prev, now),
-                        _ => false,
-                    };
-                    if old.state.firmware != state.firmware || restarted {
-                        old.tod_requested.clear();
-                    }
-                    let requests: Vec<(PortRef, u16)> =
-                        wanted.difference(&old.tod_requested).copied().collect();
-                    old.tod_requested.extend(requests.iter().copied());
-                    // Every update is forwarded; the server drops those that only change volatile fields
-                    // (`NodeState::same_state`) after taking them over into its mirror.
                     old.state = state.clone();
-                    self.emit(Event::Node {
-                        node: state.clone(),
-                    });
-                    (state, requests)
+                    requests
                 }
                 None => {
                     st.nodes.insert(
@@ -315,35 +305,34 @@ impl Inner {
                             state: state.clone(),
                             lib_id: n.id,
                             address: n.address,
-                            tod_requested: wanted.clone(),
                         },
                     );
-                    self.emit(Event::Node {
-                        node: state.clone(),
-                    });
-                    (state, wanted.into_iter().collect())
+                    Vec::new()
                 }
-            }
+            };
+            // Every update is forwarded; the server drops those that only change volatile fields
+            // (`NodeState::same_state`) after taking them over into its mirror.
+            self.emit(Event::Node {
+                node: state.clone(),
+            });
+            (state, requests)
         };
         self.request_tods(n.id, requests);
         state
     }
 
-    /// Sends one ArtTodRequest per listed port (in the background).
-    fn request_tods(&self, lib_id: net::NodeId, ports: Vec<(PortRef, u16)>) {
-        if ports.is_empty() {
+    /// Sends one ArtTodRequest per Port-Address (in the background); the answers arrive through the TOD stream.
+    fn request_tods(&self, lib_id: net::NodeId, pas: Vec<PortAddress>) {
+        if pas.is_empty() {
             return;
         }
         let Ok(ctrl) = self.ctrl() else {
             return;
         };
         self.spawn(async move {
-            for (port, raw) in ports {
-                let Some(pa) = PortAddress::new(raw) else {
-                    continue;
-                };
+            for pa in pas {
                 if let Err(e) = ctrl.tod_request(&lib_id, pa).await {
-                    tracing::debug!("ArtTodRequest for port {port} of {lib_id} not sent: {e}");
+                    tracing::debug!("ArtTodRequest for {pa} of {lib_id} not sent: {e}");
                 }
             }
         });
@@ -363,7 +352,8 @@ impl Inner {
         });
     }
 
-    /// Stores and emits a complete TOD of every port of the node that uses Port-Address `pa`.
+    /// Stores and emits a complete TOD of every port of the node that uses Port-Address `pa` (every answer, also
+    /// an unchanged one: the app diffs).
     fn apply_tod(&self, lib_id: &net::NodeId, pa: PortAddress, uids: &[Uid], nak: bool) {
         let id = node_id(lib_id);
         let mut st = self.net();
@@ -442,13 +432,8 @@ impl Inner {
                 self.apply_node(&node);
             }
             net::Event::NodeGone { id } => self.remove_node(&id),
-            net::Event::TodChanged {
-                node,
-                port_address,
-                uids,
-                nak,
-                ..
-            } => self.apply_tod(&node, port_address, &uids, nak),
+            // Every complete TOD answer (changed or not) arrives through `subscribe_tods()` (see `pump`).
+            net::Event::TodChanged { .. } => {}
             net::Event::QueuedMessage {
                 node,
                 port_address,
@@ -531,15 +516,27 @@ impl Inner {
 
     // ── Socket and interfaces ─────────────────────────────────────────────────────────────────────────────────
 
-    /// Re-reads the interfaces; emits `bridgeStatus` when the shown list changed.
+    /// Re-reads the interfaces (with their MACs); emits `bridgeStatus` when the shown list changed.
     fn refresh_interfaces(&self) {
         let all = net::controller::interfaces();
-        let shown = convert::visible_interfaces(&all, self.bind_ip());
-        let mut st = self.net();
-        st.all_interfaces = all;
-        if st.status.interfaces != shown {
-            st.status.interfaces = shown;
-            self.emit(Event::BridgeStatus(st.status.clone()));
+        let macs = net::controller::interface_macs();
+        let shown = convert::visible_interfaces(&all, &macs, self.bind_ip());
+        let changed = {
+            let mut st = self.net();
+            let changed = st.all_interfaces != all;
+            st.all_interfaces = all;
+            if st.status.interfaces != shown {
+                st.status.interfaces = shown;
+                self.emit(Event::BridgeStatus(st.status.clone()));
+            }
+            changed
+        };
+        // An interface came, went or changed its address: ArtPoll/ArtSync go to the current interface
+        // broadcasts (the library computes them at bind time). Explicit `--broadcast` targets stay.
+        if changed && self.cfg.controller.broadcast.is_empty() {
+            if let Ok(ctrl) = self.ctrl() {
+                ctrl.set_broadcast_targets(&[]);
+            }
         }
     }
 
@@ -575,6 +572,7 @@ impl Inner {
     /// Takes a bound controller into use.
     fn attach(self: &Arc<Self>, ctrl: Controller) {
         let events = ctrl.subscribe();
+        let tods = ctrl.subscribe_tods();
         let targets = self.net().poll_targets.clone();
         ctrl.set_poll_targets(&targets);
         *self.ctrl.write().unwrap_or_else(|e| e.into_inner()) = Some(ctrl.clone());
@@ -588,7 +586,7 @@ impl Inner {
             self.emit(Event::BridgeStatus(st.status.clone()));
         }
         tracing::info!("Art-Net socket bound to {}", ctrl.local_addr());
-        self.spawn(pump(Arc::downgrade(self), events, ctrl.clone()));
+        self.spawn(pump(Arc::downgrade(self), events, tods, ctrl.clone()));
         // Replies that arrived before the subscription.
         self.sync_from(&ctrl);
     }
@@ -614,15 +612,34 @@ fn ports_for(node: &NodeState, pa: PortAddress) -> Vec<PortRef> {
 
 // ── Background tasks ──────────────────────────────────────────────────────────────────────────────────────────────
 
-/// Forwards the library's events into the adapter until the controller or the backend is gone.
-async fn pump(weak: Weak<Inner>, mut events: broadcast::Receiver<net::Event>, ctrl: Controller) {
+/// One item of the library's two streams.
+enum Pumped {
+    Event(net::Event),
+    Tod(net::TodReply),
+}
+
+/// Forwards the library's events and TOD answers into the adapter until the controller or the backend is gone.
+///
+/// Events go first: the library emits a node's `NodeUpdated` before it requests the TODs of its ports, so a TOD
+/// answer never overtakes the node state that tells which port it belongs to.
+async fn pump(
+    weak: Weak<Inner>,
+    mut events: broadcast::Receiver<net::Event>,
+    mut tods: broadcast::Receiver<net::TodReply>,
+    ctrl: Controller,
+) {
     loop {
-        let ev = events.recv().await;
+        let item = tokio::select! {
+            biased;
+            ev = events.recv() => ev.map(Pumped::Event),
+            tod = tods.recv() => tod.map(Pumped::Tod),
+        };
         let Some(inner) = weak.upgrade() else {
             return;
         };
-        match ev {
-            Ok(e) => inner.on_net_event(e),
+        match item {
+            Ok(Pumped::Event(e)) => inner.on_net_event(e),
+            Ok(Pumped::Tod(t)) => inner.apply_tod(&t.node, t.port_address, &t.uids, t.nak),
             Err(RecvError::Lagged(n)) => inner.resync(&ctrl, n),
             Err(RecvError::Closed) => return,
         }
@@ -657,43 +674,19 @@ async fn bind_loop(weak: Weak<Inner>, period: Duration) {
     }
 }
 
-/// Re-requests a TOD and emits it when the library will not (an answer equal to the TOD it already had).
-async fn refresh_tod(
-    weak: Weak<Inner>,
-    ctrl: Controller,
-    lib_id: net::NodeId,
-    pa: PortAddress,
-    timeout: Duration,
-) {
-    let before = ctrl.tod(&lib_id, pa);
-    match ctrl.tod_refresh(&lib_id, pa, timeout).await {
-        // An empty answer may be a TodNak, which the library reports itself (`nak: true`).
-        Ok(uids) if !uids.is_empty() && before.as_ref() == Some(&uids) => {
-            if let Some(inner) = weak.upgrade() {
-                inner.apply_tod(&lib_id, pa, &uids, false);
-            }
-        }
-        Ok(_) => {}
-        Err(e) => tracing::debug!("ArtTodData for {pa} of {lib_id} not received: {e}"),
-    }
-}
-
-/// After AtcFlush: waits for the node's new TOD; when the library did not report one (unchanged), re-requests it.
+/// After AtcFlush: when the node sent no ArtTodData for `pa` within `settle`, requests the TOD once more, so a
+/// flush always ends with a `tod` event (the answer arrives through the TOD stream like every other one).
 async fn settle_flush(
-    weak: Weak<Inner>,
     ctrl: Controller,
-    mut events: broadcast::Receiver<net::Event>,
+    mut tods: broadcast::Receiver<net::TodReply>,
     lib_id: net::NodeId,
     pa: PortAddress,
     settle: Duration,
-    timeout: Duration,
 ) {
-    let reported = tokio::time::timeout(settle, async {
+    let answered = tokio::time::timeout(settle, async {
         loop {
-            match events.recv().await {
-                Ok(net::Event::TodChanged {
-                    node, port_address, ..
-                }) if node == lib_id && port_address == pa => return true,
+            match tods.recv().await {
+                Ok(t) if t.node == lib_id && t.port_address == pa => return true,
                 Ok(_) | Err(RecvError::Lagged(_)) => {}
                 Err(RecvError::Closed) => return false,
             }
@@ -701,8 +694,10 @@ async fn settle_flush(
     })
     .await
     .unwrap_or(false);
-    if !reported {
-        refresh_tod(weak, ctrl, lib_id, pa, timeout).await;
+    if !answered {
+        if let Err(e) = ctrl.tod_request(&lib_id, pa).await {
+            tracing::debug!("ArtTodRequest for {pa} of {lib_id} after the flush not sent: {e}");
+        }
     }
 }
 
@@ -727,10 +722,10 @@ impl PixelmapperNetBackend {
     /// Binds the Art-Net socket and starts discovery. Never fails: when the socket cannot be bound, the backend
     /// reports `udp.bound = false` with the reason and retries every [`BackendConfig::bind_retry`].
     ///
-    /// `controller.auto_tod_request` is switched off: the library requests TODs only for the ports of a node's
-    /// first ArtPollReply page, so the adapter sends the ArtTodRequests per port itself.
+    /// `controller.auto_tod_request` is switched on: the library's automatic ArtTodRequests are the contract's
+    /// TOD subscription (the node sends unsolicited ArtTodData only to IPs that requested a TOD).
     pub async fn start(mut cfg: BackendConfig) -> Self {
-        cfg.controller.auto_tod_request = false;
+        cfg.controller.auto_tod_request = true;
         let inner = Arc::new(Inner {
             ctrl: RwLock::new(None),
             events: broadcast::channel(1024).0,
@@ -837,65 +832,29 @@ impl PixelmapperNetBackend {
             broadcast: false,
         })
     }
+}
 
-    /// Sends a configuration packet and waits for the node's reply: 1 s, one resend, then `timeout`.
-    ///
-    /// With `settle`, the answer is the library's node state once it changed in more than the NodeReport counter
-    /// (at most one more reply timeout): the library takes *any* ArtPollReply from the node's address as the
-    /// answer, so a reply to a poll that crossed the packet would report the state from before it.
-    async fn send_config<F, Fut>(
-        &self,
-        ctrl: &Controller,
-        lib_id: net::NodeId,
-        node: &NodeId,
-        settle: bool,
-        mut send: F,
-    ) -> Result<net::NodeState, BackendError>
-    where
-        F: FnMut() -> Fut,
-        Fut: Future<Output = net::Result<Option<net::NodeState>>>,
-    {
-        let before = ctrl.node(&lib_id);
-        let mut events = ctrl.subscribe();
-        let mut answer = None;
-        for _ in 0..2 {
-            match send().await {
-                Ok(Some(state)) => {
-                    answer = Some(state);
-                    break;
-                }
-                Ok(None) => continue,
-                Err(e) => return Err(backend_error(e, node, None)),
-            }
+/// Sends a configuration packet (ArtAddress, ArtInput) and waits for the node's answer: 1 s, one resend, then
+/// `timeout`. The library takes only the ArtPollReply of the addressed BindIndex as the answer; the result is the
+/// library's latest state of the node, at least as new as that answer.
+async fn send_config<F, Fut>(
+    ctrl: &Controller,
+    lib_id: net::NodeId,
+    node: &NodeId,
+    mut send: F,
+) -> Result<net::NodeState, BackendError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = net::Result<Option<net::NodeState>>>,
+{
+    for _ in 0..2 {
+        match send().await {
+            Ok(Some(answer)) => return Ok(ctrl.node(&lib_id).unwrap_or(answer)),
+            Ok(None) => continue,
+            Err(e) => return Err(backend_error(e, node, None)),
         }
-        let answer = answer.ok_or(BackendError::Timeout)?;
-        let latest = ctrl.node(&lib_id).unwrap_or(answer);
-        let Some(before) = before.filter(|_| settle) else {
-            return Ok(latest);
-        };
-        let changed = |s: &net::NodeState| {
-            let mut b = before.clone();
-            b.node_report.clone_from(&s.node_report);
-            b != *s
-        };
-        if changed(&latest) {
-            return Ok(latest);
-        }
-        let wait = self.inner.cfg.controller.reply_timeout;
-        let _ = tokio::time::timeout(wait, async {
-            loop {
-                match events.recv().await {
-                    Ok(net::Event::NodeUpdated { node }) if node.id == lib_id && changed(&node) => {
-                        return
-                    }
-                    Ok(_) | Err(RecvError::Lagged(_)) => {}
-                    Err(RecvError::Closed) => return,
-                }
-            }
-        })
-        .await;
-        Ok(ctrl.node(&lib_id).unwrap_or(latest))
     }
+    Err(BackendError::Timeout)
 }
 
 impl NetBackend for PixelmapperNetBackend {
@@ -934,15 +893,10 @@ impl NetBackend for PixelmapperNetBackend {
 
     async fn tod_request(&self, node: NodeId, port: PortRef) -> Result<(), BackendError> {
         let (ctrl, lib_id, pa) = self.inner.resolve_port(&node, port)?;
-        let timeout = self.inner.cfg.tod_timeout;
-        self.inner.spawn(refresh_tod(
-            Arc::downgrade(&self.inner),
-            ctrl,
-            lib_id,
-            pa,
-            timeout,
-        ));
-        Ok(())
+        // The answer (also an unchanged TOD or a TodNak) arrives through the TOD stream as `tod`.
+        ctrl.tod_request(&lib_id, pa)
+            .await
+            .map_err(|e| backend_error(e, &node, Some(port)))
     }
 
     async fn tod_control(
@@ -958,21 +912,14 @@ impl NetBackend for PixelmapperNetBackend {
             TodAction::IncOn => ArtTodControl::ATC_INC_ON,
             TodAction::IncOff => ArtTodControl::ATC_INC_OFF,
         };
-        let events = ctrl.subscribe();
+        let tods = ctrl.subscribe_tods();
         ctrl.tod_control(&lib_id, pa, command)
             .await
             .map_err(|e| backend_error(e, &node, Some(port)))?;
         if action == TodAction::Flush {
-            let cfg = &self.inner.cfg;
-            self.inner.spawn(settle_flush(
-                Arc::downgrade(&self.inner),
-                ctrl,
-                events,
-                lib_id,
-                pa,
-                cfg.tod_settle,
-                cfg.tod_timeout,
-            ));
+            let settle = self.inner.cfg.tod_settle;
+            self.inner
+                .spawn(settle_flush(ctrl, tods, lib_id, pa, settle));
         }
         Ok(())
     }
@@ -1024,16 +971,12 @@ impl NetBackend for PixelmapperNetBackend {
             .get(&req.node_id)
             .map(|e| e.state.clone())
             .ok_or_else(|| BackendError::UnknownNode(req.node_id.clone()))?;
-        let packets = address::plan(&req, &node);
-        let count = packets.len();
         let mut last = None;
-        for (i, packet) in packets.into_iter().enumerate() {
-            let settle = i + 1 == count;
-            let state = self
-                .send_config(&ctrl, lib_id, &req.node_id, settle, || {
-                    ctrl.art_address(&lib_id, packet.clone())
-                })
-                .await?;
+        for packet in address::plan(&req, &node) {
+            let state = send_config(&ctrl, lib_id, &req.node_id, || {
+                ctrl.art_address(&lib_id, packet.clone())
+            })
+            .await?;
             last = Some(state);
         }
         // Nothing to change: the current state.
@@ -1098,11 +1041,10 @@ impl NetBackend for PixelmapperNetBackend {
         disabled: Vec<bool>,
     ) -> Result<NodeState, BackendError> {
         let (ctrl, lib_id) = self.inner.resolve(&node)?;
-        let state = self
-            .send_config(&ctrl, lib_id, &node, true, || {
-                ctrl.art_input(&lib_id, bind, &disabled)
-            })
-            .await?;
+        let state = send_config(&ctrl, lib_id, &node, || {
+            ctrl.art_input(&lib_id, bind, &disabled)
+        })
+        .await?;
         Ok(self.inner.apply_node(&state))
     }
 

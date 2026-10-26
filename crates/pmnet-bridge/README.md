@@ -43,7 +43,7 @@ cargo run -p pmnet-bridge -- serve --port 7799 --bind 127.0.0.1 --udp-port 0 --b
   `pixelmapper_net/` (the real backend; mapping table in its module docs), `mock.rs`, `offline.rs`.
 - `src/cli.rs` – `serve` (reusable by a later `pmnet serve`).
 
-Where the real backend reports less than the contract (library gaps), see `protocol/bridge-ws.md` §11.
+Where the real backend differs from or narrows the contract, see `protocol/bridge-ws.md` §11.
 
 ## Tests
 

@@ -65,7 +65,6 @@ fn backend_config(sim: SocketAddr) -> BackendConfig {
         ..TubeFlashOptions::default()
     };
     cfg.tod_settle = Duration::from_millis(300);
-    cfg.tod_timeout = Duration::from_secs(1);
     cfg
 }
 
@@ -130,6 +129,12 @@ async fn within<T>(what: &str, fut: impl std::future::Future<Output = T>) -> T {
 /// RDM addressing arguments.
 fn rdm(node: &str, bind: u8, uid: Uid, pid: u16) -> Value {
     json!({"nodeId": node, "port": port(bind), "uid": uid.to_string(), "pid": pid})
+}
+
+/// `failsafe` of every port of a contract `NodeState`.
+fn failsafes(node: &Value) -> Vec<Value> {
+    let ports = node["ports"].as_array().expect("ports");
+    ports.iter().map(|p| p["failsafe"].clone()).collect()
 }
 
 #[tokio::test]
@@ -305,28 +310,28 @@ async fn discovery_rdm_configuration_dmx_and_tods() {
     assert_eq!(r["result"]["node"]["shortName"], "Bridge Test");
     assert_eq!(sim.snapshot().short_name, "Bridge Test");
 
-    // Per-port settings: the failsafe mode of port 1 (BindIndex 1), RDM off on port 4, whose TOD then is a TodNak.
+    // Per-port settings: the failsafe modes of ports 1 and 2 (each to its BindIndex), RDM off on port 4, whose
+    // TOD then is a TodNak.
     let r = c
         .ok(
             "artAddress",
             json!({"nodeId": node_id, "ports": [
                 {"port": port(1), "failsafe": "zero"},
+                {"port": port(2), "failsafe": "full"},
                 {"port": port(4), "rdm": false}
             ]}),
         )
         .await;
     assert_eq!(r["node"]["ports"][3]["output"]["rdm"], false);
     let snap = sim.snapshot();
-    assert_eq!((snap.ports[0].failsafe, snap.ports[1].failsafe), (1, 0));
+    let modes: Vec<u8> = snap.ports.iter().map(|p| p.failsafe).collect();
+    assert_eq!(modes, [1, 2, 0, 0]);
     assert!(!snap.ports[3].rdm_enabled);
+    // The failsafe mode of every port, from the Status3 of its own BindIndex page.
+    let expected = [json!("zero"), json!("full"), json!("hold"), json!("hold")];
+    assert_eq!(failsafes(&r["node"]), expected);
     let nodes = c.ok("nodes", json!({})).await;
-    let ports = &nodes["nodes"][0]["ports"];
-    assert_eq!(ports[0]["failsafe"], "zero");
-    assert_eq!(
-        ports[1]["failsafe"],
-        Value::Null,
-        "pixelmapper-net keeps Status3 of the lowest BindIndex only"
-    );
+    assert_eq!(failsafes(&nodes["nodes"][0]), expected);
     c.ok("todRequest", json!({"nodeId": node_id, "port": port(4)}))
         .await;
     let tod = tod_event(&mut c, 4).await;
@@ -539,6 +544,83 @@ async fn steady_node_sends_no_repeated_node_events() {
     let events = node_events_within(&mut c, Duration::from_millis(1500)).await;
     assert_eq!(events.len(), 1, "{events:?}");
     assert_eq!(events[0]["node"]["shortName"], "Panel Name");
+
+    server.shutdown().await;
+    backend.shutdown();
+    sim.shutdown();
+}
+
+/// `artAddress` for `ports` of `node`; returns the result and how long the command took.
+async fn timed_art_address(c: &mut Client, node: &str, ports: Value) -> (Value, Duration) {
+    let start = std::time::Instant::now();
+    let r = c
+        .ok("artAddress", json!({"nodeId": node, "ports": ports}))
+        .await;
+    (r, start.elapsed())
+}
+
+#[tokio::test]
+async fn art_address_answers_per_bind_index_and_rdm_on_again_brings_a_tod() {
+    let sim_addr = free_udp_addr();
+    let (backend, server) = start_bridge(sim_addr).await;
+    let mut c = Client::handshaken(server.local_addr()).await;
+    let sim = start_sim(sim_addr).await;
+    let node_id = sim.uid().to_string();
+    // Port 4 (RDM on, no devices): the TOD the bridge subscribed to on discovery.
+    let tod = tod_event(&mut c, 4).await;
+    assert_eq!(
+        (tod["available"].clone(), tod["uids"].clone()),
+        (json!(true), json!([]))
+    );
+
+    // Writes to any BindIndex answer as soon as that page's ArtPollReply arrives, also when nothing visible
+    // changes (recordFailsafeScene). Waiting for anything else costs ~1 s (the resend after the reply timeout).
+    let fast = Duration::from_millis(900);
+    let (hold, zero, full, scene) = (json!("hold"), json!("zero"), json!("full"), json!("scene"));
+    let cases = [
+        (
+            json!([{"port": port(2), "failsafe": "zero"}]),
+            [&hold, &zero, &hold, &hold],
+        ),
+        (
+            json!([{"port": port(1), "recordFailsafeScene": true}]),
+            [&hold, &zero, &hold, &hold],
+        ),
+        (
+            json!([{"port": port(1), "failsafe": "scene"}, {"port": port(2), "failsafe": "full"}]),
+            [&scene, &full, &hold, &hold],
+        ),
+        (
+            json!([{"port": port(4), "failsafe": "zero"}]),
+            [&scene, &full, &hold, &zero],
+        ),
+    ];
+    for (ports, expected) in cases {
+        let (r, took) = timed_art_address(&mut c, &node_id, ports.clone()).await;
+        assert!(took < fast, "artAddress {ports} took {took:?}");
+        let expected: Vec<Value> = expected.into_iter().cloned().collect();
+        assert_eq!(failsafes(&r["node"]), expected, "after {ports}");
+    }
+
+    // RDM off on port 4: its TOD is a TodNak.
+    let (r, _) =
+        timed_art_address(&mut c, &node_id, json!([{"port": port(4), "rdm": false}])).await;
+    assert_eq!(r["node"]["ports"][3]["output"]["rdm"], false);
+    c.ok("todRequest", json!({"nodeId": node_id, "port": port(4)}))
+        .await;
+    let tod = tod_event(&mut c, 4).await;
+    assert_eq!(tod["available"], false);
+    // RDM on again: the bridge requests the TOD (the node itself reports no change: still no devices), so the
+    // app learns that the TOD is available again.
+    let (r, _) = timed_art_address(&mut c, &node_id, json!([{"port": port(4), "rdm": true}])).await;
+    assert_eq!(r["node"]["ports"][3]["output"]["rdm"], true);
+    let tod = tokio::time::timeout(Duration::from_secs(3), tod_event(&mut c, 4))
+        .await
+        .expect("a tod of port 4 after RDM was switched on again");
+    assert_eq!(
+        (tod["available"].clone(), tod["uids"].clone()),
+        (json!(true), json!([]))
+    );
 
     server.shutdown().await;
     backend.shutdown();

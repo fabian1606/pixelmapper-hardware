@@ -5,7 +5,7 @@
 //! `invalidImage` / `deviceMismatch` / `downgrade` / `busy` are command errors), maps the library's progress onto
 //! the contract's `FlashJob` (phases, pages, `inBootloader`) and throttles progress events to 10/s per job.
 
-use super::convert::flash_error_code;
+use super::convert::{error_text, flash_error_code};
 use super::describe::Target;
 use crate::backend::BackendError;
 use crate::protocol::{
@@ -97,10 +97,7 @@ async fn boot_check(
     allow_downgrade: bool,
 ) -> Result<(), BackendError> {
     let raw = t.get(pids::PID_BOOT_INFO, &[]).await?;
-    let info = parse_boot_info(&raw).map_err(|e| match e {
-        net::Error::Flash(m) => BackendError::BadResponse(m),
-        e => BackendError::BadResponse(e.to_string()),
-    })?;
+    let info = parse_boot_info(&raw).map_err(|e| BackendError::BadResponse(error_text(&e)))?;
     check_ids(info.manufacturer, info.model, trailer, "BOOT_INFO")?;
     if info.app_valid != 0 {
         check_version(info.app_fw_version, trailer.version, allow_downgrade)?;
@@ -343,19 +340,16 @@ fn apply_result(job: &mut FlashJob, result: Result<FlashReport, net::Error>) {
             }
         }
         Err(e) => {
-            let code = flash_error_code(&e);
-            let message = match e {
-                net::Error::Flash(m) => m,
-                e => e.to_string(),
-            };
-            if was == FlashPhase::Confirming {
-                job.in_bootloader = message.contains("bootloader");
-            } else if message.contains("BOOT_INFO (bootloader)") {
-                // ENTER_BOOTLOADER worked, the bootloader's ids did not fit.
-                job.in_bootloader = true;
-            }
+            // The library flags failures that leave the tube in its bootloader (also those before the first
+            // write, e.g. the bootloader's ids not fitting the image). Without the flag the tube is where the
+            // progress put it, except after BOOT_FINISH: the app was started (or the state is unknown).
+            let bootloader = e.flash_error().is_some_and(|f| f.bootloader_active);
+            job.in_bootloader = bootloader || (was != FlashPhase::Confirming && job.in_bootloader);
             job.phase = FlashPhase::Failed;
-            job.error = Some(FlashError { code, message });
+            job.error = Some(FlashError {
+                code: flash_error_code(&e),
+                message: error_text(&e),
+            });
         }
     }
 }
@@ -365,6 +359,7 @@ mod tests {
     use super::*;
     use crate::protocol::{ErrorCode, RdmUid};
     use pixelmapper_net::image::tube::build_test_image;
+    use pixelmapper_net::FlashErrorKind;
 
     fn job() -> FlashJob {
         let image = build_test_image(
@@ -474,21 +469,72 @@ mod tests {
         assert_eq!(j.result.as_ref().unwrap().software_version_id, 0x200);
     }
 
+    /// A library flash error of `kind`, optionally flagged "bootloader active".
+    fn flash_err(kind: FlashErrorKind, message: &str, bootloader: bool) -> net::Error {
+        let f = net::FlashError::new(kind, message);
+        if bootloader {
+            f.in_bootloader().into()
+        } else {
+            f.into()
+        }
+    }
+
     #[test]
     fn failures() {
         let mut j = job();
         apply_progress(&mut j, &progress(NetPhase::Writing, 1, 4));
-        apply_result(
-            &mut j,
-            Err(net::Error::Flash(
-                "WRITE_PAGE 0x0040: timeout - bootloader stays active, run again".into(),
-            )),
-        );
+        let msg = "WRITE_PAGE 0x0040: timeout - bootloader stays active, run again";
+        apply_result(&mut j, Err(flash_err(FlashErrorKind::Timeout, msg, true)));
         assert_eq!(j.phase, FlashPhase::Failed);
         assert!(j.in_bootloader);
         let e = j.error.unwrap();
-        assert_eq!(e.code, ErrorCode::BadResponse);
-        assert!(e.message.starts_with("WRITE_PAGE"));
+        assert_eq!(e.code, ErrorCode::Timeout);
+        assert_eq!(e.message, msg, "without the library's kind tag");
+
+        // Kinds without a contract code of their own.
+        let mut j = job();
+        apply_progress(&mut j, &progress(NetPhase::Verifying, 1, 4));
+        apply_result(&mut j, Err(flash_err(FlashErrorKind::Verify, "x", true)));
+        assert_eq!(j.error.unwrap().code, ErrorCode::BadResponse);
+
+        // The bootloader's ids do not fit (ENTER_BOOTLOADER worked): in the bootloader before any write.
+        let mut j = job();
+        let mismatch = flash_err(FlashErrorKind::DeviceMismatch, "wrong device", true);
+        apply_result(&mut j, Err(mismatch));
+        assert!(j.in_bootloader);
+        assert_eq!(j.error.unwrap().code, ErrorCode::DeviceMismatch);
+
+        // After BOOT_FINISH: still in the bootloader only when the library says so.
+        let mut j = job();
+        apply_progress(&mut j, &progress(NetPhase::Confirming, 0, 0));
+        let still = "still in the bootloader (tube_boot_rdm), last error: x";
+        apply_result(
+            &mut j,
+            Err(flash_err(FlashErrorKind::Rejected, still, true)),
+        );
+        assert!(j.in_bootloader);
+        let mut j = job();
+        apply_progress(&mut j, &progress(NetPhase::Finishing, 0, 0));
+        apply_progress(&mut j, &progress(NetPhase::Confirming, 0, 0));
+        let silent = "no answer after FINISH - app does not run?";
+        apply_result(
+            &mut j,
+            Err(flash_err(FlashErrorKind::Timeout, silent, false)),
+        );
+        assert!(!j.in_bootloader);
+        assert_eq!(j.error.unwrap().code, ErrorCode::Timeout);
+
+        // Errors that are not flash errors keep their own code and text.
+        let mut j = job();
+        apply_progress(&mut j, &progress(NetPhase::Writing, 1, 4));
+        apply_result(&mut j, Err(net::Error::Closed));
+        assert!(j.in_bootloader);
+        let e = j.error.unwrap();
+        assert_eq!(
+            (e.code, e.message.as_str()),
+            (ErrorCode::UdpUnavailable, "controller closed")
+        );
+
         let mut j = job();
         apply_result(&mut j, Err(net::Error::Cancelled));
         assert_eq!((j.phase, j.in_bootloader), (FlashPhase::Cancelled, false));
