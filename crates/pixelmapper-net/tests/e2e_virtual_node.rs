@@ -756,6 +756,40 @@ async fn e2e_4_rdm_get_set_and_describe() {
             .find(|x| x.pid == def.pid)
             .unwrap();
         assert_eq!(*got, want, "PARAMETER_DESCRIPTION 0x{:04X}", def.pid);
+        // the generated per-PID metadata the bridge uses agrees with what the node answers
+        let m = pids::pid_meta(def.pid).unwrap();
+        assert_eq!(
+            (
+                m.pdl_size,
+                m.data_type,
+                m.command_class,
+                m.unit,
+                m.prefix,
+                m.description
+            ),
+            (
+                Some(got.pdl_size),
+                Some(got.data_type),
+                got.command_class,
+                Some(got.unit),
+                Some(got.prefix),
+                Some(got.description.as_str())
+            ),
+            "PID_META 0x{:04X}",
+            def.pid
+        );
+        assert_eq!(
+            (m.min, m.max, m.default),
+            (
+                Some(got.min_valid_value as i64),
+                Some(got.max_valid_value as i64),
+                Some(got.default_value as i64)
+            ),
+            "PID_META range 0x{:04X}",
+            def.pid
+        );
+        let value_pdl: u16 = m.value_fields().iter().map(|f| f.max_size()).sum();
+        assert_eq!(value_pdl, u16::from(got.pdl_size), "{}", m.name);
     }
     // node settings via RDM
     ctrl.rdm_set(

@@ -139,6 +139,15 @@ def load() -> dict:
                     raise GenError(f"{name}: numeric data_type needs exactly one value field")
                 if not pd["min"] <= pd["default"] <= pd["max"]:
                     raise GenError(f"{name}: default outside min..max")
+    for p in pids:
+        for k in ("get_request", "get_response", "set_request", "set_response"):
+            for f in p.get(k, []):
+                e = f.get("enum")
+                if e is None or e in d["enums"]:
+                    continue
+                if not (e.endswith("_*") and any(c.startswith(e[:-1]) for c in d["tube_constants"])):
+                    raise GenError(f"{p['name']}.{f['name']}: enum {e!r} is neither an [enums.*] table "
+                                   f"nor a [tube_constants] prefix PREFIX_*")
     for s in d.get("status", []):
         if not 0x8000 <= s["id"] <= 0xFFDF or s["type"] not in STATUS_TYPES or len(s["description"]) > 32:
             raise GenError(f"status {s['name']}: bad id/type/description")
@@ -300,7 +309,8 @@ pub fn status_description(id: u16) -> Option<&'static str> {
         L.append(f"pub const PID_{p['name']}: u16 = 0x{p['pid']:04X};")
     L.append("")
     L.append("""/// Which firmware answers a PID.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Device {
     TubeApp,
     TubeBoot,
@@ -362,7 +372,240 @@ pub static PIDS: &[PidDef] = &[""")
     L.append("/// Standard PIDs the node reports in SUPPORTED_PARAMETERS.")
     L.append("pub const NODE_STD_PIDS_LISTED: &[u16] = &[" + ", ".join(f"0x{s['pid']:04X}" for s in std["listed"]) + "];")
     L.append("")
+    gen_rs_meta(d, L)
     return "\n".join(L)
+
+
+RS_FIELD_TYPES = {"u8": "U8", "u16": "U16", "u32": "U32", "i8": "I8", "i16": "I16", "i32": "I32", "bool": "Bool",
+                  "uid": "Uid", "ipv4": "Ipv4", "ascii": "Ascii", "bytes": "Bytes"}
+
+
+def rs_opt(v, fmt=str) -> str:
+    return "None" if v is None else f"Some({fmt(v)})"
+
+
+def rs_field(f: dict, enums: dict) -> str:
+    e = f.get("enum")
+    return (f"PidField {{ name: \"{f['name']}\", ty: FieldType::{RS_FIELD_TYPES[f['type']]}, "
+            f"len: {rs_opt(f.get('len'))}, max_len: {rs_opt(f.get('max_len'))}, "
+            f"min: {rs_opt(f.get('min'))}, max: {rs_opt(f.get('max'))}, value: {rs_opt(f.get('value'), rs_str)}, "
+            f"enum_name: {rs_opt(e if e in enums else None, rs_str)}, enum_ref: {rs_opt(e, rs_str)}, "
+            f"doc: {rs_opt(f.get('doc'), rs_str)} }}")
+
+
+def gen_rs_meta(d: dict, L: list[str]) -> None:
+    """Field layouts, value kinds and PARAMETER_DESCRIPTION per expanded PID, plus the enum tables (additive)."""
+    L.append("""// ---- per-PID metadata: field layouts + PARAMETER_DESCRIPTION (PID_META) and enum tables (ENUMS) ----
+
+/// Type of one parameter data field (pids.toml `type`). Multi-byte values are big-endian.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FieldType {
+    U8,
+    U16,
+    U32,
+    I8,
+    I16,
+    I32,
+    /// One byte, 0 = false, 1 = true.
+    Bool,
+    /// RDM UID, 6 bytes.
+    Uid,
+    /// IPv4 address, 4 bytes.
+    Ipv4,
+    /// ASCII text, `len` (fixed) or up to `max_len` bytes.
+    Ascii,
+    /// Raw bytes, `len` (fixed) or up to `max_len` bytes.
+    Bytes,
+}
+
+impl FieldType {
+    /// Size in bytes of the fixed-size types (`None` for `Ascii`/`Bytes`).
+    pub const fn fixed_size(self) -> Option<u16> {
+        match self {
+            FieldType::U8 | FieldType::I8 | FieldType::Bool => Some(1),
+            FieldType::U16 | FieldType::I16 => Some(2),
+            FieldType::U32 | FieldType::I32 | FieldType::Ipv4 => Some(4),
+            FieldType::Uid => Some(6),
+            FieldType::Ascii | FieldType::Bytes => None,
+        }
+    }
+}
+
+/// One field of a PDL layout (pids.toml `get_request`/`get_response`/`set_request`/`set_response` entry).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PidField {
+    pub name: &'static str,
+    #[serde(rename = "type")]
+    pub ty: FieldType,
+    /// Fixed length of an `Ascii`/`Bytes` field.
+    pub len: Option<u16>,
+    /// Maximum length of a variable `Ascii`/`Bytes` field (must be the last field).
+    pub max_len: Option<u16>,
+    /// Valid range of the field, if pids.toml restricts it.
+    pub min: Option<i64>,
+    pub max: Option<i64>,
+    /// Fixed content the field must have (e.g. `"BOOT"`).
+    pub value: Option<&'static str>,
+    /// Name of the `[enums.*]` table (see [`ENUMS`], [`enum_def`]) the value belongs to.
+    pub enum_name: Option<&'static str>,
+    /// Raw pids.toml `enum` reference: an `[enums.*]` name or a constant prefix such as `"BOOT_ERR_*"`.
+    pub enum_ref: Option<&'static str>,
+    pub doc: Option<&'static str>,
+}
+
+impl PidField {
+    /// Maximum size in bytes.
+    pub const fn max_size(&self) -> u16 {
+        match (self.ty.fixed_size(), self.len, self.max_len) {
+            (Some(n), _, _) => n,
+            (None, Some(n), _) => n,
+            (None, None, Some(n)) => n,
+            (None, None, None) => 0,
+        }
+    }
+
+    /// Minimum size in bytes (0 for variable-length fields).
+    pub const fn min_size(&self) -> u16 {
+        match (self.ty.fixed_size(), self.len) {
+            (Some(n), _) => n,
+            (None, Some(n)) => n,
+            (None, None) => 0,
+        }
+    }
+}
+
+/// Everything pids.toml says about one (expanded) manufacturer PID: command classes, PDL layouts and
+/// PARAMETER_DESCRIPTION values (the `[pid.pd]` fields are `None` for PIDs without one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PidMeta {
+    pub pid: u16,
+    /// Expanded name (`"PORT2_DMX_BREAK"`).
+    pub name: &'static str,
+    /// Name with `{n}` removed (`"PORT_DMX_BREAK"`), equal to `name` for non-repeated PIDs.
+    pub base_name: &'static str,
+    /// Port 1..N of a `repeat`-expanded PID.
+    pub port: Option<u8>,
+    pub device: Device,
+    /// E1.20 command class bits: 0x01 GET, 0x02 SET, 0x03 GET_SET.
+    pub command_class: u8,
+    pub get: bool,
+    pub set: bool,
+    /// Listed in SUPPORTED_PARAMETERS (answers PARAMETER_DESCRIPTION).
+    pub listed: bool,
+    pub doc: &'static str,
+    /// PDL layouts, `None` when the command class does not include GET resp. SET.
+    pub get_request: Option<&'static [PidField]>,
+    pub get_response: Option<&'static [PidField]>,
+    pub set_request: Option<&'static [PidField]>,
+    pub set_response: Option<&'static [PidField]>,
+    /// PARAMETER_DESCRIPTION (E1.20 codes).
+    pub pdl_size: Option<u8>,
+    pub data_type: Option<u8>,
+    pub unit: Option<u8>,
+    pub prefix: Option<u8>,
+    pub min: Option<i64>,
+    pub max: Option<i64>,
+    pub default: Option<i64>,
+    pub description: Option<&'static str>,
+}
+
+impl PidMeta {
+    /// Layout of the parameter value: GET response, or SET request for SET-only PIDs.
+    pub fn value_fields(&self) -> &'static [PidField] {
+        match (self.get_response, self.set_request) {
+            (Some(f), _) | (None, Some(f)) => f,
+            (None, None) => &[],
+        }
+    }
+
+    /// The single value field of a single-value PID.
+    pub fn value_field(&self) -> Option<&'static PidField> {
+        match self.value_fields() {
+            [f] => Some(f),
+            _ => None,
+        }
+    }
+
+    /// Single-value PID whose value is one bool field.
+    pub fn is_bool(&self) -> bool {
+        self.value_field().is_some_and(|f| f.ty == FieldType::Bool)
+    }
+}
+
+/// One value of an enum table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct EnumValue {
+    pub name: &'static str,
+    pub value: u8,
+}
+
+/// One pids.toml `[enums.*]` table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct EnumDef {
+    pub name: &'static str,
+    pub values: &'static [EnumValue],
+}
+
+impl EnumDef {
+    /// Name of a value.
+    pub fn value_name(&self, value: u8) -> Option<&'static str> {
+        self.values.iter().find(|v| v.value == value).map(|v| v.name)
+    }
+
+    /// Value of a name.
+    pub fn value_of(&self, name: &str) -> Option<u8> {
+        self.values.iter().find(|v| v.name == name).map(|v| v.value)
+    }
+}
+
+/// All enum tables of pids.toml.
+pub static ENUMS: &[EnumDef] = &[""")
+    for en, vals in d["enums"].items():
+        vs = ", ".join(f"EnumValue {{ name: \"{k}\", value: {v} }}" for k, v in vals.items())
+        L.append(f"    EnumDef {{ name: \"{en}\", values: &[{vs}] }},")
+    L.append("];")
+    L.append("")
+    L.append("""/// Enum table by name (e.g. `"fw_state"`).
+pub fn enum_def(name: &str) -> Option<&'static EnumDef> {
+    ENUMS.iter().find(|e| e.name == name)
+}
+
+/// Metadata of all manufacturer PIDs (same order as [`PIDS`]).
+pub static PID_META: &[PidMeta] = &[""")
+    dev = {"tube_app": "Device::TubeApp", "tube_boot": "Device::TubeBoot", "node": "Device::Node"}
+    for p in d["pids"]:
+        cc = p["cc"]
+        def layout(k):
+            if k not in p:
+                return "None"
+            return "Some(&[" + ", ".join(rs_field(f, d["enums"]) for f in p[k]) + "])"
+        pd = p.get("pd") if p["listed"] else None
+        def g(k, table=None):
+            if pd is None:
+                return "None"
+            v = pd[k]
+            return f"Some({table[v]})" if table else f"Some({v})"
+        L.append(f"    PidMeta {{ pid: 0x{p['pid']:04X}, name: \"{p['name']}\", base_name: \"{p['base_name']}\", "
+                 f"port: {rs_opt(p.get('index'))}, device: {dev[p['device']]}, command_class: 0x{CCS[cc]:02X}, "
+                 f"get: {str('get' in cc).lower()}, set: {str('set' in cc).lower()}, "
+                 f"listed: {str(p['listed']).lower()}, doc: {rs_str(p.get('doc', ''))},")
+        L.append(f"        get_request: {layout('get_request')},")
+        L.append(f"        get_response: {layout('get_response')},")
+        L.append(f"        set_request: {layout('set_request')},")
+        L.append(f"        set_response: {layout('set_response')},")
+        L.append(f"        pdl_size: {g('pdl_size')}, data_type: {g('data_type', DATA_TYPES)}, unit: {g('unit', UNITS)}, "
+                 f"prefix: {g('prefix', PREFIXES)}, min: {g('min')}, max: {g('max')}, default: {g('default')}, "
+                 f"description: {rs_opt(pd['description'] if pd else None, rs_str)} }},")
+    L.append("];")
+    L.append("")
+    L.append("""/// Metadata of a manufacturer PID.
+pub fn pid_meta(pid: u16) -> Option<&'static PidMeta> {
+    PID_META.iter().find(|m| m.pid == pid)
+}
+""")
 
 
 def rs_str(s: str) -> str:
