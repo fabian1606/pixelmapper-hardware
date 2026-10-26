@@ -13,7 +13,7 @@
 use super::tube::{is_busy, pause};
 use super::{FlashPhase, FlashReport, Progress};
 use crate::artnet::{ArtFirmwareMaster, ArtFirmwareReply};
-use crate::error::{Error, Result};
+use crate::error::{Error, FlashErrorKind, Result};
 use crate::image::tube::version_str;
 use crate::image::NodeImage;
 use crate::link::{NodeLink, RdmOptions};
@@ -111,42 +111,58 @@ pub fn check_node_image(
     allow_downgrade: bool,
 ) -> Result<()> {
     let d = &image.desc;
-    let refuse = |m: String| Err(Error::Flash(format!("{m} - nothing written")));
+    let refuse =
+        |k: FlashErrorKind, m: String| Err(Error::flash(k, format!("{m} - nothing written")));
     if node.manufacturer != d.esta_manufacturer {
-        return refuse(format!(
-            "wrong manufacturer: node 0x{:04X}, image 0x{:04X}",
-            node.manufacturer, d.esta_manufacturer
-        ));
+        return refuse(
+            FlashErrorKind::DeviceMismatch,
+            format!(
+                "wrong manufacturer: node 0x{:04X}, image 0x{:04X}",
+                node.manufacturer, d.esta_manufacturer
+            ),
+        );
     }
     if node.model != pids::MODEL_NODE || d.device_model_id != pids::MODEL_NODE {
-        return refuse(format!(
-            "wrong model: device 0x{:04X}, image 0x{:04X}, expected 0x{:04X}",
-            node.model,
-            d.device_model_id,
-            pids::MODEL_NODE
-        ));
+        return refuse(
+            FlashErrorKind::DeviceMismatch,
+            format!(
+                "wrong model: device 0x{:04X}, image 0x{:04X}, expected 0x{:04X}",
+                node.model,
+                d.device_model_id,
+                pids::MODEL_NODE
+            ),
+        );
     }
     if !d.supports_hw_rev(node.hw_revision) {
-        return refuse(format!(
-            "image does not support hardware revision {} (hw_rev_mask 0x{:08X})",
-            node.hw_revision, d.hw_rev_mask
-        ));
+        return refuse(
+            FlashErrorKind::DeviceMismatch,
+            format!(
+                "image does not support hardware revision {} (hw_rev_mask 0x{:08X})",
+                node.hw_revision, d.hw_rev_mask
+            ),
+        );
     }
     if let Some(oem) = node.oem {
         if !image.oems.contains(&oem) {
             let list: Vec<String> = image.oems.iter().map(|o| format!("0x{o:04X}")).collect();
-            return refuse(format!(
-                "node OEM code 0x{oem:04X} not in the image's OEM list [{}]",
-                list.join(", ")
-            ));
+            return refuse(
+                FlashErrorKind::DeviceMismatch,
+                format!(
+                    "node OEM code 0x{oem:04X} not in the image's OEM list [{}]",
+                    list.join(", ")
+                ),
+            );
         }
     }
     if d.fw_version_id < node.fw_version && !allow_downgrade {
-        return refuse(format!(
-            "downgrade {} -> {} - allow the downgrade explicitly",
-            version_str(node.fw_version),
-            version_str(d.fw_version_id)
-        ));
+        return refuse(
+            FlashErrorKind::Downgrade,
+            format!(
+                "downgrade {} -> {} - allow the downgrade explicitly",
+                version_str(node.fw_version),
+                version_str(d.fw_version_id)
+            ),
+        );
     }
     Ok(())
 }
@@ -173,7 +189,7 @@ impl<L: NodeLink> Run<'_, L> {
                     busy += 1;
                     self.busy += 1;
                     if busy >= self.opts.busy_retries {
-                        return Err(Error::Flash(format!(
+                        return Err(Error::flash(FlashErrorKind::Busy, format!(
                             "PID 0x{p:04X}: node still busy (BUFFER_FULL) after {busy} tries (another update \
                              session running?)"
                         )));
@@ -204,11 +220,12 @@ impl<L: NodeLink> Run<'_, L> {
             Error::Cancelled => e,
             Error::Nack { reason, .. } => {
                 let le = self.last_error().await;
-                Error::Flash(format!(
-                    "{step} refused (NACK {reason}), last error {le} - {OLD_STAYS}"
-                ))
+                Error::flash(
+                    FlashErrorKind::Rejected,
+                    format!("{step} refused (NACK {reason}), last error {le} - {OLD_STAYS}"),
+                )
             }
-            e => Error::Flash(format!("{step}: {e} - {OLD_STAYS}")),
+            e => Error::flash(FlashErrorKind::of(&e), format!("{step}: {e} - {OLD_STAYS}")),
         }
     }
 
@@ -222,10 +239,8 @@ impl<L: NodeLink> Run<'_, L> {
             NodeFlashMethod::Rdm => None,
             NodeFlashMethod::ArtFirmwareMaster => {
                 let st = self.link.node_state().ok_or_else(|| {
-                    Error::Flash(
-                        "node state unknown (no ArtPollReply yet), cannot check its OEM code - nothing written"
-                            .into(),
-                    )
+                    let m = "node state unknown (no ArtPollReply yet), cannot check its OEM code - nothing written";
+                    Error::flash(FlashErrorKind::Other, m)
                 })?;
                 Some(st.oem)
             }
@@ -316,11 +331,14 @@ impl<L: NodeLink> Run<'_, L> {
             {
                 Ok(r) => r,
                 Err(Error::WaitTimeout(..)) => {
-                    return Err(Error::Flash(format!(
-                        "block {}/{n}: no ArtFirmwareReply within {:?} - {OLD_STAYS}",
-                        i + 1,
-                        self.opts.block_timeout
-                    )))
+                    return Err(Error::flash(
+                        FlashErrorKind::Timeout,
+                        format!(
+                            "block {}/{n}: no ArtFirmwareReply within {:?} - {OLD_STAYS}",
+                            i + 1,
+                            self.opts.block_timeout
+                        ),
+                    ))
                 }
                 Err(e) => return Err(e),
             };
@@ -334,11 +352,15 @@ impl<L: NodeLink> Run<'_, L> {
                     ArtFirmwareReply::FIRM_FAIL => "FirmFail".to_string(),
                     k => format!("unexpected reply type 0x{k:02X}"),
                 };
+                let kind = match reply.kind {
+                    ArtFirmwareReply::FIRM_FAIL => FlashErrorKind::Rejected,
+                    _ => FlashErrorKind::BadResponse,
+                };
                 let le = self.last_error().await;
-                return Err(Error::Flash(format!(
-                    "block {}/{n}: {what}, last error {le} - {OLD_STAYS}",
-                    i + 1
-                )));
+                return Err(Error::flash(
+                    kind,
+                    format!("block {}/{n}: {what}, last error {le} - {OLD_STAYS}", i + 1),
+                ));
             }
             self.written += 1;
             if !last {
@@ -363,7 +385,7 @@ impl<L: NodeLink> Run<'_, L> {
         {
             Ok(_) => {}
             Err(Error::WaitTimeout(t, _)) => {
-                return Err(Error::Flash(format!(
+                return Err(Error::flash(FlashErrorKind::Timeout, format!(
                     "node did not come back with version {} within {t:?} (image rejected or rolled back?)",
                     version_str(want)
                 )))
@@ -374,9 +396,10 @@ impl<L: NodeLink> Run<'_, L> {
         let di = self.call(cc::GET, pid::DEVICE_INFO, &[]).await?;
         let sw = DeviceInfo::decode(&di)?.software_version_id;
         if sw != want {
-            return Err(Error::Flash(format!(
-                "node runs 0x{sw:08X} after the update, image 0x{want:08X} (rolled back?)"
-            )));
+            return Err(Error::flash(
+                FlashErrorKind::VersionMismatch,
+                format!("node runs 0x{sw:08X} after the update, image 0x{want:08X} (rolled back?)"),
+            ));
         }
         let label = self.call(cc::GET, pid::SOFTWARE_VERSION_LABEL, &[]).await?;
         Ok(decode_label(&label))
@@ -792,6 +815,10 @@ mod tests {
         }
     }
 
+    fn kind(r: &Result<FlashReport>) -> Option<FlashErrorKind> {
+        r.as_ref().err().and_then(Error::flash_kind)
+    }
+
     #[tokio::test(start_paused = true)]
     async fn rdm_happy_path() {
         let node = Node {
@@ -857,6 +884,7 @@ mod tests {
                 e.contains("hardware revision 1") && e.contains("nothing written"),
                 "{e}"
             );
+            assert_eq!(kind(&r), Some(FlashErrorKind::DeviceMismatch));
             fake.with(|n| assert_eq!((n.begins, n.art_blocks), (0, 0)));
         }
         // OEM code not in the image's list
@@ -866,6 +894,7 @@ mod tests {
         };
         let (r, _, fake) = run(node, image(), opts(NodeFlashMethod::ArtFirmwareMaster)).await;
         assert!(err_text(&r).contains("OEM code 0x1234"), "{}", err_text(&r));
+        assert_eq!(kind(&r), Some(FlashErrorKind::DeviceMismatch));
         fake.with(|n| assert_eq!(n.art_blocks, 0));
         // wrong model
         let node = Node {
@@ -874,6 +903,7 @@ mod tests {
         };
         let (r, _, fake) = run(node, image(), opts(NodeFlashMethod::Rdm)).await;
         assert!(err_text(&r).contains("wrong model"), "{}", err_text(&r));
+        assert_eq!(kind(&r), Some(FlashErrorKind::DeviceMismatch));
         fake.with(|n| assert_eq!(n.begins, 0));
         // downgrade
         let node = Node {
@@ -886,6 +916,7 @@ mod tests {
             "{}",
             err_text(&r)
         );
+        assert_eq!(kind(&r), Some(FlashErrorKind::Downgrade));
         fake.with(|n| assert_eq!(n.begins, 0));
         let node = Node {
             version: 0x0002_0000,
@@ -911,6 +942,7 @@ mod tests {
             e.contains("FW_BEGIN refused") && e.contains("TOO_LARGE (5)"),
             "{e}"
         );
+        assert_eq!(kind(&r), Some(FlashErrorKind::Rejected));
         fake.with(|n| {
             assert_eq!(n.writes, 0);
             assert_eq!(n.version, 0x0001_0100);
@@ -929,6 +961,7 @@ mod tests {
             e.contains("block 3/") && e.contains("FirmFail") && e.contains("FLASH (10)"),
             "{e}"
         );
+        assert_eq!(kind(&r), Some(FlashErrorKind::Rejected));
         fake.with(|n| {
             assert_eq!(n.art_blocks, 3);
             assert_eq!(n.version, 0x0001_0100);

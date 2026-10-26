@@ -22,6 +22,7 @@ use pixelmapper_net::image::{NodeImage, TubeImage};
 use pixelmapper_net::rdm::pd::{decode_label, DeviceInfo, FwInfo, ParameterDescription};
 use pixelmapper_net::rdm::{pid, Uid};
 use pixelmapper_net::state::{Failsafe, Indicators, MergeMode, PortDirection};
+use pixelmapper_net::FlashErrorKind;
 use pixelmapper_net::{pids, Error, Event, NodeId, NodeState};
 use std::io::{BufRead, BufReader};
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
@@ -1115,6 +1116,18 @@ async fn e2e_7_tube_flash_and_rescue() {
     assert_eq!(st[0], pids::boot_catch_state::CAUGHT);
     assert_eq!(st[1], 1);
     assert_eq!(&st[2..8], &t.to_bytes());
+
+    // downgrade refused before anything is written
+    let job = ctrl
+        .flash_tube(&id, pa(1), t, tube_image(0x000600), false, false)
+        .unwrap();
+    let e = tokio::time::timeout(Duration::from_secs(30), job.wait())
+        .await
+        .expect("downgrade check time")
+        .unwrap_err();
+    assert_eq!(e.flash_kind(), Some(FlashErrorKind::Downgrade), "{e}");
+    assert!(e.to_string().contains("nothing written"), "{e}");
+    assert_eq!(vn.tube(1, t, "version"), "0x000700");
     ctrl.shutdown();
 }
 
@@ -1177,6 +1190,7 @@ async fn e2e_8_node_flash() {
         .unwrap();
     let e = job.wait().await.unwrap_err();
     assert!(e.to_string().contains("FLASH"), "{e}");
+    assert_eq!(e.flash_kind(), Some(FlashErrorKind::Rejected), "{e}");
     let fi = fw_info(&ctrl, &vn).await;
     assert_eq!(fi.state, pids::fw_state::FAILED);
     assert_eq!(fi.last_error, pids::fw_error::FLASH);

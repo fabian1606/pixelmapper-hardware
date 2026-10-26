@@ -7,7 +7,7 @@
 pub mod node;
 pub mod tube;
 
-use crate::error::{Error, Result};
+use crate::error::{Error, FlashErrorKind, Result};
 use serde::Serialize;
 use std::future::Future;
 use std::sync::Arc;
@@ -263,7 +263,10 @@ impl FlashJob {
     pub async fn wait(self) -> Result<FlashReport> {
         match self.handle.await {
             Ok(r) => r,
-            Err(e) => Err(Error::Flash(format!("job task failed: {e}"))),
+            Err(e) => Err(Error::flash(
+                FlashErrorKind::Other,
+                format!("job task failed: {e}"),
+            )),
         }
     }
 }

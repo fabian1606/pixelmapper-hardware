@@ -20,7 +20,7 @@ pub mod sim;
 pub mod state;
 
 pub use controller::{Controller, ControllerConfig, RdmConfig, RdmRequest};
-pub use error::{Error, Result};
+pub use error::{Error, FlashError, FlashErrorKind, Result};
 pub use event::{Event, QueuedMessage};
 pub use state::{NodeId, NodeState, PortState};
 
