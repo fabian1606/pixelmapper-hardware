@@ -36,10 +36,13 @@ impl Out {
 /// Print an error on stderr.
 pub fn error(json: bool, e: &Error) {
     if json {
-        eprintln!(
-            "{}",
-            json!({"type": "error", "code": e.code(), "message": e.to_string()})
-        );
+        let mut v = json!({"type": "error", "code": e.code(), "message": e.to_string()});
+        if let Some(k) = e.flash_kind() {
+            v["flashKind"] = json!(k.code());
+        }
+        eprintln!("{v}");
+    } else if let Some(k) = e.flash_kind() {
+        eprintln!("pmnet: error [{}/{k}]: {e}", e.code());
     } else {
         eprintln!("pmnet: error [{}]: {e}", e.code());
     }

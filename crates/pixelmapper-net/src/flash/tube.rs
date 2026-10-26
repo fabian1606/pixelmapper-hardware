@@ -13,7 +13,7 @@
 //! the retries are counted in [`FlashReport::busy_retries`] and cancellation is seen while waiting.
 
 use super::{FlashPhase, FlashReport, Progress};
-use crate::error::{Error, Result};
+use crate::error::{Error, FlashError, FlashErrorKind, Result};
 use crate::image::tube::{boot_err, version_str, BOOT_START, PAGE};
 use crate::image::TubeImage;
 use crate::link::{RdmLink, RdmOptions};
@@ -79,6 +79,11 @@ const IDLE_POLL_WAIT: Duration = Duration::from_millis(20);
 /// Appended to errors that leave the tube in its bootloader.
 const STAYS_ACTIVE: &str = "bootloader stays active, run again";
 
+/// A flash error after which the tube is known to stay in its bootloader.
+fn in_boot(kind: FlashErrorKind, message: String) -> Error {
+    FlashError::new(kind, message).in_bootloader().into()
+}
+
 /// Check manufacturer and model reported by the device (`source` names where they come from) against the trailer.
 pub fn check_tube_ids(
     image: &TubeImage,
@@ -88,7 +93,7 @@ pub fn check_tube_ids(
 ) -> Result<()> {
     let t = &image.trailer;
     if (manufacturer, model) != (t.manufacturer, t.model) {
-        return Err(Error::Flash(format!(
+        return Err(Error::flash(FlashErrorKind::DeviceMismatch, format!(
             "wrong device: {source} reports manufacturer 0x{manufacturer:04X} model 0x{model:04X}, image is for \
              manufacturer 0x{:04X} model 0x{:04X} - nothing written",
             t.manufacturer, t.model
@@ -105,11 +110,14 @@ pub fn check_tube_version(
 ) -> Result<()> {
     let new = image.trailer.version;
     match installed {
-        Some(old) if new < old && !allow_downgrade => Err(Error::Flash(format!(
-            "downgrade {} -> {} - allow the downgrade explicitly; nothing written",
-            version_str(old),
-            version_str(new)
-        ))),
+        Some(old) if new < old && !allow_downgrade => Err(Error::flash(
+            FlashErrorKind::Downgrade,
+            format!(
+                "downgrade {} -> {} - allow the downgrade explicitly; nothing written",
+                version_str(old),
+                version_str(new)
+            ),
+        )),
         _ => Ok(()),
     }
 }
@@ -135,13 +143,13 @@ pub fn is_bootloader_version(sw: u32) -> bool {
 /// `BOOT_RDM_PROTOCOL` (which do not know the trailer) are refused.
 pub fn parse_boot_info(pd: &[u8]) -> Result<BootInfo> {
     if pd.len() < 6 {
-        return Err(Error::Flash(format!(
-            "BOOT_INFO: short answer {}",
-            crate::to_hex(pd)
-        )));
+        return Err(Error::flash(
+            FlashErrorKind::BadResponse,
+            format!("BOOT_INFO: short answer {}", crate::to_hex(pd)),
+        ));
     }
     if u32::from(pd[0]) < pids::tube::BOOT_RDM_PROTOCOL || pd.len() < BootInfo::LEN {
-        return Err(Error::Flash(format!(
+        return Err(in_boot(FlashErrorKind::Incompatible, format!(
             "tube_boot_rdm v{} ({}-byte BOOT_INFO) does not know the trailer of this image - its FINISH would \
              reject it. Install tube_boot_rdm v{} once via ISP",
             pd[0],
@@ -204,9 +212,10 @@ impl<L: RdmLink> Run<'_, L> {
                     busy += 1;
                     self.busy += 1;
                     if busy >= self.opts.busy_retries {
-                        return Err(Error::Flash(format!(
-                            "PID 0x{p:04X}: still busy (BUFFER_FULL) after {busy} tries"
-                        )));
+                        return Err(Error::flash(
+                            FlashErrorKind::Busy,
+                            format!("PID 0x{p:04X}: still busy (BUFFER_FULL) after {busy} tries"),
+                        ));
                     }
                     pause(self.progress, self.opts.busy_delay).await?;
                 }
@@ -273,7 +282,10 @@ impl<L: RdmLink> Run<'_, L> {
             .await
             .map_err(|e| match e {
                 Error::Cancelled => e,
-                e => Error::Flash(format!("BOOT_CATCH_START at node {}: {e}", rescue.node_uid)),
+                e => Error::flash(
+                    FlashErrorKind::of(&e),
+                    format!("BOOT_CATCH_START at node {}: {e}", rescue.node_uid),
+                ),
             })?;
         let msg = format!(
             "power-cycle tube {} on port {} now (switch its supply off and on again)",
@@ -304,13 +316,13 @@ impl<L: RdmLink> Run<'_, L> {
                 match s.state {
                     st::CAUGHT if s.target_uid == self.uid => return Ok(()),
                     st::CAUGHT => {
-                        return Err(Error::Flash(format!(
+                        return Err(Error::flash(FlashErrorKind::Other, format!(
                             "BOOT_CATCH caught {} instead of {} (another catch replaced ours)",
                             s.target_uid, self.uid
                         )))
                     }
                     st::TIMEOUT => {
-                        return Err(Error::Flash(format!(
+                        return Err(Error::flash(FlashErrorKind::Timeout, format!(
                             "BOOT_CATCH: no answer from {} in the catch window ({} attempts) - tube not \
                              power-cycled, wrong port/UID, or tube_boot_rdm not installed (hfuse 0x88)? \
                              nothing written",
@@ -318,15 +330,16 @@ impl<L: RdmLink> Run<'_, L> {
                         )))
                     }
                     st::ABORTED => {
-                        return Err(Error::Flash(
+                        return Err(Error::flash(
+                            FlashErrorKind::Other,
                             "BOOT_CATCH aborted at the node (abort, port disabled or switched to input); \
-                             nothing written"
-                                .into(),
+                             nothing written",
                         ))
                     }
                     st::IDLE => {
-                        return Err(Error::Flash(
-                            "BOOT_CATCH not running at the node (node restarted?); nothing written".into(),
+                        return Err(Error::flash(
+                            FlashErrorKind::Other,
+                            "BOOT_CATCH not running at the node (node restarted?); nothing written",
                         ))
                     }
                     _ => {
@@ -337,10 +350,13 @@ impl<L: RdmLink> Run<'_, L> {
                 }
             }
             if tokio::time::Instant::now() >= deadline {
-                return Err(Error::Flash(format!(
-                    "BOOT_CATCH: not caught within {:?}; nothing written",
-                    self.opts.catch_timeout
-                )));
+                return Err(Error::flash(
+                    FlashErrorKind::Timeout,
+                    format!(
+                        "BOOT_CATCH: not caught within {:?}; nothing written",
+                        self.opts.catch_timeout
+                    ),
+                ));
             }
         }
     }
@@ -375,14 +391,14 @@ impl<L: RdmLink> Run<'_, L> {
             }
         }
         let info = info.ok_or_else(|| {
-            Error::Flash(format!(
+            Error::flash(FlashErrorKind::Timeout, format!(
                 "no BOOT_INFO answer from {} - not in tube_boot_rdm (old 1 KB tube_boot -> flash_dmx.py; app dead \
                  -> rescue via BOOT_CATCH); nothing written",
                 self.uid
             ))
         })?;
         if u16::from(info.page_size) != PAGE || info.app_end != BOOT_START {
-            return Err(Error::Flash(format!(
+            return Err(in_boot(FlashErrorKind::Incompatible, format!(
                 "bootloader geometry (page {} B, app end 0x{:04X}) does not match the image (page {PAGE} B, app \
                  end 0x{BOOT_START:04X}); nothing written",
                 info.page_size, info.app_end
@@ -405,9 +421,10 @@ impl<L: RdmLink> Run<'_, L> {
             }
             pause(self.progress, IDLE_POLL_WAIT).await?;
         }
-        Err(Error::Flash(format!(
-            "bootloader stays busy - {STAYS_ACTIVE}"
-        )))
+        Err(in_boot(
+            FlashErrorKind::Busy,
+            format!("bootloader stays busy - {STAYS_ACTIVE}"),
+        ))
     }
 
     /// `write_pages` with progress in `phase`.
@@ -421,9 +438,10 @@ impl<L: RdmLink> Run<'_, L> {
                 Ok(_) => {}
                 Err(Error::Cancelled) => return Err(Error::Cancelled),
                 Err(e) => {
-                    return Err(Error::Flash(format!(
-                        "WRITE_PAGE 0x{a:04X}: {e} - {STAYS_ACTIVE}"
-                    )))
+                    return Err(in_boot(
+                        FlashErrorKind::of(&e),
+                        format!("WRITE_PAGE 0x{a:04X}: {e} - {STAYS_ACTIVE}"),
+                    ))
                 }
             }
             self.written += 1;
@@ -443,10 +461,13 @@ impl<L: RdmLink> Run<'_, L> {
             req.extend_from_slice(&n.to_be_bytes());
             let pd = self.get(pids::PID_BOOT_APP_CRC, &req, 2).await?;
             let Some(b) = pd.get(..2) else {
-                return Err(Error::Flash(format!(
-                    "APP_CRC: short answer {} - {STAYS_ACTIVE}",
-                    crate::to_hex(&pd)
-                )));
+                return Err(in_boot(
+                    FlashErrorKind::BadResponse,
+                    format!(
+                        "APP_CRC: short answer {} - {STAYS_ACTIVE}",
+                        crate::to_hex(&pd)
+                    ),
+                ));
             };
             if u16::from_be_bytes([b[0], b[1]]) != want {
                 bad.push((a, n));
@@ -480,7 +501,10 @@ impl<L: RdmLink> Run<'_, L> {
                 list.join(", ")
             ));
             if pass == 2 {
-                return Err(Error::Flash(format!("{why} - {STAYS_ACTIVE}")));
+                return Err(in_boot(
+                    FlashErrorKind::Verify,
+                    format!("{why} - {STAYS_ACTIVE}"),
+                ));
             }
             let pages: Vec<u16> = if bad.is_empty() {
                 image.page_plan(false)[1..]
@@ -512,7 +536,12 @@ impl<L: RdmLink> Run<'_, L> {
         match self.set(pids::PID_BOOT_FINISH, &[], 2).await {
             Ok(_) => {}
             Err(Error::Cancelled) => return Err(Error::Cancelled),
-            Err(e) => return Err(Error::Flash(format!("BOOT_FINISH: {e} - {STAYS_ACTIVE}"))),
+            Err(e) => {
+                return Err(in_boot(
+                    FlashErrorKind::of(&e),
+                    format!("BOOT_FINISH: {e} - {STAYS_ACTIVE}"),
+                ))
+            }
         }
         let m = "FINISH ok, app starts (self-test ~2 s)";
         self.progress.set(FlashPhase::Confirming, 0, 0, m);
@@ -520,8 +549,9 @@ impl<L: RdmLink> Run<'_, L> {
         let label = match self.get(pid::SOFTWARE_VERSION_LABEL, &[], 4).await {
             Ok(pd) => decode_label(&pd),
             Err(e) if e.is_timeout() => {
-                return Err(Error::Flash(
-                    "no answer after FINISH - app does not run?".into(),
+                return Err(Error::flash(
+                    FlashErrorKind::Timeout,
+                    "no answer after FINISH - app does not run?",
                 ))
             }
             Err(e) => return Err(e),
@@ -531,18 +561,22 @@ impl<L: RdmLink> Run<'_, L> {
                 Ok(i) => boot_err::text(i.last_error).to_string(),
                 Err(e) => format!("unknown ({e})"),
             };
-            return Err(Error::Flash(format!(
-                "still in the bootloader ({label}), last error: {err} - {STAYS_ACTIVE}"
-            )));
+            return Err(in_boot(
+                FlashErrorKind::Rejected,
+                format!("still in the bootloader ({label}), last error: {err} - {STAYS_ACTIVE}"),
+            ));
         }
         let di = self.get(pid::DEVICE_INFO, &[], 2).await?;
         let want = image.trailer.version;
         match device_info_sw(&di) {
             Some(sw) if sw == want => Ok((sw, label)),
-            sw => Err(Error::Flash(format!(
-                "app runs ('{label}') but DEVICE_INFO reports {}, image 0x{want:08X}",
-                sw.map_or("no version".to_string(), |v| format!("0x{v:08X}"))
-            ))),
+            sw => Err(Error::flash(
+                FlashErrorKind::VersionMismatch,
+                format!(
+                    "app runs ('{label}') but DEVICE_INFO reports {}, image 0x{want:08X}",
+                    sw.map_or("no version".to_string(), |v| format!("0x{v:08X}"))
+                ),
+            )),
         }
     }
 }
@@ -590,9 +624,16 @@ pub async fn flash_tube<L: RdmLink>(
     });
     if let Err(e) = ids {
         return Err(match e {
-            Error::Flash(m) => Error::Flash(format!(
-                "{m} (the bootloader starts its app after ~60 s if that one is valid)"
-            )),
+            e @ Error::Flash(_) => {
+                let mut f = e
+                    .flash_error()
+                    .unwrap_or_else(|| FlashError::new(FlashErrorKind::Other, ""));
+                f.message = format!(
+                    "{} (the bootloader starts its app after ~60 s if that one is valid)",
+                    f.message
+                );
+                f.in_bootloader().into()
+            }
             e => e,
         });
     }
@@ -681,6 +722,8 @@ mod tests {
         cancel: Option<watch::Sender<bool>>,
         cancel_at_write: Option<usize>,
         cancel_at_poll: Option<u32>,
+        /// WRITE_PAGE to this address is acknowledged but not stored (verify keeps failing).
+        stuck_page: Option<u16>,
     }
 
     struct FakeTube(Mutex<Tube>);
@@ -712,6 +755,7 @@ mod tests {
                 cancel: None,
                 cancel_at_write: None,
                 cancel_at_poll: None,
+                stuck_page: None,
             };
             t.snapshot();
             t
@@ -871,7 +915,9 @@ mod tests {
                             self.timers += 1;
                             return nack(NackReason::BUFFER_FULL);
                         }
-                        self.flash[a..a + page].copy_from_slice(&pd[2..]);
+                        if self.stuck_page != Some(a as u16) {
+                            self.flash[a..a + page].copy_from_slice(&pd[2..]);
+                        }
                         self.writes.push(a as u16);
                         self.app_st.0 = false;
                         self.busy = 2;
@@ -1012,6 +1058,14 @@ mod tests {
         }
     }
 
+    /// (kind, bootloader_active) of a flash error, `None` for success or another error.
+    fn kind(r: &Result<FlashReport>) -> Option<(FlashErrorKind, bool)> {
+        match r {
+            Err(e) => e.flash_error().map(|f| (f.kind, f.bootloader_active)),
+            _ => None,
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn happy_path_lost_answers_and_second_pass() {
         let im = image(0x400);
@@ -1077,11 +1131,13 @@ mod tests {
             "{e}"
         );
         assert!(e.contains("nothing written"), "{e}");
+        assert_eq!(kind(&r), Some((FlashErrorKind::DeviceMismatch, false)));
         tube.with(|t| assert!(t.writes.is_empty() && t.mode == Mode::App));
 
         let tube = FakeTube::new(Tube::new(Uid::new(0x1234, 0xB066_75AA)));
         let (r, _) = run(&tube, image(0x400), TubeFlashOptions::default()).await;
         assert!(err_text(&r).contains("wrong device"), "{}", err_text(&r));
+        assert_eq!(kind(&r), Some((FlashErrorKind::DeviceMismatch, false)));
         tube.with(|t| assert!(t.writes.is_empty() && t.mode == Mode::App));
 
         // already in the bootloader (no app): its BOOT_INFO ids decide
@@ -1093,6 +1149,7 @@ mod tests {
         let (r, _) = run(&tube, image(0x400), TubeFlashOptions::default()).await;
         let e = err_text(&r);
         assert!(e.contains("BOOT_INFO") && e.contains("wrong device"), "{e}");
+        assert_eq!(kind(&r), Some((FlashErrorKind::DeviceMismatch, true)));
         tube.with(|t| assert!(t.writes.is_empty()));
     }
 
@@ -1108,6 +1165,7 @@ mod tests {
             "{}",
             err_text(&r)
         );
+        assert_eq!(kind(&r), Some((FlashErrorKind::Downgrade, false)));
         tube.with(|t| assert!(t.writes.is_empty() && t.mode == Mode::App));
 
         let tube = FakeTube::new(Tube {
@@ -1131,6 +1189,7 @@ mod tests {
         let (r, _) = run(&tube, image(0x400), TubeFlashOptions::default()).await;
         let e = err_text(&r);
         assert!(e.contains("downgrade") && e.contains("~60 s"), "{e}");
+        assert_eq!(kind(&r), Some((FlashErrorKind::Downgrade, true)));
         tube.with(|t| assert!(t.writes.is_empty()));
 
         // same in the bootloader, newer image: ok, old version from BOOT_INFO
@@ -1157,6 +1216,7 @@ mod tests {
         );
         assert!(e.contains(boot_err::text(boot_err::MODEL)), "{e}");
         assert!(e.contains("run again"), "{e}");
+        assert_eq!(kind(&r), Some((FlashErrorKind::Rejected, true)));
         tube.with(|t| assert_eq!(t.mode, Mode::Boot));
     }
 
@@ -1173,8 +1233,10 @@ mod tests {
             "{}",
             err_text(&r)
         );
+        assert_eq!(kind(&r), Some((FlashErrorKind::Incompatible, true)));
         tube.with(|t| assert!(t.writes.is_empty()));
-        assert!(parse_boot_info(&[3, 64, 0x18]).is_err());
+        let e = parse_boot_info(&[3, 64, 0x18]).unwrap_err();
+        assert_eq!(e.flash_kind(), Some(FlashErrorKind::BadResponse));
     }
 
     #[tokio::test(start_paused = true)]
@@ -1233,6 +1295,7 @@ mod tests {
             e.contains("BOOT_CATCH") && e.contains("nothing written"),
             "{e}"
         );
+        assert_eq!(kind(&r), Some((FlashErrorKind::Timeout, false)));
         tube.with(|t| assert!(t.writes.is_empty()));
 
         // our own deadline
@@ -1251,6 +1314,7 @@ mod tests {
             "{}",
             err_text(&r)
         );
+        assert_eq!(kind(&r), Some((FlashErrorKind::Timeout, false)));
         tube.with(|t| assert_eq!(t.aborts, 1));
 
         // cancelled while catching: BOOT_CATCH_ABORT sent
@@ -1268,12 +1332,48 @@ mod tests {
         });
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn no_boot_info_answer_is_timeout() {
+        // app dead, no rescue: ENTER_BOOTLOADER and BOOT_INFO stay unanswered
+        let tube = FakeTube::new(Tube {
+            mode: Mode::Dead,
+            ..Tube::new(UID)
+        });
+        let (r, _) = run(&tube, image(0x400), TubeFlashOptions::default()).await;
+        let e = err_text(&r);
+        assert!(
+            e.contains("no BOOT_INFO answer") && e.contains("nothing written"),
+            "{e}"
+        );
+        assert_eq!(kind(&r), Some((FlashErrorKind::Timeout, false)));
+        tube.with(|t| assert!(t.writes.is_empty()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn verify_failure_after_rewrite() {
+        let tube = FakeTube::new(Tube {
+            stuck_page: Some(64),
+            ..Tube::new(UID)
+        });
+        let (r, seen) = run(&tube, image(0x400), TubeFlashOptions::default()).await;
+        let e = err_text(&r);
+        assert!(
+            e.contains("chunk(s) differ") && e.contains("stays active"),
+            "{e}"
+        );
+        assert_eq!(kind(&r), Some((FlashErrorKind::Verify, true)));
+        assert!(seen.iter().any(|p| p.phase == FlashPhase::Rewriting));
+        tube.with(|t| assert_eq!(t.mode, Mode::Boot));
+    }
+
     #[test]
     fn preview_checks() {
         let im = image(0x400);
         assert!(check_tube_image_for_device(&im, 0x7FF0, 1, Some(0x301), false).is_ok());
-        assert!(check_tube_image_for_device(&im, 0x7FF0, 2, None, false).is_err());
-        assert!(check_tube_image_for_device(&im, 0x7FF0, 1, Some(0x500), false).is_err());
+        let e = check_tube_image_for_device(&im, 0x7FF0, 2, None, false).unwrap_err();
+        assert_eq!(e.flash_kind(), Some(FlashErrorKind::DeviceMismatch));
+        let e = check_tube_image_for_device(&im, 0x7FF0, 1, Some(0x500), false).unwrap_err();
+        assert_eq!(e.flash_kind(), Some(FlashErrorKind::Downgrade));
         assert!(check_tube_image_for_device(&im, 0x7FF0, 1, Some(0x500), true).is_ok());
         assert!(is_bootloader_version(0xB000_0003) && !is_bootloader_version(0x400));
     }
