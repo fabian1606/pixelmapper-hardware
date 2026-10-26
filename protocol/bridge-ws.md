@@ -18,6 +18,14 @@ The bridge owns every Art-Net/RDM packet, timer and procedure (plan D2). Pixelma
   subscription after restarts, `todRequest`/`todControl` results, `artAddress` routing,
   `ipProg` DHCP arguments, `rdmDescribe` cache, `rdmQueued` (one queue for all controllers), ArtSync rule;
   implementation notes of `pmnet-bridge` (§11).
+  Addendum (2026-10-26, `pmnet-bridge` on `pixelmapper-net` after fix/pnet-gaps; **no shape change**): the
+  bridge now fills what §11 listed as missing — `NetInterface.mac`, `NodeState.ubeaVersion`, `PortState.failsafe`
+  of every port (from the Status3 of the port's own BindIndex page), `inputPortAddress`/`outputPortAddress` as
+  reported (SwIn/SwOut), `RdmStatusMessage.text` for E1.20 Table B-2 ids. Wording: after `todControl flush` the
+  bridge requests the TOD again when the node sent **no** ArtTodData within ~3 s (every answer, changed or not,
+  is a `tod`). `artAddress`/`artInput` answer with the ArtPollReply of the addressed BindIndex (no extra wait).
+  `flash` job errors: the update flow's error kind gives `deviceMismatch`, `downgrade`, `timeout` or `nack`, other
+  kinds `badResponse` (§11).
 - *Revision 1 (2026-10-24)*: first candidate.
 
 The key words MUST, SHOULD and MAY are used as in RFC 2119. Bit positions of Art-Net fields are given for orientation; the **Art-Net 4 specification and ANSI E1.20 are binding** for positions, polarity and encoding.
@@ -401,7 +409,7 @@ Common RDM addressing arguments: `nodeId`, `port`, `uid`, `subDevice?` (default 
 | `addPollTarget` | `ip` | `{}` — the bridge also unicasts every ArtPoll to `ip` while this connection lives (manual add by IP, nodes outside the broadcast domain) | – |
 | `removePollTarget` | `ip` | `{}` | – |
 | `todRequest` | `nodeId`, `port` | `{}` — ArtTodRequest; the answer arrives as `tod`, also when the TOD did not change | `unknownNode`, `unknownPort` |
-| `todControl` | `nodeId`, `port`, `action: 'flush' \| 'end' \| 'incOn' \| 'incOff'` | `{}` — ArtTodControl `AtcFlush` (clear TOD + full discovery; the new TOD arrives as `tod` — when it did not change, the bridge re-requests it after ~3 s and sends that), `AtcEnd`, `AtcIncOn`/`AtcIncOff` (background discovery of the port on/off) | `unknownNode`, `unknownPort` |
+| `todControl` | `nodeId`, `port`, `action: 'flush' \| 'end' \| 'incOn' \| 'incOff'` | `{}` — ArtTodControl `AtcFlush` (clear TOD + full discovery; the new TOD arrives as `tod`, also when it did not change — when the node sends none within ~3 s, the bridge requests it and sends that), `AtcEnd`, `AtcIncOn`/`AtcIncOff` (background discovery of the port on/off) | `unknownNode`, `unknownPort` |
 | `rdmGet` | RDM addressing, `pid`, `data?` (hex) or `value?` (argument, see `RdmValue`) | `{ data: string, value?: RdmValue }` | `unknownNode`, `unknownPort`, `timeout`, `nack`, `badResponse` |
 | `rdmSet` | RDM addressing, `pid`, exactly one of `data` (hex) / `value` | `{ data: string, value?: RdmValue, broadcast?: true }` | as `rdmGet` |
 | `rdmDescribe` | RDM addressing (unicast `uid`), `refresh?: boolean` | `RdmDeviceDescription` | `unknownNode`, `unknownPort`, and the DEVICE_INFO failure (`timeout`, `nack`, `badResponse`) |
@@ -515,7 +523,7 @@ App-side codes (never sent by the bridge, used by the TypeScript client): `notCo
 | ArtPoll | broadcast to every interface's subnet broadcast **and** `2.255.255.255` when an interface is in 2.0.0.0/8 (never 255.255.255.255), every 2.5–3 s, `Flags` bit 1 set; replies arrive unicast with up to 1 s random delay (node contract §3) |
 | Node gone | no reply for 3 poll cycles |
 | RDM | 500 ms timeout, 2 retries, ≤ min(4, FifoAvail) in flight per port |
-| TOD | one ArtTodRequest per RDM output port when a node or port appears/reappears and after a node restart (subscribes to unsolicited ArtTodData); after `AtcFlush` an unchanged TOD is re-requested after ~3 s |
+| TOD | one ArtTodRequest per RDM output port when a node or port appears/reappears, a port changes its Port-Address or gets RDM switched on, and after a node restart (subscribes to unsolicited ArtTodData); after `AtcFlush` the TOD is requested again when no ArtTodData arrived within ~3 s |
 | ArtAddress / ArtIpProg / ArtInput | answer within 1 s, one resend |
 | DMX refresh | last data re-sent after 1 s without new data, then every 1 s |
 | DMX rate | ArtDmx per route at most at the node's `RefreshRate` (44 Hz for 0 and for `ip` routes); faster sets coalesce, latest data wins |
@@ -529,16 +537,23 @@ App-side codes (never sent by the bridge, used by the TypeScript client): `notCo
 
 ## 11. Implementation notes (`pmnet-bridge` 0.1 on `pixelmapper-net`)
 
-Where the bridge reports less than this contract describes, because `pixelmapper-net` does not keep the data yet:
+Where the bridge differs from (or narrows) what this contract describes:
 
-- `NodeState.ubeaVersion` is 0; `NetInterface.mac` is `null`.
-- `PortState.failsafe` is known only for the ports of the lowest BindIndex (the library keeps Status3 of that reply);
-  the other ports report `null`.
-- A port carries one Port-Address: the field of its current direction gets it, the other one Net/Sub-Net with
-  universe 0 (exact for the Pixelmapper Node, node contract §3).
 - `lastSeen` is the time the bridge last processed an ArtPollReply of the node's lowest BindIndex (every reply
   changes the NodeReport counter, so that is every poll cycle).
 - ArtSync goes to every broadcast target of the bridge (each interface's directed broadcast and 2.255.255.255, or the
-  `--broadcast` targets), not only to the interfaces that carried ArtDmx of the set.
-- `RdmStatusMessage.text` is filled for the manufacturer status ids of `pids.toml`; E1.20 Table B-2 texts are not
-  available yet (`null`).
+  `--broadcast` targets), not only to the interfaces that carried ArtDmx of the set. The default targets follow
+  interface changes (re-read every 5 s).
+- `NetInterface.mac` is `null` for interfaces without a hardware address (loopback, tunnels) and on platforms other
+  than Linux, macOS and the BSDs.
+- `RdmStatusMessage.text`: E1.20 Table B-2 texts (taken from OLA, not yet checked against the ESTA text) for standard
+  ids of every device, `pids.toml` texts for the manufacturer ids of Pixelmapper devices; `null` for other
+  manufacturers' ids.
+- TOD subscription: `pixelmapper-net` requests the TODs of new nodes, new Port-Addresses and restarted nodes; the
+  bridge adds the requests for ports that get RDM switched on again, switch to output or change their Port-Address.
+  After a Port-Address change the TOD can arrive twice (both requested it).
+- `flash` job `error.code` comes from the library's flash error kind: `device_mismatch` → `deviceMismatch`,
+  `downgrade` → `downgrade`, `timeout` → `timeout`, `nack` → `nack`, every other kind (`incompatible`, `busy`,
+  `rejected`, `verify`, `version_mismatch`, `bad_response`, `other`) → `badResponse`. `inBootloader` after a failure
+  is `true` when the library flags the tube as left in its bootloader, else as the progress left it (`false` once
+  the job reached `confirming`).
