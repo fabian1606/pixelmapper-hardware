@@ -22,6 +22,7 @@ use pixelmapper_net::image::{NodeImage, TubeImage};
 use pixelmapper_net::rdm::pd::{decode_label, DeviceInfo, FwInfo, ParameterDescription};
 use pixelmapper_net::rdm::{pid, Uid};
 use pixelmapper_net::state::{Failsafe, Indicators, MergeMode, PortDirection};
+use pixelmapper_net::FlashErrorKind;
 use pixelmapper_net::{pids, Error, Event, NodeId, NodeState};
 use std::io::{BufRead, BufReader};
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
@@ -756,6 +757,40 @@ async fn e2e_4_rdm_get_set_and_describe() {
             .find(|x| x.pid == def.pid)
             .unwrap();
         assert_eq!(*got, want, "PARAMETER_DESCRIPTION 0x{:04X}", def.pid);
+        // the generated per-PID metadata the bridge uses agrees with what the node answers
+        let m = pids::pid_meta(def.pid).unwrap();
+        assert_eq!(
+            (
+                m.pdl_size,
+                m.data_type,
+                m.command_class,
+                m.unit,
+                m.prefix,
+                m.description
+            ),
+            (
+                Some(got.pdl_size),
+                Some(got.data_type),
+                got.command_class,
+                Some(got.unit),
+                Some(got.prefix),
+                Some(got.description.as_str())
+            ),
+            "PID_META 0x{:04X}",
+            def.pid
+        );
+        assert_eq!(
+            (m.min, m.max, m.default),
+            (
+                Some(got.min_valid_value as i64),
+                Some(got.max_valid_value as i64),
+                Some(got.default_value as i64)
+            ),
+            "PID_META range 0x{:04X}",
+            def.pid
+        );
+        let value_pdl: u16 = m.value_fields().iter().map(|f| f.max_size()).sum();
+        assert_eq!(value_pdl, u16::from(got.pdl_size), "{}", m.name);
     }
     // node settings via RDM
     ctrl.rdm_set(
@@ -1115,6 +1150,18 @@ async fn e2e_7_tube_flash_and_rescue() {
     assert_eq!(st[0], pids::boot_catch_state::CAUGHT);
     assert_eq!(st[1], 1);
     assert_eq!(&st[2..8], &t.to_bytes());
+
+    // downgrade refused before anything is written
+    let job = ctrl
+        .flash_tube(&id, pa(1), t, tube_image(0x000600), false, false)
+        .unwrap();
+    let e = tokio::time::timeout(Duration::from_secs(30), job.wait())
+        .await
+        .expect("downgrade check time")
+        .unwrap_err();
+    assert_eq!(e.flash_kind(), Some(FlashErrorKind::Downgrade), "{e}");
+    assert!(e.to_string().contains("nothing written"), "{e}");
+    assert_eq!(vn.tube(1, t, "version"), "0x000700");
     ctrl.shutdown();
 }
 
@@ -1177,6 +1224,7 @@ async fn e2e_8_node_flash() {
         .unwrap();
     let e = job.wait().await.unwrap_err();
     assert!(e.to_string().contains("FLASH"), "{e}");
+    assert_eq!(e.flash_kind(), Some(FlashErrorKind::Rejected), "{e}");
     let fi = fw_info(&ctrl, &vn).await;
     assert_eq!(fi.state, pids::fw_state::FAILED);
     assert_eq!(fi.last_error, pids::fw_error::FLASH);
@@ -2258,4 +2306,86 @@ async fn e2e_differential_queued_messages() {
         lists[0], lists[1],
         "queued messages: firmware (left) vs sim::node (right)"
     );
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// 10. Gaps reported by the bridge adapter: per-page Status3, SwIn/SwOut, UBEA, TODs of all pages, TodNak,
+//     every complete TOD answer
+// ---------------------------------------------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e2e_10_per_page_state_and_tods_of_all_pages() {
+    let vn = vn_or_skip!(&["--tubes", "3:2,4:1"]);
+    let ctrl = controller(&vn).await;
+    let id = vn.id();
+    let mut tods = ctrl.subscribe_tods();
+    // auto_tod_request: every RDM port of every page gets an ArtTodRequest, not only the first page's
+    let t3 = eventually(WAIT, || async {
+        ctrl.tod(&id, pa(3)).filter(|t| t.len() == 2)
+    })
+    .await;
+    assert_eq!(t3, Some(vec![tube_uid(3, 1), tube_uid(3, 2)]));
+    let t4 = eventually(WAIT, || async {
+        ctrl.tod(&id, pa(4)).filter(|t| t.len() == 1)
+    })
+    .await;
+    assert_eq!(t4, Some(vec![tube_uid(4, 1)]));
+    assert!(ctrl.tod(&id, pa(2)).is_some(), "empty TOD of page 2 known");
+
+    // Status3 per page: failsafe Zero on page 3 only
+    let n = ctrl
+        .art_address_command(&id, 3, ac::AC_FAIL_ZERO)
+        .await
+        .unwrap()
+        .expect("reply");
+    let n = if n.ports[2].status3.failsafe == Failsafe::Zero {
+        n
+    } else {
+        node_when(&ctrl, &id, |n| {
+            n.ports[2].status3.failsafe == Failsafe::Zero
+        })
+        .await
+    };
+    let fs: Vec<Failsafe> = n.ports.iter().map(|p| p.status3.failsafe).collect();
+    assert_eq!(
+        fs,
+        [
+            Failsafe::Hold,
+            Failsafe::Hold,
+            Failsafe::Zero,
+            Failsafe::Hold
+        ]
+    );
+    assert_eq!(n.status3.failsafe, Failsafe::Hold, "root page");
+    for (i, p) in n.ports.iter().enumerate() {
+        assert_eq!(p.sw_out, pa(i as u16 + 1));
+        assert_eq!(p.sw_out, p.port_address, "output port");
+        assert!(p.status3.direction_switchable);
+    }
+    assert_eq!(n.ubea_version, 0);
+
+    // every complete answer is reported, also an unchanged one; TodNak is told apart from an empty TOD
+    while tods.try_recv().is_ok() {}
+    for _ in 0..2 {
+        let r = ctrl.tod_refresh_reply(&id, pa(3), WAIT).await.unwrap();
+        assert!(!r.nak);
+        assert_eq!(r.uids.len(), 2);
+    }
+    let mut seen = 0;
+    while let Ok(r) = tods.try_recv() {
+        if r.port_address == pa(3) {
+            assert_eq!((r.node, r.uids.len(), r.nak), (id, 2, false));
+            seen += 1;
+        }
+    }
+    assert!(seen >= 2, "one TodReply per answer, got {seen}");
+    let empty = ctrl.tod_refresh_reply(&id, pa(2), WAIT).await.unwrap();
+    assert!(!empty.nak && empty.uids.is_empty(), "{empty:?}");
+    ctrl.art_address_command(&id, 2, ac::AC_RDM_DISABLE0)
+        .await
+        .unwrap();
+    node_when(&ctrl, &id, |n| !n.ports[1].rdm_enabled).await;
+    let nak = ctrl.tod_refresh_reply(&id, pa(2), WAIT).await.unwrap();
+    assert!(nak.nak && nak.uids.is_empty(), "{nak:?}");
+    ctrl.shutdown();
 }

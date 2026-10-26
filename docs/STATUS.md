@@ -29,9 +29,9 @@ Befehle: siehe CLAUDE.md. Zahlen vom 2026-10-26 auf `main`:
   Vektoren), `pm_port` 364 Checks (Leitungs-FSM im Simulator, Zeitbudget, Pins), `pm_net_tests` 384 Checks (IP-Logik,
   NVS-Store, OTA-Session), `pm_fuzz` (Zufalls-/Mutationstests aller Netzwerk-Parser unter ASan/UBSan),
   `pm_ui_render` (alle UI-Szenen), `virtual_node_smoke`
-- Rust-Workspace: build, 213 Tests, clippy `-D warnings`, fmt – grün (die 18 E2E-Tests kehren ohne `PM_VIRTUAL_NODE`
+- Rust-Workspace: build, 258 Tests (nach fix/pnet-gaps), clippy `-D warnings`, fmt – grün (die E2E-Tests kehren ohne `PM_VIRTUAL_NODE`
   sofort zurück und zählen dann mit)
-- `tools/e2e.sh`: 18/18 – pixelmapper-net gegen den virtuellen Node über UDP: Discovery (4 BindIndex), ArtAddress,
+- `tools/e2e.sh`: 19/19 (seit fix/pnet-gaps) – pixelmapper-net gegen den virtuellen Node über UDP: Discovery (4 BindIndex), ArtAddress,
   ArtIpProg (Abfrage und Änderung), TOD inkl. mehrerer Blöcke und ungefragter Daten nach Node-Neustart, RDM GET/SET
   an Tubes und Node, describe_device/PARAMETER_DESCRIPTION, Queued Messages + Last-Writer-Wins mit zwei Controllern,
   DMX mit HTP/LTP-Merge, Sync, Failsafe, Tube-Flash mit BOOT_CATCH-Rettung, Node-Flash per .alf und FW_* inkl.
@@ -82,6 +82,14 @@ Firmware-Update und Abnahme
 - **UI-Fragen an den Nutzer** (unbeantwortet, nichts umgesetzt): Geräteliste nach DMX-Adresse sortieren? Encoder-Druck
   auf Home öffnet das Hauptmenü? Vorgemerkte Netzwerkwerte bei Remote-Änderung stehen lassen? Wo wird „Sync“ angezeigt
   (UI-Konzept hat keinen Platz)? „Gateway“ wird bei langen IPs zu „Gatewa“ abgeschnitten.
+- `pixelmapper-net`, Lücken aus dem Bridge-Adapter (fix/pnet-gaps, additiv): `PortState.status3/sw_in/sw_out`,
+  `NodeState.ubea_version`, TOD-Abo für alle BindIndex-Seiten, `Controller::subscribe_tods()`/`tod_refresh_reply()`
+  (`TodReply` mit `nak`, für jede vollständige Antwort), Antwort-Warten pro BindIndex bei `art_address`/`art_input`,
+  `FlashErrorKind` über `Error::flash_kind()`/`flash_error()` (Art als Tag ` [kind: …]` am Text, `Error::Flash`
+  bleibt `String`), `pids::PID_META`/`ENUMS` (Feldtypen, PARAMETER_DESCRIPTION), `rdm::status` (Texte E1.20 Tab. B-2,
+  [ungeprüft]), `controller::interface_macs()`/`Interface::mac()`, `Controller::set_broadcast_targets()`.
+  Offen für die Bridge-Session: Adapter auf diese API umstellen (Text-Erkennung in `flash_error_code`, Failsafe
+  der Seiten 2–4, eigenes TOD-Abo pro Port). Kein neues `Event`-Variant, weil der Adapter `Event` erschöpfend matcht.
 - `pixelmapper-net`: empfangenes ArtDmx (Input-Ports) wird nicht als Event weitergegeben (E2E prüft per Roh-Socket);
   Neustart-Erkennung über den NodeReport-Zähler versagt, wenn der Zähler vor dem Neustart ≥ 9900 war; der
   ArtTodData-Decoder akzeptiert UidCount > 200 (nachsichtig).

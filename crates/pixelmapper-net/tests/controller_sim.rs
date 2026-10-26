@@ -693,3 +693,134 @@ async fn extra_poll_targets_and_nonblocking_dmx() {
     ctrl.shutdown();
     sim.shutdown();
 }
+
+#[tokio::test]
+async fn auto_tod_request_covers_every_page() {
+    // the pages of a node arrive one by one; ArtTodRequest must follow for every page, not only the first one
+    let sim = SimNode::start(SimConfig::default()).await.unwrap();
+    for port in 1..=4u8 {
+        let uid = Uid::new(pids::ESTA_MANUFACTURER, 0x0100 + u32::from(port));
+        sim.add_responder(port, Box::new(fast_tube(uid, Some(tube_image(1)))));
+    }
+    let ctrl = Controller::bind(ctrl_config(&sim)).await.unwrap();
+    let id = NodeId::Uid(sim.uid());
+    ctrl.wait_for_node(&id, WAIT).await.unwrap();
+    let all = tokio::time::timeout(WAIT, async {
+        loop {
+            let have: Vec<usize> = (1..=4)
+                .filter_map(|p| ctrl.tod(&id, pa(p)).map(|t| t.len()))
+                .collect();
+            if have == [1, 1, 1, 1] {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    assert!(
+        all.is_ok(),
+        "TODs without explicit request: {:?}",
+        (1..=4).map(|p| ctrl.tod(&id, pa(p))).collect::<Vec<_>>()
+    );
+    ctrl.shutdown();
+    sim.shutdown();
+}
+
+#[tokio::test]
+async fn broadcast_targets_change_at_runtime() {
+    let sim = SimNode::start(SimConfig::default()).await.unwrap();
+    let sink = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut cfg = ctrl_config(&sim);
+    cfg.broadcast = vec![sink.local_addr().unwrap()];
+    let ctrl = Controller::bind(cfg).await.unwrap();
+    let id = NodeId::Uid(sim.uid());
+    assert!(ctrl
+        .wait_for_node(&id, Duration::from_millis(500))
+        .await
+        .is_err());
+    ctrl.set_broadcast_targets(&[sim.local_addr()]);
+    assert_eq!(ctrl.broadcast_targets(), vec![sim.local_addr()]);
+    ctrl.wait_for_node(&id, WAIT).await.unwrap();
+    // empty = defaults for the bound address (127.0.0.1: only 2.255.255.255, never 255.255.255.255)
+    ctrl.set_broadcast_targets(&[]);
+    let t = ctrl.broadcast_targets();
+    assert!(!t.is_empty() && !t.contains(&sim.local_addr()), "{t:?}");
+    assert!(t.iter().all(|a| a.ip() != std::net::Ipv4Addr::BROADCAST));
+    ctrl.shutdown();
+    sim.shutdown();
+}
+
+/// A hand-driven fake node: answers ArtPoll with 4 pages; on ArtAddress for page 3 it first sends an unchanged
+/// page-1 reply, then (later) the changed page 3.
+#[tokio::test]
+async fn art_address_waits_for_the_reply_of_its_bind_index() {
+    use pixelmapper_net::artnet::{ArtPacket, ArtPollReply};
+    let node = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut cfg = ControllerConfig::local(vec![node.local_addr().unwrap()]);
+    cfg.poll_interval = Duration::ZERO;
+    cfg.reply_timeout = Duration::from_millis(1500);
+    cfg.auto_tod_request = false;
+    cfg.rdm.node_queue_interval = Duration::ZERO;
+    let ctrl = Controller::bind(cfg).await.unwrap();
+    let page = |bind: u8, uni: u8| ArtPollReply {
+        ip: std::net::Ipv4Addr::LOCALHOST,
+        short_name: "Fake".into(),
+        num_ports: 1,
+        port_types: [0x80, 0, 0, 0],
+        sw_out: [uni, 0, 0, 0],
+        bind_index: bind,
+        default_resp_uid: Uid::new(0x7FF0, 0x8000_0042),
+        status1: 0xE2,
+        ..Default::default()
+    };
+    let fake = tokio::spawn(async move {
+        let mut buf = [0u8; 1024];
+        let mut uni3 = 3u8;
+        loop {
+            let Ok((n, src)) = node.recv_from(&mut buf).await else {
+                return;
+            };
+            match ArtPacket::decode(&buf[..n]) {
+                Ok(ArtPacket::Poll(_)) => {
+                    for b in 1..=4u8 {
+                        let u = if b == 3 { uni3 } else { b };
+                        let r = ArtPacket::PollReply(page(b, u)).encode();
+                        let _ = node.send_to(&r, src).await;
+                    }
+                }
+                Ok(ArtPacket::Address(a)) if a.bind_index == 3 => {
+                    let r = ArtPacket::PollReply(page(1, 1)).encode();
+                    let _ = node.send_to(&r, src).await;
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    uni3 = a.sw_out[0] & 0x0F;
+                    let r = ArtPacket::PollReply(page(3, uni3)).encode();
+                    let _ = node.send_to(&r, src).await;
+                }
+                _ => {}
+            }
+        }
+    });
+    let id = NodeId::Uid(Uid::new(0x7FF0, 0x8000_0042));
+    let n = tokio::time::timeout(WAIT, async {
+        loop {
+            ctrl.poll_now().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if let Some(n) = ctrl.node(&id).filter(|n| n.ports.len() == 4) {
+                return n;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(n.ports[2].port_address, pa(3));
+    let mut a = ArtAddress::command(3, address_command::AC_NONE);
+    a.sw_out[0] = ArtAddress::program(9);
+    let got = ctrl.art_address(&id, a).await.unwrap().expect("reply");
+    assert_eq!(
+        got.ports[2].port_address,
+        pa(9),
+        "state after the page-3 reply, not after page 1"
+    );
+    ctrl.shutdown();
+    fake.abort();
+}

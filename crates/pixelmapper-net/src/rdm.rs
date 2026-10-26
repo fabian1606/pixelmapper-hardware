@@ -6,6 +6,7 @@
 
 pub mod pd;
 pub mod pid;
+pub mod status;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;

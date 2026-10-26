@@ -217,7 +217,8 @@ pub const PID_FW_WRITE: u16 = 0x8182;
 pub const PID_FW_FINISH: u16 = 0x8183;
 
 /// Which firmware answers a PID.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Device {
     TubeApp,
     TubeBoot,
@@ -304,3 +305,443 @@ pub static PIDS: &[PidDef] = &[
 pub const NODE_STD_PIDS_REQUIRED: &[u16] = &[0x0060, 0x0050, 0x0051, 0x00C0, 0x1000];
 /// Standard PIDs the node reports in SUPPORTED_PARAMETERS.
 pub const NODE_STD_PIDS_LISTED: &[u16] = &[0x0020, 0x0030, 0x0031, 0x0032, 0x0070, 0x0080, 0x0081, 0x0082, 0x0090, 0x00C1, 0x00C2, 0x0501, 0x1001, 0x0700, 0x0701, 0x0702, 0x0703, 0x0705, 0x0706, 0x0707, 0x0709, 0x070A];
+
+// ---- per-PID metadata: field layouts + PARAMETER_DESCRIPTION (PID_META) and enum tables (ENUMS) ----
+
+/// Type of one parameter data field (pids.toml `type`). Multi-byte values are big-endian.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FieldType {
+    U8,
+    U16,
+    U32,
+    I8,
+    I16,
+    I32,
+    /// One byte, 0 = false, 1 = true.
+    Bool,
+    /// RDM UID, 6 bytes.
+    Uid,
+    /// IPv4 address, 4 bytes.
+    Ipv4,
+    /// ASCII text, `len` (fixed) or up to `max_len` bytes.
+    Ascii,
+    /// Raw bytes, `len` (fixed) or up to `max_len` bytes.
+    Bytes,
+}
+
+impl FieldType {
+    /// Size in bytes of the fixed-size types (`None` for `Ascii`/`Bytes`).
+    pub const fn fixed_size(self) -> Option<u16> {
+        match self {
+            FieldType::U8 | FieldType::I8 | FieldType::Bool => Some(1),
+            FieldType::U16 | FieldType::I16 => Some(2),
+            FieldType::U32 | FieldType::I32 | FieldType::Ipv4 => Some(4),
+            FieldType::Uid => Some(6),
+            FieldType::Ascii | FieldType::Bytes => None,
+        }
+    }
+}
+
+/// One field of a PDL layout (pids.toml `get_request`/`get_response`/`set_request`/`set_response` entry).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PidField {
+    pub name: &'static str,
+    #[serde(rename = "type")]
+    pub ty: FieldType,
+    /// Fixed length of an `Ascii`/`Bytes` field.
+    pub len: Option<u16>,
+    /// Maximum length of a variable `Ascii`/`Bytes` field (must be the last field).
+    pub max_len: Option<u16>,
+    /// Valid range of the field, if pids.toml restricts it.
+    pub min: Option<i64>,
+    pub max: Option<i64>,
+    /// Fixed content the field must have (e.g. `"BOOT"`).
+    pub value: Option<&'static str>,
+    /// Name of the `[enums.*]` table (see [`ENUMS`], [`enum_def`]) the value belongs to.
+    pub enum_name: Option<&'static str>,
+    /// Raw pids.toml `enum` reference: an `[enums.*]` name or a constant prefix such as `"BOOT_ERR_*"`.
+    pub enum_ref: Option<&'static str>,
+    pub doc: Option<&'static str>,
+}
+
+impl PidField {
+    /// Maximum size in bytes.
+    pub const fn max_size(&self) -> u16 {
+        match (self.ty.fixed_size(), self.len, self.max_len) {
+            (Some(n), _, _) => n,
+            (None, Some(n), _) => n,
+            (None, None, Some(n)) => n,
+            (None, None, None) => 0,
+        }
+    }
+
+    /// Minimum size in bytes (0 for variable-length fields).
+    pub const fn min_size(&self) -> u16 {
+        match (self.ty.fixed_size(), self.len) {
+            (Some(n), _) => n,
+            (None, Some(n)) => n,
+            (None, None) => 0,
+        }
+    }
+}
+
+/// Everything pids.toml says about one (expanded) manufacturer PID: command classes, PDL layouts and
+/// PARAMETER_DESCRIPTION values (the `[pid.pd]` fields are `None` for PIDs without one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PidMeta {
+    pub pid: u16,
+    /// Expanded name (`"PORT2_DMX_BREAK"`).
+    pub name: &'static str,
+    /// Name with `{n}` removed (`"PORT_DMX_BREAK"`), equal to `name` for non-repeated PIDs.
+    pub base_name: &'static str,
+    /// Port 1..N of a `repeat`-expanded PID.
+    pub port: Option<u8>,
+    pub device: Device,
+    /// E1.20 command class bits: 0x01 GET, 0x02 SET, 0x03 GET_SET.
+    pub command_class: u8,
+    pub get: bool,
+    pub set: bool,
+    /// Listed in SUPPORTED_PARAMETERS (answers PARAMETER_DESCRIPTION).
+    pub listed: bool,
+    pub doc: &'static str,
+    /// PDL layouts, `None` when the command class does not include GET resp. SET.
+    pub get_request: Option<&'static [PidField]>,
+    pub get_response: Option<&'static [PidField]>,
+    pub set_request: Option<&'static [PidField]>,
+    pub set_response: Option<&'static [PidField]>,
+    /// PARAMETER_DESCRIPTION (E1.20 codes).
+    pub pdl_size: Option<u8>,
+    pub data_type: Option<u8>,
+    pub unit: Option<u8>,
+    pub prefix: Option<u8>,
+    pub min: Option<i64>,
+    pub max: Option<i64>,
+    pub default: Option<i64>,
+    pub description: Option<&'static str>,
+}
+
+impl PidMeta {
+    /// Layout of the parameter value: GET response, or SET request for SET-only PIDs.
+    pub fn value_fields(&self) -> &'static [PidField] {
+        match (self.get_response, self.set_request) {
+            (Some(f), _) | (None, Some(f)) => f,
+            (None, None) => &[],
+        }
+    }
+
+    /// The single value field of a single-value PID.
+    pub fn value_field(&self) -> Option<&'static PidField> {
+        match self.value_fields() {
+            [f] => Some(f),
+            _ => None,
+        }
+    }
+
+    /// Single-value PID whose value is one bool field.
+    pub fn is_bool(&self) -> bool {
+        self.value_field().is_some_and(|f| f.ty == FieldType::Bool)
+    }
+}
+
+/// One value of an enum table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct EnumValue {
+    pub name: &'static str,
+    pub value: u8,
+}
+
+/// One pids.toml `[enums.*]` table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct EnumDef {
+    pub name: &'static str,
+    pub values: &'static [EnumValue],
+}
+
+impl EnumDef {
+    /// Name of a value.
+    pub fn value_name(&self, value: u8) -> Option<&'static str> {
+        self.values.iter().find(|v| v.value == value).map(|v| v.name)
+    }
+
+    /// Value of a name.
+    pub fn value_of(&self, name: &str) -> Option<u8> {
+        self.values.iter().find(|v| v.name == name).map(|v| v.value)
+    }
+}
+
+/// All enum tables of pids.toml.
+pub static ENUMS: &[EnumDef] = &[
+    EnumDef { name: "boot_catch_state", values: &[EnumValue { name: "IDLE", value: 0 }, EnumValue { name: "RUNNING", value: 1 }, EnumValue { name: "CAUGHT", value: 2 }, EnumValue { name: "TIMEOUT", value: 3 }, EnumValue { name: "ABORTED", value: 4 }] },
+    EnumDef { name: "fw_state", values: &[EnumValue { name: "IDLE", value: 0 }, EnumValue { name: "RECEIVING", value: 1 }, EnumValue { name: "VERIFYING", value: 2 }, EnumValue { name: "READY", value: 3 }, EnumValue { name: "FAILED", value: 4 }] },
+    EnumDef { name: "fw_error", values: &[EnumValue { name: "NONE", value: 0 }, EnumValue { name: "DESC_MAGIC", value: 1 }, EnumValue { name: "DESC_MANUFACTURER", value: 2 }, EnumValue { name: "DESC_MODEL", value: 3 }, EnumValue { name: "DESC_HW_REV", value: 4 }, EnumValue { name: "TOO_LARGE", value: 5 }, EnumValue { name: "SEQUENCE", value: 6 }, EnumValue { name: "DESC_MISMATCH", value: 7 }, EnumValue { name: "CRC", value: 8 }, EnumValue { name: "IMAGE_INVALID", value: 9 }, EnumValue { name: "FLASH", value: 10 }, EnumValue { name: "TIMEOUT", value: 11 }, EnumValue { name: "OEM", value: 12 }] },
+    EnumDef { name: "address_format", values: &[EnumValue { name: "NET_SUB_UNI", value: 0 }, EnumValue { name: "PORT_ADDRESS", value: 1 }] },
+];
+
+/// Enum table by name (e.g. `"fw_state"`).
+pub fn enum_def(name: &str) -> Option<&'static EnumDef> {
+    ENUMS.iter().find(|e| e.name == name)
+}
+
+/// Metadata of all manufacturer PIDs (same order as [`PIDS`]).
+pub static PID_META: &[PidMeta] = &[
+    PidMeta { pid: 0x8000, name: "ENTER_BOOTLOADER", base_name: "ENTER_BOOTLOADER", port: None, device: Device::TubeApp, command_class: 0x02, get: false, set: true, listed: true, doc: "ACK, then RAM magic + watchdog reset into tube_boot_rdm. Not executed when sent to a broadcast UID.",
+        get_request: None,
+        get_response: None,
+        set_request: Some(&[PidField { name: "magic", ty: FieldType::Ascii, len: Some(4), max_len: None, min: None, max: None, value: Some("BOOT"), enum_name: None, enum_ref: None, doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: Some(4), data_type: Some(2), unit: Some(0), prefix: Some(0), min: Some(0), max: Some(0), default: Some(0), description: Some("Enter bootloader (SET \"BOOT\")") },
+    PidMeta { pid: 0x8010, name: "BOOT_INFO", base_name: "BOOT_INFO", port: None, device: Device::TubeBoot, command_class: 0x01, get: true, set: false, listed: false, doc: "Bootloader state. GET within ~200 ms after reset keeps the bootloader active (rescue).",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "version", ty: FieldType::U8, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: Some("BOOT_RDM_VERSION") }, PidField { name: "page_size", ty: FieldType::U8, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: Some("64") }, PidField { name: "app_end", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: Some("0x1800") }, PidField { name: "busy", ty: FieldType::U8, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: Some("1 while a page is erased/written") }, PidField { name: "last_error", ty: FieldType::U8, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: Some("BOOT_ERR_*"), doc: Some("reading clears it") }, PidField { name: "manufacturer", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }, PidField { name: "model", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }, PidField { name: "boot_sw_version", ty: FieldType::U32, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: Some("BOOT_RDM_SW_VERSION_ID") }, PidField { name: "app_valid", ty: FieldType::U8, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: Some("installed app trailer valid 0/1 (state of the last check)") }, PidField { name: "app_fw_version", ty: FieldType::U32, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: Some("FW_VERSION_ID from that trailer") }]),
+        set_request: None,
+        set_response: None,
+        pdl_size: None, data_type: None, unit: None, prefix: None, min: None, max: None, default: None, description: None },
+    PidMeta { pid: 0x8011, name: "BOOT_WRITE_PAGE", base_name: "BOOT_WRITE_PAGE", port: None, device: Device::TubeBoot, command_class: 0x02, get: false, set: true, listed: false, doc: "ACK = page buffered (written in the background). NACK BUFFER_FULL = previous page busy, resend. NACK DATA_OUT_OF_RANGE = address >= app end or not page aligned.",
+        get_request: None,
+        get_response: None,
+        set_request: Some(&[PidField { name: "address", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }, PidField { name: "data", ty: FieldType::Bytes, len: Some(64), max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: None, data_type: None, unit: None, prefix: None, min: None, max: None, default: None, description: None },
+    PidMeta { pid: 0x8012, name: "BOOT_APP_CRC", base_name: "BOOT_APP_CRC", port: None, device: Device::TubeBoot, command_class: 0x01, get: true, set: false, listed: false, doc: "CRC16-CCITT (0x1021, init 0xFFFF) of flash address..address+length-1. NACK BUFFER_FULL while a page is written.",
+        get_request: Some(&[PidField { name: "address", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }, PidField { name: "length", ty: FieldType::U16, len: None, max_len: None, min: None, max: Some(256), value: None, enum_name: None, enum_ref: None, doc: None }]),
+        get_response: Some(&[PidField { name: "crc16", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_request: None,
+        set_response: None,
+        pdl_size: None, data_type: None, unit: None, prefix: None, min: None, max: None, default: None, description: None },
+    PidMeta { pid: 0x8013, name: "BOOT_FINISH", base_name: "BOOT_FINISH", port: None, device: Device::TubeBoot, command_class: 0x02, get: false, set: true, listed: false, doc: "ACK (NACK BUFFER_FULL if busy), then trailer check: valid -> reset into the app, else stays with last_error FORMAT/MODEL/APP_INVALID.",
+        get_request: None,
+        get_response: None,
+        set_request: Some(&[]),
+        set_response: Some(&[]),
+        pdl_size: None, data_type: None, unit: None, prefix: None, min: None, max: None, default: None, description: None },
+    PidMeta { pid: 0x8100, name: "NODE_HW_REVISION", base_name: "NODE_HW_REVISION", port: None, device: Device::Node, command_class: 0x01, get: true, set: false, listed: true, doc: "Hardware revision detected at boot (0 = prototype: Waveshare ESP32-P4-WIFI6-POE-ETH + hand-wired transceivers).",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "hw_revision", ty: FieldType::U8, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_request: None,
+        set_response: None,
+        pdl_size: Some(1), data_type: Some(3), unit: Some(0), prefix: Some(0), min: Some(0), max: Some(255), default: Some(0), description: Some("Hardware revision") },
+    PidMeta { pid: 0x8101, name: "PORT1_ENABLED", base_name: "PORT_ENABLED", port: Some(1), device: Device::Node, command_class: 0x03, get: true, set: true, listed: true, doc: "Port n on/off (output and input). For input ports ArtInput changes the same setting.",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "enabled", ty: FieldType::Bool, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_request: Some(&[PidField { name: "enabled", ty: FieldType::Bool, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: Some(1), data_type: Some(3), unit: Some(0), prefix: Some(0), min: Some(0), max: Some(1), default: Some(1), description: Some("Port 1 enabled") },
+    PidMeta { pid: 0x8102, name: "PORT2_ENABLED", base_name: "PORT_ENABLED", port: Some(2), device: Device::Node, command_class: 0x03, get: true, set: true, listed: true, doc: "Port n on/off (output and input). For input ports ArtInput changes the same setting.",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "enabled", ty: FieldType::Bool, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_request: Some(&[PidField { name: "enabled", ty: FieldType::Bool, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: Some(1), data_type: Some(3), unit: Some(0), prefix: Some(0), min: Some(0), max: Some(1), default: Some(1), description: Some("Port 2 enabled") },
+    PidMeta { pid: 0x8103, name: "PORT3_ENABLED", base_name: "PORT_ENABLED", port: Some(3), device: Device::Node, command_class: 0x03, get: true, set: true, listed: true, doc: "Port n on/off (output and input). For input ports ArtInput changes the same setting.",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "enabled", ty: FieldType::Bool, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_request: Some(&[PidField { name: "enabled", ty: FieldType::Bool, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: Some(1), data_type: Some(3), unit: Some(0), prefix: Some(0), min: Some(0), max: Some(1), default: Some(1), description: Some("Port 3 enabled") },
+    PidMeta { pid: 0x8104, name: "PORT4_ENABLED", base_name: "PORT_ENABLED", port: Some(4), device: Device::Node, command_class: 0x03, get: true, set: true, listed: true, doc: "Port n on/off (output and input). For input ports ArtInput changes the same setting.",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "enabled", ty: FieldType::Bool, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_request: Some(&[PidField { name: "enabled", ty: FieldType::Bool, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: Some(1), data_type: Some(3), unit: Some(0), prefix: Some(0), min: Some(0), max: Some(1), default: Some(1), description: Some("Port 4 enabled") },
+    PidMeta { pid: 0x8110, name: "PORT1_DMX_BREAK", base_name: "PORT_DMX_BREAK", port: Some(1), device: Device::Node, command_class: 0x03, get: true, set: true, listed: true, doc: "DMX/RDM break length sent on port n. E1.20 controller range 176..352 us.",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "break_us", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_request: Some(&[PidField { name: "break_us", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: Some(2), data_type: Some(5), unit: Some(21), prefix: Some(4), min: Some(176), max: Some(352), default: Some(176), description: Some("Port 1 DMX break") },
+    PidMeta { pid: 0x8111, name: "PORT2_DMX_BREAK", base_name: "PORT_DMX_BREAK", port: Some(2), device: Device::Node, command_class: 0x03, get: true, set: true, listed: true, doc: "DMX/RDM break length sent on port n. E1.20 controller range 176..352 us.",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "break_us", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_request: Some(&[PidField { name: "break_us", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: Some(2), data_type: Some(5), unit: Some(21), prefix: Some(4), min: Some(176), max: Some(352), default: Some(176), description: Some("Port 2 DMX break") },
+    PidMeta { pid: 0x8112, name: "PORT3_DMX_BREAK", base_name: "PORT_DMX_BREAK", port: Some(3), device: Device::Node, command_class: 0x03, get: true, set: true, listed: true, doc: "DMX/RDM break length sent on port n. E1.20 controller range 176..352 us.",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "break_us", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_request: Some(&[PidField { name: "break_us", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: Some(2), data_type: Some(5), unit: Some(21), prefix: Some(4), min: Some(176), max: Some(352), default: Some(176), description: Some("Port 3 DMX break") },
+    PidMeta { pid: 0x8113, name: "PORT4_DMX_BREAK", base_name: "PORT_DMX_BREAK", port: Some(4), device: Device::Node, command_class: 0x03, get: true, set: true, listed: true, doc: "DMX/RDM break length sent on port n. E1.20 controller range 176..352 us.",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "break_us", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_request: Some(&[PidField { name: "break_us", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: Some(2), data_type: Some(5), unit: Some(21), prefix: Some(4), min: Some(176), max: Some(352), default: Some(176), description: Some("Port 4 DMX break") },
+    PidMeta { pid: 0x8114, name: "PORT1_DMX_MAB", base_name: "PORT_DMX_MAB", port: Some(1), device: Device::Node, command_class: 0x03, get: true, set: true, listed: true, doc: "Mark-after-break sent on port n. E1.20 controller range 12..88 us.",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "mab_us", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_request: Some(&[PidField { name: "mab_us", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: Some(2), data_type: Some(5), unit: Some(21), prefix: Some(4), min: Some(12), max: Some(88), default: Some(16), description: Some("Port 1 DMX mark after break") },
+    PidMeta { pid: 0x8115, name: "PORT2_DMX_MAB", base_name: "PORT_DMX_MAB", port: Some(2), device: Device::Node, command_class: 0x03, get: true, set: true, listed: true, doc: "Mark-after-break sent on port n. E1.20 controller range 12..88 us.",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "mab_us", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_request: Some(&[PidField { name: "mab_us", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: Some(2), data_type: Some(5), unit: Some(21), prefix: Some(4), min: Some(12), max: Some(88), default: Some(16), description: Some("Port 2 DMX mark after break") },
+    PidMeta { pid: 0x8116, name: "PORT3_DMX_MAB", base_name: "PORT_DMX_MAB", port: Some(3), device: Device::Node, command_class: 0x03, get: true, set: true, listed: true, doc: "Mark-after-break sent on port n. E1.20 controller range 12..88 us.",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "mab_us", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_request: Some(&[PidField { name: "mab_us", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: Some(2), data_type: Some(5), unit: Some(21), prefix: Some(4), min: Some(12), max: Some(88), default: Some(16), description: Some("Port 3 DMX mark after break") },
+    PidMeta { pid: 0x8117, name: "PORT4_DMX_MAB", base_name: "PORT_DMX_MAB", port: Some(4), device: Device::Node, command_class: 0x03, get: true, set: true, listed: true, doc: "Mark-after-break sent on port n. E1.20 controller range 12..88 us.",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "mab_us", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_request: Some(&[PidField { name: "mab_us", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: Some(2), data_type: Some(5), unit: Some(21), prefix: Some(4), min: Some(12), max: Some(88), default: Some(16), description: Some("Port 4 DMX mark after break") },
+    PidMeta { pid: 0x8118, name: "PORT1_DMX_RATE", base_name: "PORT_DMX_RATE", port: Some(1), device: Device::Node, command_class: 0x03, get: true, set: true, listed: true, doc: "Target DMX refresh rate of port n (continuous output). RDM traffic may lower it, never below 30 Hz while discovery runs (plan).",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "rate_hz", ty: FieldType::U8, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_request: Some(&[PidField { name: "rate_hz", ty: FieldType::U8, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: Some(1), data_type: Some(3), unit: Some(8), prefix: Some(0), min: Some(1), max: Some(44), default: Some(40), description: Some("Port 1 DMX refresh rate") },
+    PidMeta { pid: 0x8119, name: "PORT2_DMX_RATE", base_name: "PORT_DMX_RATE", port: Some(2), device: Device::Node, command_class: 0x03, get: true, set: true, listed: true, doc: "Target DMX refresh rate of port n (continuous output). RDM traffic may lower it, never below 30 Hz while discovery runs (plan).",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "rate_hz", ty: FieldType::U8, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_request: Some(&[PidField { name: "rate_hz", ty: FieldType::U8, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: Some(1), data_type: Some(3), unit: Some(8), prefix: Some(0), min: Some(1), max: Some(44), default: Some(40), description: Some("Port 2 DMX refresh rate") },
+    PidMeta { pid: 0x811A, name: "PORT3_DMX_RATE", base_name: "PORT_DMX_RATE", port: Some(3), device: Device::Node, command_class: 0x03, get: true, set: true, listed: true, doc: "Target DMX refresh rate of port n (continuous output). RDM traffic may lower it, never below 30 Hz while discovery runs (plan).",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "rate_hz", ty: FieldType::U8, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_request: Some(&[PidField { name: "rate_hz", ty: FieldType::U8, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: Some(1), data_type: Some(3), unit: Some(8), prefix: Some(0), min: Some(1), max: Some(44), default: Some(40), description: Some("Port 3 DMX refresh rate") },
+    PidMeta { pid: 0x811B, name: "PORT4_DMX_RATE", base_name: "PORT_DMX_RATE", port: Some(4), device: Device::Node, command_class: 0x03, get: true, set: true, listed: true, doc: "Target DMX refresh rate of port n (continuous output). RDM traffic may lower it, never below 30 Hz while discovery runs (plan).",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "rate_hz", ty: FieldType::U8, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_request: Some(&[PidField { name: "rate_hz", ty: FieldType::U8, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: Some(1), data_type: Some(3), unit: Some(8), prefix: Some(0), min: Some(1), max: Some(44), default: Some(40), description: Some("Port 4 DMX refresh rate") },
+    PidMeta { pid: 0x811C, name: "PORT1_DMX_MBS", base_name: "PORT_DMX_MBS", port: Some(1), device: Device::Node, command_class: 0x03, get: true, set: true, listed: true, doc: "Extra mark between slots (inter-slot time) on port n, 0 = back to back. Realised by the UART idle time (pm_port_cfg_t.mbs_us); semantics to be confirmed on hardware (pm_port/MEASURE.md M5).",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "mbs_us", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_request: Some(&[PidField { name: "mbs_us", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: Some(2), data_type: Some(5), unit: Some(21), prefix: Some(4), min: Some(0), max: Some(100), default: Some(0), description: Some("Port 1 DMX mark between slots") },
+    PidMeta { pid: 0x811D, name: "PORT2_DMX_MBS", base_name: "PORT_DMX_MBS", port: Some(2), device: Device::Node, command_class: 0x03, get: true, set: true, listed: true, doc: "Extra mark between slots (inter-slot time) on port n, 0 = back to back. Realised by the UART idle time (pm_port_cfg_t.mbs_us); semantics to be confirmed on hardware (pm_port/MEASURE.md M5).",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "mbs_us", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_request: Some(&[PidField { name: "mbs_us", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: Some(2), data_type: Some(5), unit: Some(21), prefix: Some(4), min: Some(0), max: Some(100), default: Some(0), description: Some("Port 2 DMX mark between slots") },
+    PidMeta { pid: 0x811E, name: "PORT3_DMX_MBS", base_name: "PORT_DMX_MBS", port: Some(3), device: Device::Node, command_class: 0x03, get: true, set: true, listed: true, doc: "Extra mark between slots (inter-slot time) on port n, 0 = back to back. Realised by the UART idle time (pm_port_cfg_t.mbs_us); semantics to be confirmed on hardware (pm_port/MEASURE.md M5).",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "mbs_us", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_request: Some(&[PidField { name: "mbs_us", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: Some(2), data_type: Some(5), unit: Some(21), prefix: Some(4), min: Some(0), max: Some(100), default: Some(0), description: Some("Port 3 DMX mark between slots") },
+    PidMeta { pid: 0x811F, name: "PORT4_DMX_MBS", base_name: "PORT_DMX_MBS", port: Some(4), device: Device::Node, command_class: 0x03, get: true, set: true, listed: true, doc: "Extra mark between slots (inter-slot time) on port n, 0 = back to back. Realised by the UART idle time (pm_port_cfg_t.mbs_us); semantics to be confirmed on hardware (pm_port/MEASURE.md M5).",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "mbs_us", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_request: Some(&[PidField { name: "mbs_us", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: Some(2), data_type: Some(5), unit: Some(21), prefix: Some(4), min: Some(0), max: Some(100), default: Some(0), description: Some("Port 4 DMX mark between slots") },
+    PidMeta { pid: 0x8120, name: "PORT1_RDM_BG_DISCOVERY", base_name: "PORT_RDM_BG_DISCOVERY", port: Some(1), device: Device::Node, command_class: 0x03, get: true, set: true, listed: true, doc: "Background (incremental) discovery on port n on/off. Same state as ArtTodControl AtcIncOn/AtcIncOff.",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "enabled", ty: FieldType::Bool, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_request: Some(&[PidField { name: "enabled", ty: FieldType::Bool, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: Some(1), data_type: Some(3), unit: Some(0), prefix: Some(0), min: Some(0), max: Some(1), default: Some(1), description: Some("Port 1 background discovery") },
+    PidMeta { pid: 0x8121, name: "PORT2_RDM_BG_DISCOVERY", base_name: "PORT_RDM_BG_DISCOVERY", port: Some(2), device: Device::Node, command_class: 0x03, get: true, set: true, listed: true, doc: "Background (incremental) discovery on port n on/off. Same state as ArtTodControl AtcIncOn/AtcIncOff.",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "enabled", ty: FieldType::Bool, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_request: Some(&[PidField { name: "enabled", ty: FieldType::Bool, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: Some(1), data_type: Some(3), unit: Some(0), prefix: Some(0), min: Some(0), max: Some(1), default: Some(1), description: Some("Port 2 background discovery") },
+    PidMeta { pid: 0x8122, name: "PORT3_RDM_BG_DISCOVERY", base_name: "PORT_RDM_BG_DISCOVERY", port: Some(3), device: Device::Node, command_class: 0x03, get: true, set: true, listed: true, doc: "Background (incremental) discovery on port n on/off. Same state as ArtTodControl AtcIncOn/AtcIncOff.",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "enabled", ty: FieldType::Bool, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_request: Some(&[PidField { name: "enabled", ty: FieldType::Bool, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: Some(1), data_type: Some(3), unit: Some(0), prefix: Some(0), min: Some(0), max: Some(1), default: Some(1), description: Some("Port 3 background discovery") },
+    PidMeta { pid: 0x8123, name: "PORT4_RDM_BG_DISCOVERY", base_name: "PORT_RDM_BG_DISCOVERY", port: Some(4), device: Device::Node, command_class: 0x03, get: true, set: true, listed: true, doc: "Background (incremental) discovery on port n on/off. Same state as ArtTodControl AtcIncOn/AtcIncOff.",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "enabled", ty: FieldType::Bool, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_request: Some(&[PidField { name: "enabled", ty: FieldType::Bool, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: Some(1), data_type: Some(3), unit: Some(0), prefix: Some(0), min: Some(0), max: Some(1), default: Some(1), description: Some("Port 4 background discovery") },
+    PidMeta { pid: 0x8124, name: "RDM_BG_DISCOVERY_INTERVAL", base_name: "RDM_BG_DISCOVERY_INTERVAL", port: None, device: Device::Node, command_class: 0x03, get: true, set: true, listed: true, doc: "Interval of the background discovery (new devices + presence check of known ones), all ports.",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "interval_s", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_request: Some(&[PidField { name: "interval_s", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: Some(2), data_type: Some(5), unit: Some(21), prefix: Some(0), min: Some(1), max: Some(600), default: Some(3), description: Some("Background discovery interval") },
+    PidMeta { pid: 0x8130, name: "DISPLAY_DIM_TIMEOUT", base_name: "DISPLAY_DIM_TIMEOUT", port: None, device: Device::Node, command_class: 0x03, get: true, set: true, listed: true, doc: "Seconds without operation until the display dims (never off; LED Mute switches it off). 0 = never dim. Brightness: standard DISPLAY_LEVEL.",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "timeout_s", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_request: Some(&[PidField { name: "timeout_s", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: Some(2), data_type: Some(5), unit: Some(21), prefix: Some(0), min: Some(0), max: Some(3600), default: Some(60), description: Some("Display dim timeout") },
+    PidMeta { pid: 0x8131, name: "DISPLAY_ADDRESS_FORMAT", base_name: "DISPLAY_ADDRESS_FORMAT", port: None, device: Device::Node, command_class: 0x03, get: true, set: true, listed: true, doc: "How the display shows Port-Addresses: 0 = Net:Sub:Uni, 1 = 15-bit number (enum address_format).",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "format", ty: FieldType::U8, len: None, max_len: None, min: None, max: None, value: None, enum_name: Some("address_format"), enum_ref: Some("address_format"), doc: None }]),
+        set_request: Some(&[PidField { name: "format", ty: FieldType::U8, len: None, max_len: None, min: None, max: None, value: None, enum_name: Some("address_format"), enum_ref: Some("address_format"), doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: Some(1), data_type: Some(3), unit: Some(0), prefix: Some(0), min: Some(0), max: Some(1), default: Some(0), description: Some("Addr format 0=Net:Sub:Uni 1=15b") },
+    PidMeta { pid: 0x8132, name: "PANEL_LOCK", base_name: "PANEL_LOCK", port: None, device: Device::Node, command_class: 0x03, get: true, set: true, listed: true, doc: "Front panel lock. Remote SETs are never blocked. BACK + push for 3 s at the device releases it (no PIN) and queues PANEL_UNLOCKED_LOCAL. E1.37-1 LOCK_STATE is not used: it requires a PIN and locks RDM SETs (WRITE_PROTECT).",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "locked", ty: FieldType::Bool, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_request: Some(&[PidField { name: "locked", ty: FieldType::Bool, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: Some(1), data_type: Some(3), unit: Some(0), prefix: Some(0), min: Some(0), max: Some(1), default: Some(0), description: Some("Front panel locked") },
+    PidMeta { pid: 0x8140, name: "BOOT_CATCH_START", base_name: "BOOT_CATCH_START", port: None, device: Device::Node, command_class: 0x02, get: false, set: true, listed: true, doc: "Start catching a tube bootloader: the node sends GET BOOT_INFO (0x8010) to target_uid on port every BOOT_CATCH_PERIOD_MS for BOOT_CATCH_DURATION_MS. A running catch is replaced. NACK DATA_OUT_OF_RANGE: port not 1..4, disabled, input, or broadcast UID.",
+        get_request: None,
+        get_response: None,
+        set_request: Some(&[PidField { name: "port", ty: FieldType::U8, len: None, max_len: None, min: Some(1), max: Some(4), value: None, enum_name: None, enum_ref: None, doc: None }, PidField { name: "target_uid", ty: FieldType::Uid, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: Some(7), data_type: Some(0), unit: Some(0), prefix: Some(0), min: Some(0), max: Some(0), default: Some(0), description: Some("Boot catch start (port, UID)") },
+    PidMeta { pid: 0x8141, name: "BOOT_CATCH_STATUS", base_name: "BOOT_CATCH_STATUS", port: None, device: Device::Node, command_class: 0x01, get: true, set: false, listed: true, doc: "State of the last/current catch. Every state change queues this GET response as a queued message (plus status BOOT_CATCH_CAUGHT / BOOT_CATCH_TIMEOUT).",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "state", ty: FieldType::U8, len: None, max_len: None, min: None, max: None, value: None, enum_name: Some("boot_catch_state"), enum_ref: Some("boot_catch_state"), doc: None }, PidField { name: "port", ty: FieldType::U8, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }, PidField { name: "target_uid", ty: FieldType::Uid, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }, PidField { name: "elapsed_ms", ty: FieldType::U32, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }, PidField { name: "attempts", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_request: None,
+        set_response: None,
+        pdl_size: Some(14), data_type: Some(0), unit: Some(0), prefix: Some(0), min: Some(0), max: Some(0), default: Some(0), description: Some("Boot catch status") },
+    PidMeta { pid: 0x8142, name: "BOOT_CATCH_ABORT", base_name: "BOOT_CATCH_ABORT", port: None, device: Device::Node, command_class: 0x02, get: false, set: true, listed: true, doc: "Abort a running catch (state ABORTED). ACK also when idle.",
+        get_request: None,
+        get_response: None,
+        set_request: Some(&[]),
+        set_response: Some(&[]),
+        pdl_size: Some(0), data_type: Some(0), unit: Some(0), prefix: Some(0), min: Some(0), max: Some(0), default: Some(0), description: Some("Boot catch abort") },
+    PidMeta { pid: 0x8150, name: "LOCAL_RDM_SET", base_name: "LOCAL_RDM_SET", port: None, device: Device::Node, command_class: 0x01, get: true, set: false, listed: true, doc: "Last RDM SET the node made from its own panel to an attached device. Each such SET queues this GET response (and status LOCAL_RDM_SET) so Pixelmapper can re-read that parameter. sequence counts up from boot.",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "sequence", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }, PidField { name: "port", ty: FieldType::U8, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }, PidField { name: "uid", ty: FieldType::Uid, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }, PidField { name: "sub_device", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }, PidField { name: "pid", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_request: None,
+        set_response: None,
+        pdl_size: Some(13), data_type: Some(0), unit: Some(0), prefix: Some(0), min: Some(0), max: Some(0), default: Some(0), description: Some("Last RDM SET from front panel") },
+    PidMeta { pid: 0x8180, name: "FW_INFO", base_name: "FW_INFO", port: None, device: Device::Node, command_class: 0x01, get: true, set: false, listed: true, doc: "Firmware update state of the node (RDM path, also reflects an ArtFirmwareMaster session).",
+        get_request: Some(&[]),
+        get_response: Some(&[PidField { name: "manufacturer", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }, PidField { name: "model", ty: FieldType::U16, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }, PidField { name: "hw_revision", ty: FieldType::U8, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }, PidField { name: "fw_version", ty: FieldType::U32, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: Some("running FW_VERSION_ID 0x00MMmmpp") }, PidField { name: "state", ty: FieldType::U8, len: None, max_len: None, min: None, max: None, value: None, enum_name: Some("fw_state"), enum_ref: Some("fw_state"), doc: None }, PidField { name: "last_error", ty: FieldType::U8, len: None, max_len: None, min: None, max: None, value: None, enum_name: Some("fw_error"), enum_ref: Some("fw_error"), doc: None }, PidField { name: "max_block", ty: FieldType::U8, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: Some("NODE_FW_MAX_BLOCK") }, PidField { name: "received", ty: FieldType::U32, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }, PidField { name: "total", ty: FieldType::U32, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_request: None,
+        set_response: None,
+        pdl_size: Some(20), data_type: Some(0), unit: Some(0), prefix: Some(0), min: Some(0), max: Some(0), default: Some(0), description: Some("Firmware update info") },
+    PidMeta { pid: 0x8181, name: "FW_BEGIN", base_name: "FW_BEGIN", port: None, device: Device::Node, command_class: 0x02, get: false, set: true, listed: true, doc: "Start an update. PD = the 64-byte node image description block (image-format.md) with image_length and image_crc32 filled in. Checked immediately: NACK DATA_OUT_OF_RANGE + FW_INFO.last_error on mismatch. Opens the inactive OTA partition (erase may take long: ACK_TIMER allowed). Restarts a running session.",
+        get_request: None,
+        get_response: None,
+        set_request: Some(&[PidField { name: "description", ty: FieldType::Bytes, len: Some(64), max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: Some(64), data_type: Some(0), unit: Some(0), prefix: Some(0), min: Some(0), max: Some(0), default: Some(0), description: Some("Firmware update begin") },
+    PidMeta { pid: 0x8182, name: "FW_WRITE", base_name: "FW_WRITE", port: None, device: Device::Node, command_class: 0x02, get: false, set: true, listed: true, doc: "Write image bytes. offset == received: append. offset + len <= received: ACK without writing (retransmission). offset > received: NACK DATA_OUT_OF_RANGE. NACK BUFFER_FULL: busy, resend.",
+        get_request: None,
+        get_response: None,
+        set_request: Some(&[PidField { name: "offset", ty: FieldType::U32, len: None, max_len: None, min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }, PidField { name: "data", ty: FieldType::Bytes, len: None, max_len: Some(224), min: None, max: None, value: None, enum_name: None, enum_ref: None, doc: None }]),
+        set_response: Some(&[]),
+        pdl_size: Some(228), data_type: Some(0), unit: Some(0), prefix: Some(0), min: Some(0), max: Some(0), default: Some(0), description: Some("Firmware update write") },
+    PidMeta { pid: 0x8183, name: "FW_FINISH", base_name: "FW_FINISH", port: None, device: Device::Node, command_class: 0x02, get: false, set: true, listed: true, doc: "Verify (length, CRC-32, ESP-IDF image check) and activate. ACK -> reboot after ~500 ms into the new image (rollback if it does not mark itself valid). NACK + last_error on failure, the old firmware stays active.",
+        get_request: None,
+        get_response: None,
+        set_request: Some(&[]),
+        set_response: Some(&[]),
+        pdl_size: Some(0), data_type: Some(0), unit: Some(0), prefix: Some(0), min: Some(0), max: Some(0), default: Some(0), description: Some("Firmware update finish") },
+];
+
+/// Metadata of a manufacturer PID.
+pub fn pid_meta(pid: u16) -> Option<&'static PidMeta> {
+    PID_META.iter().find(|m| m.pid == pid)
+}
