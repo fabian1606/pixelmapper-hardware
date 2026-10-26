@@ -2259,3 +2259,85 @@ async fn e2e_differential_queued_messages() {
         "queued messages: firmware (left) vs sim::node (right)"
     );
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// 10. Gaps reported by the bridge adapter: per-page Status3, SwIn/SwOut, UBEA, TODs of all pages, TodNak,
+//     every complete TOD answer
+// ---------------------------------------------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e2e_10_per_page_state_and_tods_of_all_pages() {
+    let vn = vn_or_skip!(&["--tubes", "3:2,4:1"]);
+    let ctrl = controller(&vn).await;
+    let id = vn.id();
+    let mut tods = ctrl.subscribe_tods();
+    // auto_tod_request: every RDM port of every page gets an ArtTodRequest, not only the first page's
+    let t3 = eventually(WAIT, || async {
+        ctrl.tod(&id, pa(3)).filter(|t| t.len() == 2)
+    })
+    .await;
+    assert_eq!(t3, Some(vec![tube_uid(3, 1), tube_uid(3, 2)]));
+    let t4 = eventually(WAIT, || async {
+        ctrl.tod(&id, pa(4)).filter(|t| t.len() == 1)
+    })
+    .await;
+    assert_eq!(t4, Some(vec![tube_uid(4, 1)]));
+    assert!(ctrl.tod(&id, pa(2)).is_some(), "empty TOD of page 2 known");
+
+    // Status3 per page: failsafe Zero on page 3 only
+    let n = ctrl
+        .art_address_command(&id, 3, ac::AC_FAIL_ZERO)
+        .await
+        .unwrap()
+        .expect("reply");
+    let n = if n.ports[2].status3.failsafe == Failsafe::Zero {
+        n
+    } else {
+        node_when(&ctrl, &id, |n| {
+            n.ports[2].status3.failsafe == Failsafe::Zero
+        })
+        .await
+    };
+    let fs: Vec<Failsafe> = n.ports.iter().map(|p| p.status3.failsafe).collect();
+    assert_eq!(
+        fs,
+        [
+            Failsafe::Hold,
+            Failsafe::Hold,
+            Failsafe::Zero,
+            Failsafe::Hold
+        ]
+    );
+    assert_eq!(n.status3.failsafe, Failsafe::Hold, "root page");
+    for (i, p) in n.ports.iter().enumerate() {
+        assert_eq!(p.sw_out, pa(i as u16 + 1));
+        assert_eq!(p.sw_out, p.port_address, "output port");
+        assert!(p.status3.direction_switchable);
+    }
+    assert_eq!(n.ubea_version, 0);
+
+    // every complete answer is reported, also an unchanged one; TodNak is told apart from an empty TOD
+    while tods.try_recv().is_ok() {}
+    for _ in 0..2 {
+        let r = ctrl.tod_refresh_reply(&id, pa(3), WAIT).await.unwrap();
+        assert!(!r.nak);
+        assert_eq!(r.uids.len(), 2);
+    }
+    let mut seen = 0;
+    while let Ok(r) = tods.try_recv() {
+        if r.port_address == pa(3) {
+            assert_eq!((r.node, r.uids.len(), r.nak), (id, 2, false));
+            seen += 1;
+        }
+    }
+    assert!(seen >= 2, "one TodReply per answer, got {seen}");
+    let empty = ctrl.tod_refresh_reply(&id, pa(2), WAIT).await.unwrap();
+    assert!(!empty.nak && empty.uids.is_empty(), "{empty:?}");
+    ctrl.art_address_command(&id, 2, ac::AC_RDM_DISABLE0)
+        .await
+        .unwrap();
+    node_when(&ctrl, &id, |n| !n.ports[1].rdm_enabled).await;
+    let nak = ctrl.tod_refresh_reply(&id, pa(2), WAIT).await.unwrap();
+    assert!(nak.nak && nak.uids.is_empty(), "{nak:?}");
+    ctrl.shutdown();
+}

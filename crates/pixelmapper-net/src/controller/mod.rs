@@ -24,7 +24,7 @@ mod rdm_engine;
 
 pub use describe::{DeviceDescription, SensorDescription, SlotDescriptionEntry};
 pub use link::{ControllerNodeLink, ControllerPortLink};
-pub use net::{default_broadcast_targets, interfaces, Interface};
+pub use net::{default_broadcast_targets, interface_macs, interfaces, Interface};
 
 use crate::artnet::{
     ArtAddress, ArtDmx, ArtFirmwareMaster, ArtFirmwareReply, ArtInput, ArtIpProg, ArtIpProgReply,
@@ -182,6 +182,21 @@ pub struct RdmRequest {
     pub options: RdmOptions,
 }
 
+/// One complete ArtTodData answer (all blocks) or a TodNak, delivered by [`Controller::subscribe_tods`] for every
+/// answer, whether or not the TOD changed ([`Event::TodChanged`] only reports changes).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodReply {
+    /// Node.
+    pub node: NodeId,
+    /// Port-Address.
+    pub port_address: PortAddress,
+    /// All UIDs (sorted; empty for a TodNak).
+    pub uids: Vec<Uid>,
+    /// The node answered TodNak (TOD not available / discovery incomplete), not an empty TOD.
+    pub nak: bool,
+}
+
 struct BindEntry {
     id: NodeId,
     reply: ArtPollReply,
@@ -211,10 +226,13 @@ struct State {
     dmx_seq_to: HashMap<(SocketAddr, u16), u8>,
     /// Extra unicast ArtPoll destinations ([`Controller::set_poll_targets`]).
     poll_targets: Vec<SocketAddr>,
-    reply_waiters: Vec<(SocketAddr, oneshot::Sender<()>)>,
+    /// Waiters for an ArtPollReply of one BindIndex page from one address.
+    reply_waiters: Vec<((SocketAddr, u8), oneshot::Sender<()>)>,
     ipprog_waiters: Vec<(SocketAddr, oneshot::Sender<ArtIpProgReply>)>,
     fw_waiters: Vec<(SocketAddr, oneshot::Sender<ArtFirmwareReply>)>,
-    tod_waiters: Vec<(TodKey, oneshot::Sender<Vec<Uid>>)>,
+    tod_waiters: Vec<(TodKey, oneshot::Sender<TodReply>)>,
+    /// Port-Addresses an ArtTodRequest was sent for since the node was discovered (or restarted).
+    tod_requested: HashMap<NodeId, BTreeSet<u16>>,
     /// Last NodeReport counter per node (restart detection, contract §6.1).
     report_counts: HashMap<NodeId, u16>,
 }
@@ -223,8 +241,9 @@ pub(crate) struct Inner {
     cfg: ControllerConfig,
     socket: Arc<UdpSocket>,
     local: SocketAddr,
-    broadcast: Vec<SocketAddr>,
+    broadcast: Mutex<Vec<SocketAddr>>,
     events: broadcast::Sender<Event>,
+    tod_replies: broadcast::Sender<TodReply>,
     state: Mutex<State>,
     rdm: RdmEngine,
     jobs: AtomicU64,
@@ -243,23 +262,17 @@ impl Controller {
     pub async fn bind(cfg: ControllerConfig) -> Result<Self> {
         let socket = Arc::new(net::bind_socket(cfg.bind, cfg.reuse_port)?);
         let local = socket.local_addr()?;
-        let broadcast = if cfg.broadcast.is_empty() {
-            let ip = match cfg.bind {
-                SocketAddr::V4(a) => *a.ip(),
-                SocketAddr::V6(_) => Ipv4Addr::UNSPECIFIED,
-            };
-            default_broadcast_targets(ip, cfg.node_port)
-        } else {
-            cfg.broadcast.clone()
-        };
+        let broadcast = resolve_broadcast(&cfg, &cfg.broadcast);
         let (events, _) = broadcast::channel(4096);
+        let (tod_replies, _) = broadcast::channel(1024);
         let inner = Arc::new(Inner {
             rdm: RdmEngine::new(cfg.uid, cfg.rdm.clone()),
             cfg,
             socket: socket.clone(),
             local,
-            broadcast,
+            broadcast: Mutex::new(broadcast),
             events,
+            tod_replies,
             state: Mutex::new(State::default()),
             jobs: AtomicU64::new(1),
             tasks: Mutex::new(Vec::new()),
@@ -281,9 +294,24 @@ impl Controller {
         &self.inner.cfg
     }
 
-    /// ArtPoll/ArtSync destinations in use.
-    pub fn broadcast_targets(&self) -> &[SocketAddr] {
-        &self.inner.broadcast
+    /// ArtPoll/ArtSync destinations in use (a copy; they can change with
+    /// [`set_broadcast_targets`](Self::set_broadcast_targets)).
+    pub fn broadcast_targets(&self) -> Vec<SocketAddr> {
+        lock(&self.inner.broadcast).clone()
+    }
+
+    /// Replace the ArtPoll/ArtSync destinations at runtime (e.g. after the user picked another interface or a
+    /// network change). Empty = [`default_broadcast_targets`] for the bound address, recomputed now. Applies to
+    /// the next ArtPoll/ArtSync; [`set_poll_targets`](Self::set_poll_targets) stays separate.
+    pub fn set_broadcast_targets(&self, targets: &[SocketAddr]) {
+        let t = resolve_broadcast(&self.inner.cfg, targets);
+        *lock(&self.inner.broadcast) = t;
+    }
+
+    /// Subscribe to every complete ArtTodData answer (all blocks) and every TodNak, also when the TOD did not
+    /// change (unlike [`Event::TodChanged`]). Lagging receivers lose the oldest entries.
+    pub fn subscribe_tods(&self) -> broadcast::Receiver<TodReply> {
+        self.inner.tod_replies.subscribe()
     }
 
     /// Subscribe to events. Lagging receivers lose the oldest events (`RecvError::Lagged`).
@@ -479,13 +507,26 @@ impl Controller {
     }
 
     /// ArtTodRequest and wait for the complete answer (all ArtTodData blocks), even if the TOD did not change.
-    /// A TodNak gives an empty list.
+    /// A TodNak gives an empty list; use [`tod_refresh_reply`](Self::tod_refresh_reply) to tell the two apart.
     pub async fn tod_refresh(
         &self,
         node: &NodeId,
         port_address: PortAddress,
         timeout: Duration,
     ) -> Result<Vec<Uid>> {
+        Ok(self
+            .tod_refresh_reply(node, port_address, timeout)
+            .await?
+            .uids)
+    }
+
+    /// Like [`tod_refresh`](Self::tod_refresh), but returns the whole answer with the TodNak flag.
+    pub async fn tod_refresh_reply(
+        &self,
+        node: &NodeId,
+        port_address: PortAddress,
+        timeout: Duration,
+    ) -> Result<TodReply> {
         let (tx, rx) = oneshot::channel();
         lock(&self.inner.state)
             .tod_waiters
@@ -520,7 +561,8 @@ impl Controller {
 
     // ---------------------------------------------------------------- configuration
 
-    /// Send ArtAddress (BindIndex in the packet selects the port page) and wait for the node's ArtPollReply.
+    /// Send ArtAddress (BindIndex in the packet selects the port page) and wait for the node's ArtPollReply of
+    /// that BindIndex (replies of other pages, e.g. to a concurrent ArtPoll, do not count).
     /// Returns the updated state (`None` if no reply came within [`ControllerConfig::reply_timeout`]).
     pub async fn art_address(
         &self,
@@ -528,7 +570,8 @@ impl Controller {
         packet: ArtAddress,
     ) -> Result<Option<NodeState>> {
         let n = self.node_or_err(node)?;
-        self.send_and_wait_reply(&n, ArtPacket::Address(packet))
+        let bind = packet.bind_index.max(1);
+        self.send_and_wait_reply(&n, bind, ArtPacket::Address(packet))
             .await
     }
 
@@ -543,7 +586,8 @@ impl Controller {
             .await
     }
 
-    /// ArtInput: `disabled[i]` disables DMX input i of that BindIndex page. Waits for the ArtPollReply.
+    /// ArtInput: `disabled[i]` disables DMX input i of that BindIndex page. Waits for the ArtPollReply of that
+    /// BindIndex.
     pub async fn art_input(
         &self,
         node: &NodeId,
@@ -561,7 +605,8 @@ impl Controller {
             num_ports: ports.max(1),
             input,
         };
-        self.send_and_wait_reply(&n, ArtPacket::Input(p)).await
+        self.send_and_wait_reply(&n, bind_index.max(1), ArtPacket::Input(p))
+            .await
     }
 
     /// Read the node's IP configuration without changing it: ArtIpProg with Command = 0 → ArtIpProgReply
@@ -599,10 +644,13 @@ impl Controller {
     async fn send_and_wait_reply(
         &self,
         n: &NodeState,
+        bind_index: u8,
         packet: ArtPacket,
     ) -> Result<Option<NodeState>> {
         let (tx, rx) = oneshot::channel();
-        lock(&self.inner.state).reply_waiters.push((n.address, tx));
+        lock(&self.inner.state)
+            .reply_waiters
+            .push(((n.address, bind_index), tx));
         self.inner.send_to(&packet, n.address).await?;
         let got = tokio::time::timeout(self.inner.cfg.reply_timeout, rx).await;
         Ok(match got {
@@ -680,8 +728,8 @@ impl Controller {
     /// ignored like in [`send_sync`](Self::send_sync).
     pub fn try_send_sync(&self) {
         let pkt = ArtPacket::Sync(ArtSync::default()).encode();
-        for t in &self.inner.broadcast {
-            let _ = self.inner.socket.try_send_to(&pkt, *t);
+        for t in self.broadcast_targets() {
+            let _ = self.inner.socket.try_send_to(&pkt, t);
         }
     }
 
@@ -694,7 +742,7 @@ impl Controller {
     /// ArtSync as broadcast (contract §4: never unicast).
     pub async fn send_sync(&self) -> Result<()> {
         let pkt = ArtPacket::Sync(ArtSync::default()).encode();
-        for t in &self.inner.broadcast {
+        for t in self.broadcast_targets() {
             let _ = self.inner.socket.send_to(&pkt, t).await;
         }
         Ok(())
@@ -857,7 +905,8 @@ impl Inner {
         let mut last_err = None;
         let mut ok = false;
         let extra = lock(&self.state).poll_targets.clone();
-        for t in self.broadcast.iter().chain(extra.iter()) {
+        let bc = lock(&self.broadcast).clone();
+        for t in bc.iter().chain(extra.iter()) {
             match self.socket.send_to(&pkt, t).await {
                 Ok(_) => ok = true,
                 Err(e) => last_err = Some(e),
@@ -967,8 +1016,9 @@ impl Inner {
         st.binds.retain(|(a, _), b| !(b.id == id && *a != src));
         // A different node at this address (e.g. replaced device): drop its pages.
         st.binds.retain(|(a, _), b| !(*a == src && b.id != id));
+        let bind = r.bind_index.max(1);
         st.binds.insert(
-            (src, r.bind_index.max(1)),
+            (src, bind),
             BindEntry {
                 id,
                 reply: r,
@@ -979,11 +1029,26 @@ impl Inner {
         let waiters: Vec<_> = {
             let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut st.reply_waiters)
                 .into_iter()
-                .partition(|(a, _)| *a == src);
+                .partition(|(k, _)| *k == (src, bind));
             st.reply_waiters = rest;
             mine
         };
         let state = st.nodes.get(&id).map(|n| n.state.clone());
+        // ArtTodRequest for every RDM output port of every page not requested yet since discovery/restart: the
+        // pages arrive one by one, so the first reply alone does not know all ports.
+        let tod_ports: Vec<PortAddress> = match (&state, self.cfg.auto_tod_request) {
+            (Some(s), true) => {
+                if is_new {
+                    st.tod_requested.remove(&id);
+                }
+                let done = st.tod_requested.entry(id).or_default();
+                tod_ports(s)
+                    .into_iter()
+                    .filter(|pa| done.insert(pa.raw()))
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
         drop(st);
         if let (Some(s), true) = (&state, changed) {
             self.emit(Event::NodeUpdated { node: s.clone() });
@@ -991,25 +1056,22 @@ impl Inner {
         for (_, tx) in waiters {
             let _ = tx.send(());
         }
-        if let (Some(s), true) = (state, is_new && self.cfg.auto_tod_request) {
+        if let (Some(s), false) = (state, tod_ports.is_empty()) {
             let me = self.clone();
-            tokio::spawn(async move { me.request_tods(&s).await });
+            tokio::spawn(async move { me.request_tods(s.address, &tod_ports).await });
         }
     }
 
-    async fn request_tods(&self, n: &NodeState) {
+    async fn request_tods(&self, address: SocketAddr, ports: &[PortAddress]) {
         let mut by_net: BTreeMap<u8, Vec<PortAddress>> = BTreeMap::new();
-        for p in &n.ports {
-            if p.direction == PortDirection::Output && p.rdm_enabled {
-                by_net
-                    .entry(p.port_address.net())
-                    .or_default()
-                    .push(p.port_address);
-            }
+        for pa in ports {
+            by_net.entry(pa.net()).or_default().push(*pa);
         }
         for (net, pas) in by_net {
-            let p = ArtTodRequest::for_port_addresses(net, &pas);
-            let _ = self.send_to(&ArtPacket::TodRequest(p), n.address).await;
+            for chunk in pas.chunks(ArtTodRequest::MAX_ADDRESSES) {
+                let p = ArtTodRequest::for_port_addresses(net, chunk);
+                let _ = self.send_to(&ArtPacket::TodRequest(p), address).await;
+            }
         }
     }
 
@@ -1051,9 +1113,16 @@ impl Inner {
             .partition(|(k, _)| *k == (node, pa.raw()));
         st.tod_waiters = rest;
         drop(st);
+        let reply = TodReply {
+            node,
+            port_address: pa,
+            uids: uids.clone(),
+            nak,
+        };
         for (_, tx) in mine {
-            let _ = tx.send(uids.clone());
+            let _ = tx.send(reply.clone());
         }
+        let _ = self.tod_replies.send(reply);
         if old.as_ref() == Some(&uids) && !nak {
             return;
         }
@@ -1094,6 +1163,7 @@ impl Inner {
                     }),
                     None => {
                         st.tods.retain(|(n, _), _| *n != id);
+                        st.tod_requested.remove(&id);
                         events.push(Event::NodeGone { id });
                     }
                 }
@@ -1103,6 +1173,28 @@ impl Inner {
         for e in events {
             self.emit(e);
         }
+    }
+}
+
+/// RDM output ports of a node (ArtTodRequest targets).
+fn tod_ports(n: &NodeState) -> Vec<PortAddress> {
+    n.ports
+        .iter()
+        .filter(|p| p.direction == PortDirection::Output && p.rdm_enabled)
+        .map(|p| p.port_address)
+        .collect()
+}
+
+/// Broadcast destinations: `targets`, or the defaults for the bound address if empty.
+fn resolve_broadcast(cfg: &ControllerConfig, targets: &[SocketAddr]) -> Vec<SocketAddr> {
+    if targets.is_empty() {
+        let ip = match cfg.bind {
+            SocketAddr::V4(a) => *a.ip(),
+            SocketAddr::V6(_) => Ipv4Addr::UNSPECIFIED,
+        };
+        default_broadcast_targets(ip, cfg.node_port)
+    } else {
+        targets.to_vec()
     }
 }
 

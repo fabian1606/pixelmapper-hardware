@@ -276,6 +276,12 @@ pub struct PortState {
     pub protocol: u8,
     /// Port-Address the port uses in its current direction.
     pub port_address: PortAddress,
+    /// Input Port-Address (Net:Sub:SwIn of this reply), whatever the current direction.
+    pub sw_in: PortAddress,
+    /// Output Port-Address (Net:Sub:SwOut of this reply), whatever the current direction.
+    pub sw_out: PortAddress,
+    /// Status3 of the reply this port came from (the node reports failsafe etc. per BindIndex page).
+    pub status3: Status3,
     /// RDM enabled (GoodOutputB bit 7 clear).
     pub rdm_enabled: bool,
     /// Output is merging (GoodOutputA bit 3).
@@ -325,6 +331,8 @@ pub struct NodeState {
     pub node_report: String,
     /// Firmware version (VersInfo).
     pub firmware_version: u16,
+    /// UBEA version (0 = no UBEA).
+    pub ubea_version: u8,
     /// ESTA manufacturer.
     pub esta_man: u16,
     /// OEM code.
@@ -339,7 +347,7 @@ pub struct NodeState {
     pub status1: Status1,
     /// Decoded Status2.
     pub status2: Status2,
-    /// Decoded Status3.
+    /// Decoded Status3 of the root (lowest BindIndex) reply; per page see [`PortState::status3`].
     pub status3: Status3,
     /// Ports sorted by (bind_index, index).
     pub ports: Vec<PortState>,
@@ -422,6 +430,9 @@ pub fn reply_ports(r: &ArtPollReply) -> Vec<PortState> {
                 can_input,
                 protocol: pt & 0x3F,
                 port_address,
+                sw_in: r.port_address_in(i),
+                sw_out: r.port_address_out(i),
+                status3: r.status3.into(),
                 rdm_enabled: gb & 0x80 == 0,
                 merging: ga & 0x08 != 0,
                 merge_mode: if ga & 0x02 != 0 {
@@ -466,6 +477,7 @@ pub fn merge_replies(id: NodeId, replies: &[(SocketAddr, ArtPollReply)]) -> Opti
         long_name: root.long_name.clone(),
         node_report: root.node_report.clone(),
         firmware_version: root.vers_info,
+        ubea_version: root.ubea_version,
         esta_man: root.esta_man,
         oem: root.oem,
         style: root.style,
@@ -535,6 +547,40 @@ mod tests {
         assert_eq!(j["mac"], "02:00:00:12:34:56");
         assert_eq!(j["ports"][1]["portAddress"], 2);
         assert_eq!(j["status1"]["rdmCapable"], true);
+    }
+
+    #[test]
+    fn status3_sw_in_out_per_bind() {
+        let src: SocketAddr = "2.0.0.10:6454".parse().unwrap();
+        let replies: Vec<_> = (1..=4u8)
+            .map(|b| {
+                let mut r = reply(b, b);
+                r.status3 = ((b - 1) << 6) | 0x28; // Hold, Zero, Full, Scene
+                r.sw_in = [b + 4, 0, 0, 0];
+                r.ubea_version = 7;
+                (src, r)
+            })
+            .collect();
+        let s = merge_replies(reply_node_id(&replies[0].1, src), &replies).unwrap();
+        let fs: Vec<Failsafe> = s.ports.iter().map(|p| p.status3.failsafe).collect();
+        assert_eq!(
+            fs,
+            [
+                Failsafe::Hold,
+                Failsafe::Zero,
+                Failsafe::Full,
+                Failsafe::Scene
+            ]
+        );
+        assert_eq!(s.ports[3].sw_out.raw(), 4);
+        assert_eq!(s.ports[3].sw_in.raw(), 8);
+        assert_eq!(s.ports[3].port_address, s.ports[3].sw_out);
+        assert_eq!(s.ubea_version, 7);
+        let j = serde_json::to_value(&s).unwrap();
+        assert_eq!(j["ubeaVersion"], 7);
+        assert_eq!(j["ports"][2]["status3"]["failsafe"], "full");
+        assert_eq!(j["ports"][1]["swIn"], 6);
+        assert_eq!(j["ports"][1]["swOut"], 2);
     }
 
     #[test]

@@ -19,7 +19,7 @@ pub mod rdm;
 pub mod sim;
 pub mod state;
 
-pub use controller::{Controller, ControllerConfig, RdmConfig, RdmRequest};
+pub use controller::{Controller, ControllerConfig, RdmConfig, RdmRequest, TodReply};
 pub use error::{Error, Result};
 pub use event::{Event, QueuedMessage};
 pub use state::{NodeId, NodeState, PortState};
