@@ -21,6 +21,8 @@ use std::collections::HashMap;
 
 /// Manufacturer-specific PID range (E1.20 Table A-?, 0x8000–0xFFDF).
 const MANUFACTURER_PIDS: std::ops::RangeInclusive<u16> = 0x8000..=0xFFDF;
+/// Manufacturer-specific status message ids (E1.20 Table B-2: 0x8000–0xFFDF).
+const MANUFACTURER_STATUS_IDS: std::ops::RangeInclusive<u16> = 0x8000..=0xFFDF;
 
 // E1.20 PARAMETER_DESCRIPTION data types (Table A-15) handled as single values.
 const DS_BIT_FIELD: u8 = 0x01;
@@ -68,14 +70,10 @@ fn generated_description(uid: RdmUid, p: u16) -> Option<ParameterDescription> {
         .and_then(ParameterDescription::from_pid_def)
 }
 
-/// Our manufacturer PIDs whose single field is a `bool` in `pids.toml` (reported as `boolean`, contract §4).
-///
-/// The generated module does not export field types yet, so they are listed here by their generated constants.
+/// Our manufacturer PIDs whose single value field is a `bool` in `pids.toml` (reported as `boolean`, contract §4;
+/// field layouts from the generated `PID_META`).
 fn is_bool_pid(uid: RdmUid, p: u16) -> bool {
-    uid.manufacturer == pids::ESTA_MANUFACTURER
-        && ((pids::PID_PORT1_ENABLED..=pids::PID_PORT4_ENABLED).contains(&p)
-            || (pids::PID_PORT1_RDM_BG_DISCOVERY..=pids::PID_PORT4_RDM_BG_DISCOVERY).contains(&p)
-            || p == pids::PID_PANEL_LOCK)
+    uid.manufacturer == pids::ESTA_MANUFACTURER && pids::pid_meta(p).is_some_and(|m| m.is_bool())
 }
 
 // ── Decoding ──────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -411,19 +409,14 @@ pub(super) fn parameter_description(d: &ParameterDescription) -> RdmParameterDes
     }
 }
 
-/// One STATUS_MESSAGES entry. `text` is the STATUS_ID_DESCRIPTION of our manufacturer status ids (`pids.toml`,
-/// `%d` replaced by the data values); standard ids (E1.20 Table B-2) have no text table in the library yet.
+/// One STATUS_MESSAGES entry. `text` (with the data values filled in) from the library's status texts: E1.20
+/// Table B-2 for standard ids of any device, the STATUS_ID_DESCRIPTION of `pids.toml` for manufacturer ids of our
+/// own devices (another manufacturer's ids mean something else: `null`).
 pub(super) fn status_message(m: &StatusMessage, uid: RdmUid) -> RdmStatusMessage {
-    let text = (uid.manufacturer == pids::ESTA_MANUFACTURER)
-        .then(|| pids::status_description(m.status_message_id))
-        .flatten()
-        .map(|t| {
-            t.replacen("%d", &m.data_value1.to_string(), 1).replacen(
-                "%d",
-                &m.data_value2.to_string(),
-                1,
-            )
-        });
+    let ours = uid.manufacturer == pids::ESTA_MANUFACTURER;
+    let text = (ours || !MANUFACTURER_STATUS_IDS.contains(&m.status_message_id))
+        .then(|| m.text())
+        .flatten();
     RdmStatusMessage {
         sub_device: m.sub_device,
         status_type: match m.status_type {
@@ -540,6 +533,46 @@ mod tests {
             panic!()
         };
         assert_eq!(list[0].text, None, "manufacturer ids of other vendors");
+        // Standard ids (E1.20 Table B-2) for every device.
+        let overtemp = StatusMessage {
+            status_type: status_type::WARNING,
+            status_message_id: 0x0021,
+            data_value1: 2,
+            data_value2: 71,
+            ..m
+        };
+        let RdmValue::StatusMessages(list) =
+            decode(pid::STATUS_MESSAGES, &overtemp.encode(), OTHER, None).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            list[0].text.as_deref(),
+            Some("Sensor 2 over temp at 71 degrees C")
+        );
+        let unknown = StatusMessage {
+            status_message_id: 0x0099,
+            ..m
+        };
+        assert_eq!(status_message(&unknown, OURS).text, None);
+    }
+
+    #[test]
+    fn bool_pids_from_pid_meta() {
+        // The generated field layouts give exactly the bool PIDs of pids.toml.
+        let mut bools: Vec<u16> = pids::PID_META
+            .iter()
+            .map(|m| m.pid)
+            .filter(|&p| is_bool_pid(OURS, p))
+            .collect();
+        bools.sort();
+        let mut expected: Vec<u16> = (pids::PID_PORT1_ENABLED..=pids::PID_PORT4_ENABLED)
+            .chain(pids::PID_PORT1_RDM_BG_DISCOVERY..=pids::PID_PORT4_RDM_BG_DISCOVERY)
+            .chain([pids::PID_PANEL_LOCK])
+            .collect();
+        expected.sort();
+        assert_eq!(bools, expected);
+        assert!(!is_bool_pid(OTHER, pids::PID_PANEL_LOCK), "ours only");
     }
 
     #[test]

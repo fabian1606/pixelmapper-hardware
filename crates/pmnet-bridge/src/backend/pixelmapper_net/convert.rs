@@ -1,6 +1,7 @@
 //! Pure conversions between `pixelmapper-net` types and the bridge contract types (`protocol/bridge-ws.md`):
-//! identifiers, interfaces, node and port state, ArtDiagData priorities and errors. No I/O; everything that
-//! depends on the library's data model lives here so an API change of the library touches one file.
+//! identifiers, interfaces, node and port state, ArtDiagData priorities and errors. No I/O (the interface MACs
+//! are passed in); everything that depends on the library's data model lives here so an API change of the library
+//! touches one file.
 
 use crate::backend::BackendError;
 use crate::protocol::{
@@ -12,6 +13,7 @@ use pixelmapper_net as net;
 use pixelmapper_net::controller::Interface;
 use pixelmapper_net::rdm::Uid;
 use pixelmapper_net::state as ns;
+use pixelmapper_net::FlashErrorKind;
 use std::net::{Ipv4Addr, SocketAddr};
 
 /// UDP port of real Art-Net nodes; a node id from a source address only carries the port for other ports
@@ -44,20 +46,31 @@ pub(super) fn node_id(id: &net::NodeId) -> NodeId {
 
 // ── Interfaces ────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/// One interface as the contract reports it (the library does not read MAC addresses).
-pub(super) fn interface(i: &Interface) -> NetInterface {
+/// MAC addresses of the host's interfaces as `(name, mac)` (`controller::interface_macs()`).
+pub(super) type InterfaceMacs = [(String, [u8; 6])];
+
+/// One interface as the contract reports it; `mac` from `macs` (`null` for interfaces without one, e.g.
+/// loopback).
+pub(super) fn interface(i: &Interface, macs: &InterfaceMacs) -> NetInterface {
     NetInterface {
         name: i.name.clone(),
         ip: i.ip,
         mask: i.netmask,
-        mac: None,
+        mac: macs
+            .iter()
+            .find(|(name, _)| *name == i.name)
+            .map(|(_, m)| MacAddress(*m)),
     }
 }
 
 /// The interfaces shown in `hello`/`bridgeStatus`: every non-loopback interface (only the bound one when the
 /// socket is bound to a specific address); loopback interfaces only when the socket is bound to loopback
 /// (simulator setups).
-pub(super) fn visible_interfaces(all: &[Interface], bind_ip: Ipv4Addr) -> Vec<NetInterface> {
+pub(super) fn visible_interfaces(
+    all: &[Interface],
+    macs: &InterfaceMacs,
+    bind_ip: Ipv4Addr,
+) -> Vec<NetInterface> {
     all.iter()
         .filter(|i| {
             if bind_ip.is_loopback() {
@@ -66,7 +79,7 @@ pub(super) fn visible_interfaces(all: &[Interface], bind_ip: Ipv4Addr) -> Vec<Ne
                 !i.loopback && (bind_ip.is_unspecified() || i.ip == bind_ip)
             }
         })
-        .map(interface)
+        .map(|i| interface(i, macs))
         .collect()
 }
 
@@ -91,18 +104,12 @@ pub(super) fn node_ip(n: &ns::NodeState) -> Ipv4Addr {
     }
 }
 
-/// Merged library node state → contract `NodeState`.
-///
-/// Gaps of the library model: `ubeaVersion` is not kept (reported as 0). A port carries one Port-Address, the one
-/// of its current direction; the field of the other direction gets Net and Sub-Net with universe 0, as the
-/// Pixelmapper Node reports it (node contract §3). Status3 is kept only from the reply with the lowest BindIndex,
-/// so a port's `failsafe` is known only for that BindIndex (`None` for the others). `lastSeen` is supplied by the
-/// caller.
+/// Merged library node state → contract `NodeState`. Node-level fields come from the reply with the lowest
+/// BindIndex; every port carries the Status3 (failsafe mode) and SwIn/SwOut of its own reply. `lastSeen` is
+/// supplied by the caller.
 pub(super) fn node_state(n: &ns::NodeState, interfaces: &[Interface], last_seen: u64) -> NodeState {
     let ip = node_ip(n);
     let switchable = n.status3.direction_switchable;
-    let root = n.ports.iter().map(|p| p.bind_index).min();
-    let root_failsafe = failsafe(n.status3.failsafe);
     NodeState {
         node_id: node_id(&n.id),
         uid: n.uid.map(uid_to_bridge),
@@ -115,7 +122,7 @@ pub(super) fn node_state(n: &ns::NodeState, interfaces: &[Interface], last_seen:
         firmware: n.firmware_version,
         esta_man: n.esta_man,
         oem: n.oem,
-        ubea_version: 0,
+        ubea_version: n.ubea_version,
         style: node_style(n.style),
         refresh_rate: n.refresh_rate,
         status: node_status(n),
@@ -124,14 +131,7 @@ pub(super) fn node_state(n: &ns::NodeState, interfaces: &[Interface], last_seen:
             status2: n.status2.raw,
             status3: n.status3.raw,
         },
-        ports: n
-            .ports
-            .iter()
-            .map(|p| {
-                let failsafe = (Some(p.bind_index) == root).then_some(root_failsafe);
-                port_state(p, switchable, failsafe)
-            })
-            .collect(),
+        ports: n.ports.iter().map(|p| port_state(p, switchable)).collect(),
         last_seen,
     }
 }
@@ -195,12 +195,9 @@ fn failsafe(f: ns::Failsafe) -> Failsafe {
     }
 }
 
-/// One port; the flags are decoded from the raw GoodInput/GoodOutputA/GoodOutputB bytes (contract §4).
-fn port_state(
-    p: &ns::PortState,
-    direction_switchable: bool,
-    failsafe: Option<Failsafe>,
-) -> PortState {
+/// One port; the flags are decoded from the raw GoodInput/GoodOutputA/GoodOutputB bytes (contract §4), the
+/// failsafe mode from the Status3 of the port's own reply (the node keeps it per BindIndex page).
+fn port_state(p: &ns::PortState, direction_switchable: bool) -> PortState {
     let (gi, ga, gb) = (p.good_input, p.good_output_a, p.good_output_b);
     let direction = if p.can_output && p.can_input && !direction_switchable {
         // Fixed ports with both bits do both; with Status3 bit 3 the bits show the current direction.
@@ -211,14 +208,6 @@ fn port_state(
             ns::PortDirection::Input => PortDirection::Input,
             ns::PortDirection::None => PortDirection::None,
         }
-    };
-    // Only the field of the current direction carries the universe (node contract §3); fixed ports doing both
-    // directions report one address for both.
-    let pa = p.port_address.raw();
-    let (output_port_address, input_port_address) = match direction {
-        PortDirection::Output => (pa, pa & 0x7FF0),
-        PortDirection::Input => (pa & 0x7FF0, pa),
-        PortDirection::Both | PortDirection::None => (pa, pa),
     };
     PortState {
         port: PortRef::new(p.bind_index, p.index),
@@ -235,9 +224,11 @@ fn port_state(
         can_output: p.can_output,
         can_input: p.can_input,
         direction,
-        output_port_address,
-        input_port_address,
-        failsafe,
+        // NetSwitch/SubSwitch + SwOut/SwIn as reported: the Pixelmapper Node fills only the field of the current
+        // direction, the other has universe 0 (node contract §3).
+        output_port_address: p.sw_out.raw(),
+        input_port_address: p.sw_in.raw(),
+        failsafe: Some(failsafe(p.status3.failsafe)),
         output: PortOutputState {
             data: ga & 0x80 != 0,
             merging: ga & 0x08 != 0,
@@ -311,18 +302,20 @@ pub(super) fn backend_error(e: net::Error, node: &NodeId, port: Option<PortRef>)
     }
 }
 
-/// Error code of a failed firmware job. The library reports flow failures as `Error::Flash(text)` without a
-/// kind, so the few cases with their own contract code are recognised by their text.
+/// Error code of a failed firmware job: the library's flash error kind for failures of the update flow (the kinds
+/// without a contract code of their own – incompatible, busy, rejected, verify, version_mismatch, bad_response,
+/// other – are `badResponse`), else the code of the error variant.
 pub(super) fn flash_error_code(e: &net::Error) -> ErrorCode {
+    if let Some(kind) = e.flash_kind() {
+        return match kind {
+            FlashErrorKind::DeviceMismatch => ErrorCode::DeviceMismatch,
+            FlashErrorKind::Downgrade => ErrorCode::Downgrade,
+            FlashErrorKind::Timeout => ErrorCode::Timeout,
+            FlashErrorKind::Nack => ErrorCode::Nack,
+            _ => ErrorCode::BadResponse,
+        };
+    }
     match e {
-        net::Error::Flash(m) if m.starts_with("wrong device") => ErrorCode::DeviceMismatch,
-        net::Error::Flash(m) if m.starts_with("downgrade") => ErrorCode::Downgrade,
-        net::Error::Flash(m)
-            if m.starts_with("no BOOT_INFO answer") || m.starts_with("no answer") =>
-        {
-            ErrorCode::Timeout
-        }
-        net::Error::Flash(_) => ErrorCode::BadResponse,
         net::Error::Nack { .. } => ErrorCode::Nack,
         net::Error::Timeout { .. } | net::Error::WaitTimeout(..) => ErrorCode::Timeout,
         net::Error::UnexpectedResponse(_) | net::Error::RdmDecode(_) | net::Error::ArtNet(_) => {
@@ -333,6 +326,15 @@ pub(super) fn flash_error_code(e: &net::Error) -> ErrorCode {
         net::Error::Image(_) => ErrorCode::InvalidImage,
         net::Error::Closed => ErrorCode::UdpUnavailable,
         _ => ErrorCode::Internal,
+    }
+}
+
+/// Text of a library error for humans: the message of a flash error (without the library's ` [kind: …]` tag),
+/// else the error's own text.
+pub(super) fn error_text(e: &net::Error) -> String {
+    match e.flash_error() {
+        Some(f) => f.message,
+        None => e.to_string(),
     }
 }
 
@@ -367,9 +369,17 @@ mod tests {
         }
     }
 
+    /// Four pages; page `b` has failsafe Hold, Zero, Full, Scene for b = 1…4 (Status3 bits 7–6).
     fn lib_node() -> ns::NodeState {
         let src: SocketAddr = "2.0.0.10:6454".parse().unwrap();
-        let replies: Vec<_> = (1..=4).map(|b| (src, reply(b))).collect();
+        let replies: Vec<_> = (1..=4)
+            .map(|b| {
+                let mut r = reply(b);
+                r.status3 = ((b - 1) << 6) | 0x28;
+                r.ubea_version = 3;
+                (src, r)
+            })
+            .collect();
         let id = ns::reply_node_id(&replies[0].1, src);
         ns::merge_replies(id, &replies).unwrap()
     }
@@ -421,16 +431,19 @@ mod tests {
         assert!(n.status.rdm_capable && n.status.port_address_15_bit);
         assert!(n.status.dhcp_capable && n.status.dhcp_configured);
         assert!(n.status.failsafe_programmable && n.status.port_direction_switchable);
+        let failsafes: Vec<_> = n.ports.iter().map(|p| p.failsafe).collect();
         assert_eq!(
-            n.ports[0].failsafe,
-            Some(Failsafe::Zero),
-            "root reply's Status3"
+            failsafes,
+            [
+                Some(Failsafe::Hold),
+                Some(Failsafe::Zero),
+                Some(Failsafe::Full),
+                Some(Failsafe::Scene)
+            ],
+            "Status3 of each port's own page"
         );
-        assert_eq!(
-            n.ports[1].failsafe, None,
-            "Status3 of other pages is not kept"
-        );
-        assert_eq!(n.raw.status3, 0x68);
+        assert_eq!(n.raw.status3, 0x28, "root reply");
+        assert_eq!(n.ubea_version, 3);
         assert_eq!(n.last_seen, 42);
         assert_eq!(n.ports.len(), 4);
         let p = &n.ports[2];
@@ -451,11 +464,16 @@ mod tests {
         let mut r = reply(1);
         r.port_types[0] = 0xC0;
         r.status3 = 0;
+        r.net_switch = 1;
+        r.sw_in[0] = 7;
         let src: SocketAddr = "2.0.0.10:6454".parse().unwrap();
         let n = ns::merge_replies(ns::reply_node_id(&r, src), &[(src, r)]).unwrap();
+        let p = &node_state(&n, &[], 0).ports[0];
+        assert_eq!(p.direction, PortDirection::Both);
+        // Both Port-Address fields as reported (SwOut and SwIn with the shared Net/Sub-Net).
         assert_eq!(
-            node_state(&n, &[], 0).ports[0].direction,
-            PortDirection::Both
+            (p.output_port_address, p.input_port_address),
+            (0x0101, 0x0107)
         );
     }
 
@@ -466,19 +484,19 @@ mod tests {
             iface("en7", [2, 0, 0, 1], [255, 0, 0, 0], false),
             iface("lo0", [127, 0, 0, 1], [255, 0, 0, 0], true),
         ];
+        let macs = [("en7".to_owned(), [0xa0, 0xce, 0xc8, 1, 2, 3])];
         let names = |v: Vec<NetInterface>| v.into_iter().map(|i| i.name).collect::<Vec<_>>();
         assert_eq!(
-            names(visible_interfaces(&ifs, Ipv4Addr::UNSPECIFIED)),
+            names(visible_interfaces(&ifs, &macs, Ipv4Addr::UNSPECIFIED)),
             ["en0", "en7"]
         );
-        assert_eq!(
-            names(visible_interfaces(&ifs, Ipv4Addr::new(2, 0, 0, 1))),
-            ["en7"]
-        );
-        assert_eq!(
-            names(visible_interfaces(&ifs, Ipv4Addr::LOCALHOST)),
-            ["lo0"]
-        );
+        let bound = visible_interfaces(&ifs, &macs, Ipv4Addr::new(2, 0, 0, 1));
+        assert_eq!(bound.len(), 1);
+        assert_eq!(bound[0].name, "en7");
+        assert_eq!(bound[0].mac.unwrap().to_string(), "a0:ce:c8:01:02:03");
+        let lo = visible_interfaces(&ifs, &macs, Ipv4Addr::LOCALHOST);
+        assert_eq!(names(lo.clone()), ["lo0"]);
+        assert_eq!(lo[0].mac, None, "no MAC known");
         assert_eq!(
             interface_for(Ipv4Addr::new(192, 168, 1, 77), &ifs).as_deref(),
             Some("en0")
@@ -527,13 +545,27 @@ mod tests {
             backend_error(net::Error::Closed, &node, None),
             BackendError::UdpUnavailable
         );
-        let mismatch = net::Error::Flash("wrong device: DEVICE_INFO reports …".into());
+        // Flash errors by the library's kind, not by their text.
+        let mismatch = net::Error::flash(FlashErrorKind::DeviceMismatch, "DEVICE_INFO reports …");
         assert_eq!(flash_error_code(&mismatch), ErrorCode::DeviceMismatch);
-        let stays = net::Error::Flash("3 chunk(s) differ - bootloader stays active".into());
-        assert_eq!(flash_error_code(&stays), ErrorCode::BadResponse);
+        assert_eq!(error_text(&mismatch), "DEVICE_INFO reports …");
+        let codes = [
+            (FlashErrorKind::Downgrade, ErrorCode::Downgrade),
+            (FlashErrorKind::Timeout, ErrorCode::Timeout),
+            (FlashErrorKind::Nack, ErrorCode::Nack),
+            (FlashErrorKind::Verify, ErrorCode::BadResponse),
+            (FlashErrorKind::Busy, ErrorCode::BadResponse),
+            (FlashErrorKind::Other, ErrorCode::BadResponse),
+        ];
+        for (kind, code) in codes {
+            assert_eq!(flash_error_code(&net::Error::flash(kind, "x")), code);
+        }
+        let untagged = net::Error::Flash("wrong device".into());
+        assert_eq!(flash_error_code(&untagged), ErrorCode::BadResponse);
         assert_eq!(
-            flash_error_code(&net::Error::Flash("no BOOT_INFO answer from x".into())),
-            ErrorCode::Timeout
+            flash_error_code(&net::Error::Image("x".into())),
+            ErrorCode::InvalidImage
         );
+        assert_eq!(error_text(&net::Error::Closed), "controller closed");
     }
 }
