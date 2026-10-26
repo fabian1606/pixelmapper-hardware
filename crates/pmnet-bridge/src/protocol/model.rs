@@ -214,9 +214,9 @@ pub struct PortState {
     pub can_output: bool,
     pub can_input: bool,
     pub direction: PortDirection,
-    /// NetSwitch, SubSwitch, SwOut[i].
+    /// NetSwitch, SubSwitch, SwOut of the port.
     pub output_port_address: u16,
-    /// NetSwitch, SubSwitch, SwIn[i].
+    /// NetSwitch, SubSwitch, SwIn of the port.
     pub input_port_address: u16,
     /// Failsafe mode (Status3 bits 7–6 of this port's reply); `None` when not known.
     pub failsafe: Option<Failsafe>,

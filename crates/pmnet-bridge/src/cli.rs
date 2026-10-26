@@ -18,7 +18,7 @@ use std::sync::Arc;
 /// Arguments of `serve`.
 #[derive(Debug, Clone, clap::Args)]
 pub struct ServeArgs {
-    /// TCP port on 127.0.0.1 (and [::1]).
+    /// TCP port on 127.0.0.1 (and ::1).
     #[arg(long, default_value_t = DEFAULT_PORT)]
     pub port: u16,
     /// Additional allowed WebSocket Origin (`scheme://host`, `scheme://host:port` or `scheme://host:*`).
