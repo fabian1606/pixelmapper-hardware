@@ -372,6 +372,7 @@ dependencies = [
  "bytes",
  "clap",
  "futures-util",
+ "pixelmapper-net",
  "serde",
  "serde_json",
  "serde_path_to_error",

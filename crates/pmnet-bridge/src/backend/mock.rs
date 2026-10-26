@@ -500,9 +500,9 @@ impl NetBackend for MockBackend {
             if let Some(s) = change.output_style {
                 port.output.style = s;
             }
-        }
-        if let Some(f) = req.failsafe {
-            node.status.failsafe = f;
+            if let Some(f) = change.failsafe {
+                port.failsafe = Some(f);
+            }
         }
         if let Some(i) = req.indicator {
             node.status.indicator = match i {
@@ -680,7 +680,6 @@ pub fn sample_node(node_id: &str, ip: Ipv4Addr, ports: u8) -> NodeState {
             squawking: false,
             output_style_switchable: true,
             rdm_switchable: true,
-            failsafe: Failsafe::Hold,
             failsafe_programmable: true,
             llrp: false,
             port_direction_switchable: true,
@@ -701,7 +700,9 @@ pub fn sample_node(node_id: &str, ip: Ipv4Addr, ports: u8) -> NodeState {
                 can_input: true,
                 direction: PortDirection::Output,
                 output_port_address: u16::from(bind),
-                input_port_address: u16::from(bind),
+                // Only the field of the current direction carries the universe (node contract §3).
+                input_port_address: 0,
+                failsafe: Some(Failsafe::Hold),
                 output: PortOutputState {
                     data: false,
                     merging: false,
