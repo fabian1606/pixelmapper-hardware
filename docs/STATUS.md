@@ -88,13 +88,17 @@ Firmware-Update und Abnahme
   `FlashErrorKind` über `Error::flash_kind()`/`flash_error()` (Art als Tag ` [kind: …]` am Text, `Error::Flash`
   bleibt `String`), `pids::PID_META`/`ENUMS` (Feldtypen, PARAMETER_DESCRIPTION), `rdm::status` (Texte E1.20 Tab. B-2,
   [ungeprüft]), `controller::interface_macs()`/`Interface::mac()`, `Controller::set_broadcast_targets()`.
-  Offen für die Bridge-Session: Adapter auf diese API umstellen (Text-Erkennung in `flash_error_code`, Failsafe
-  der Seiten 2–4, eigenes TOD-Abo pro Port). Kein neues `Event`-Variant, weil der Adapter `Event` erschöpfend matcht.
+  Der Adapter der Bridge nutzt diese API seit bridge/cleanup (Merge 47f9230). Kein neues `Event`-Variant, weil der
+  Adapter `Event` erschöpfend matcht.
+- `pixelmapper-net`, Wunsch der Bridge für später: Die automatische ArtTodRequest geht pro Port-Address nur einmal
+  pro Node-Lebensdauer raus. Wird RDM wieder eingeschaltet oder ändert sich die Port-Address, schickt der Adapter
+  selbst ein ArtTodRequest. Das sollte die Library übernehmen. Außerdem fehlt `tod()` ein `nak`-Flag, das der Resync
+  nach einem Event-Overflow braucht.
 - `pixelmapper-net`: empfangenes ArtDmx (Input-Ports) wird nicht als Event weitergegeben (E2E prüft per Roh-Socket);
   Neustart-Erkennung über den NodeReport-Zähler versagt, wenn der Zähler vor dem Neustart ≥ 9900 war; der
   ArtTodData-Decoder akzeptiert UidCount > 200 (nachsichtig).
 - Die Bridge erwartet bei ip_prog/art_address/art_input „1 s, ein Resend“; `Controller` sendet nicht erneut – das
-  muss der Adapter `PixelmapperNetBackend` der Bridge-Session übernehmen.
+  übernimmt der Adapter `PixelmapperNetBackend` (umgesetzt).
 - Full/Scene-Failsafe greift auch 4 s nach dem Start ohne je empfangene Daten (Standard Hold, daher unkritisch).
 - `s_port` in pm_port liegt mit ~67 KB in .data (internes RAM) – Kandidat, falls RAM knapp wird.
 - ESTA-Normtexte (E1.20-2025, E1.37-1/-2) fehlen weiter; Digest-Punkte mit [ungeprüft] vor der Abnahme prüfen.
@@ -104,7 +108,7 @@ Firmware-Update und Abnahme
 1. Hardware Rev 0 aufbauen, Checkliste §3 von oben nach unten (Chip-Revision, Konsole, Strom, Pins zuerst).
 2. Messplan MEASURE.md abarbeiten, Ergebnisse dort eintragen; MBS-Entscheidung nach M5.
 3. Abnahmetests nach `docs/plan.md` (DMX-Workshop, OLA, 24-h-Test).
-4. Bridge-Session: Adapter `PixelmapperNetBackend` gegen die jetzige pixelmapper-net-API (ip_prog_query/change,
-   set_poll_targets, try_send_dmx/try_send_sync sind neu).
+4. Bridge-Adapter: erledigt (bridge/adapter, bridge/cleanup). Offen in `pixelmapper-net`: ArtTodRequest erneut
+   senden, wenn RDM wieder eingeschaltet wird oder sich die Port-Address ändert, und `nak` in `tod()` (siehe §4).
 5. UI-Fragen klären, maskiertes Schreiben im Panel-Editor.
 6. Danach Plan-Schritt 11: Matrix-Modus, eigene Platine Rev 1.
