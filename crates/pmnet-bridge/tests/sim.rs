@@ -280,8 +280,7 @@ async fn discovery_rdm_configuration_dmx_and_tods() {
         (json!(true), json!(""))
     );
 
-    // artAddress: the `node` event with the node's answer arrives before the result. (Other `node` events keep
-    // coming: NodeReport carries the reply counter, so the node changes with every poll cycle.)
+    // artAddress: the `node` event with the node's answer arrives before the result.
     let id = c
         .send_command(
             "artAddress",
@@ -492,6 +491,54 @@ async fn tube_flash_jobs() {
     // A cancelled update leaves the tube in its bootloader (or it had not left the app yet).
     let mode = sim.with_responder(TUBE1, |t: &mut SimTube| t.mode());
     assert!(matches!(mode, Some(TubeMode::Boot | TubeMode::App)));
+
+    server.shutdown().await;
+    backend.shutdown();
+    sim.shutdown();
+}
+
+/// The `node` events arriving within `d` (other messages are skipped).
+async fn node_events_within(c: &mut Client, d: Duration) -> Vec<Value> {
+    let deadline = tokio::time::Instant::now() + d;
+    let mut out = Vec::new();
+    while let Ok(m) = tokio::time::timeout_at(deadline, c.next_json()).await {
+        if m["type"] == "node" {
+            out.push(m);
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn steady_node_sends_no_repeated_node_events() {
+    let sim_addr = free_udp_addr();
+    let (backend, server) = start_bridge(sim_addr).await;
+    let mut c = Client::handshaken(server.local_addr()).await;
+    let sim = start_sim(sim_addr).await;
+    within("the node with 4 ports", async {
+        loop {
+            let n = c.event("node").await;
+            if n["node"]["ports"].as_array().is_some_and(|p| p.len() == 4) {
+                return;
+            }
+        }
+    })
+    .await;
+    let before = c.ok("nodes", json!({})).await["nodes"][0].clone();
+
+    // ~8 poll cycles: every ArtPollReply advances the NodeReport counter (and lastSeen) – no `node` event.
+    let events = node_events_within(&mut c, Duration::from_millis(2500)).await;
+    assert!(events.is_empty(), "repeated node events: {events:?}");
+    // The `nodes` snapshot still carries the current counter and lastSeen.
+    let after = c.ok("nodes", json!({})).await["nodes"][0].clone();
+    assert_ne!(after["nodeReport"], before["nodeReport"]);
+    assert!(after["lastSeen"].as_u64() > before["lastSeen"].as_u64());
+
+    // A real change is still an event.
+    sim.set_short_name_local("Panel Name");
+    let events = node_events_within(&mut c, Duration::from_millis(1500)).await;
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["node"]["shortName"], "Panel Name");
 
     server.shutdown().await;
     backend.shutdown();

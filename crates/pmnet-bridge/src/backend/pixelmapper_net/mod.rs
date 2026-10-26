@@ -269,8 +269,9 @@ impl Inner {
 
     // ── Node table ────────────────────────────────────────────────────────────────────────────────────────────
 
-    /// Stores a node state from the library; emits `node` when anything but `lastSeen` changed. Returns the
-    /// stored contract state.
+    /// Stores a node state from the library and emits `node` (the library reports only changed states; the
+    /// server filters changes of `lastSeen` and the NodeReport reply counter, which still serves the restart
+    /// detection below). Returns the stored contract state.
     ///
     /// Also subscribes to the TOD of every RDM output port that was not requested yet (a node appearing or
     /// reappearing, BindIndex pages arriving one by one, a changed Port-Address, RDM switched on, a reboot into
@@ -299,16 +300,13 @@ impl Inner {
                     let requests: Vec<(PortRef, u16)> =
                         wanted.difference(&old.tod_requested).copied().collect();
                     old.tod_requested.extend(requests.iter().copied());
-                    if old.state.same_except_last_seen(&state) {
-                        old.state.last_seen = state.last_seen;
-                        (old.state.clone(), requests)
-                    } else {
-                        old.state = state.clone();
-                        self.emit(Event::Node {
-                            node: state.clone(),
-                        });
-                        (state, requests)
-                    }
+                    // Every update is forwarded; the server drops those that only change volatile fields
+                    // (`NodeState::same_state`) after taking them over into its mirror.
+                    old.state = state.clone();
+                    self.emit(Event::Node {
+                        node: state.clone(),
+                    });
+                    (state, requests)
                 }
                 None => {
                     st.nodes.insert(

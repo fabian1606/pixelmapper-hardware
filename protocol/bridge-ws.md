@@ -13,8 +13,9 @@ The bridge owns every Art-Net/RDM packet, timer and procedure (plan D2). Pixelma
 - *Revision 2 (2026-10-26)*, after the end-to-end test against the firmware (`docs/e2e-findings.md`) and the
   `pixelmapper-net` adapter: the failsafe mode is **per port** (`NodeStatus.failsafe` → `PortState.failsafe`,
   `artAddress` `failsafe`/`recordFailsafeScene` moved into `ports[]`); a port without RDM answers TodNak
-  (`Tod.available: false`); clarifications of `nodeId` for simulators, `node` events per BindIndex page and
-  NodeReport counter, TOD subscription after restarts, `todRequest`/`todControl` results, `artAddress` routing,
+  (`Tod.available: false`); `node` events are only sent for real state changes: the NodeReport counter and
+  `lastSeen` are excluded; clarifications of `nodeId` for simulators, `node` events per BindIndex page, TOD
+  subscription after restarts, `todRequest`/`todControl` results, `artAddress` routing,
   `ipProg` DHCP arguments, `rdmDescribe` cache, `rdmQueued` (one queue for all controllers), ArtSync rule;
   implementation notes of `pmnet-bridge` (§11).
 - *Revision 1 (2026-10-24)*: first candidate.
@@ -134,7 +135,7 @@ interface NodeState {
   interface: string | null;     // local interface the replies arrive on
   shortName: string;            // ShortName (PortName), ≤ 17 chars
   longName: string;             // LongName, ≤ 63 chars
-  nodeReport: string;           // NodeReport text
+  nodeReport: string;           // NodeReport text; its reply counter is volatile like lastSeen (no `node` event)
   firmware: number;             // VersInfoH << 8 | VersInfoL
   estaMan: number;              // EstaMan (0x7FF0 for the Pixelmapper Node prototype)
   oem: number;                  // OemHi << 8 | Oem
@@ -348,10 +349,10 @@ Events are sent only to connections that completed the handshake.
 |---|---|---|
 | `hello` | `bridge: string` (pmnet semver), `protocol: string` (semver), `interfaces: NetInterface[]`, `udp: UdpState` | first message of every connection |
 | `bridgeStatus` | `interfaces: NetInterface[]`, `udp: UdpState` | an interface or the UDP socket state changed |
-| `node` | `node: NodeState` | node first seen, and whenever any field other than `lastSeen` changes (unsolicited ArtPollReply, IP change, merged BindIndex reply). The BindIndex pages of a node arrive one by one, so a new node's ports usually come in several `node` events. `nodeReport` carries the node's ArtPollReply counter (`#0001 [0123] …`), so a node typically changes once per poll cycle. The bridge sends one ArtTodRequest per RDM output port when the node appears or reappears after `nodeGone`, when a port appears, changes its Port-Address or gets RDM switched on, and after a restart (other firmware, or the NodeReport counter starting over): the node only sends unsolicited ArtTodData to IPs that requested a TOD before (node contract §6.1) |
+| `node` | `node: NodeState` | node first seen, and whenever its state really changes (unsolicited ArtPollReply, IP change, merged BindIndex reply). Not sent when only `lastSeen` or the ArtPollReply counter in `nodeReport` (`#0001 [0123] …`, it counts every reply) changed; `nodes` always returns their current values. The BindIndex pages of a node arrive one by one, so a new node's ports usually come in several `node` events. The bridge sends one ArtTodRequest per RDM output port when the node appears or reappears after `nodeGone`, when a port appears, changes its Port-Address or gets RDM switched on, and after a restart (other firmware, or the NodeReport counter starting over): the node only sends unsolicited ArtTodData to IPs that requested a TOD before (node contract §6.1) |
 | `nodeGone` | `nodeId: string`, `lastSeen: number` | no reply for 3 consecutive poll cycles; the node and its TODs leave the bridge's table |
 | `tod` | `Tod` fields (`nodeId`, `port`, `portAddress`, `available`, `uids`) | every completely assembled ArtTodData set (requested or unsolicited); the app diffs |
-| `rdmQueued` | `nodeId`, `port`, `uid`, `subDevice`, `pid`, `data` (hex), `value?: RdmValue` | a queued message fetched with QUEUED_MESSAGE (the bridge fetches whenever a response's message count is > 0, node contract §6.3). Its content is the GET response of the changed PID — e.g. `LOCAL_RDM_SET` (0x8150) after an RDM SET from the node's display, upon which the app re-reads that PID at the device (node contract §7). The node has **one** queue for all controllers (node contract §6.3): another controller may fetch a message first, so `rdmQueued` is best effort — the app also re-reads the node's settings PIDs on `node` events that change the node and every 30–60 s |
+| `rdmQueued` | `nodeId`, `port`, `uid`, `subDevice`, `pid`, `data` (hex), `value?: RdmValue` | a queued message fetched with QUEUED_MESSAGE (the bridge fetches whenever a response's message count is > 0, node contract §6.3). Its content is the GET response of the changed PID — e.g. `LOCAL_RDM_SET` (0x8150) after an RDM SET from the node's display, upon which the app re-reads that PID at the device (node contract §7). The node has **one** queue for all controllers (node contract §6.3): another controller may fetch a message first, so `rdmQueued` is best effort — the app also re-reads the node's settings PIDs on `node` events and every 30–60 s |
 | `diag` | `nodeId: string \| null`, `ip`, `priority: 'low' \| 'medium' \| 'high' \| 'critical' \| 'volatile'`, `logicalPort: number`, `text` | ArtDiagData received (DpLow 0x10, DpMed 0x40, DpHigh 0x80, DpCritical 0xE0, DpVolatile 0xF0) |
 | `flashProgress` | `job: FlashJob` | every phase change, and at most 10×/s while writing/verifying |
 | `log` | `level: 'debug' \| 'info' \| 'warn' \| 'error'`, `text`, `nodeId?: string` | bridge diagnostics worth showing (bind errors, malformed packets, retries exhausted, event stream resynchronized). Warnings about a connection's own malformed binary messages go to that connection only, at most one per second |
@@ -535,8 +536,8 @@ Where the bridge reports less than this contract describes, because `pixelmapper
   the other ports report `null`.
 - A port carries one Port-Address: the field of its current direction gets it, the other one Net/Sub-Net with
   universe 0 (exact for the Pixelmapper Node, node contract §3).
-- `lastSeen` is the time the bridge last processed an ArtPollReply that changed the node (with the NodeReport counter
-  that is about every poll cycle).
+- `lastSeen` is the time the bridge last processed an ArtPollReply of the node's lowest BindIndex (every reply
+  changes the NodeReport counter, so that is every poll cycle).
 - ArtSync goes to every broadcast target of the bridge (each interface's directed broadcast and 2.255.255.255, or the
   `--broadcast` targets), not only to the interfaces that carried ArtDmx of the set.
 - `RdmStatusMessage.text` is filled for the manufacturer status ids of `pids.toml`; E1.20 Table B-2 texts are not

@@ -43,8 +43,8 @@ impl Mirror {
         m
     }
 
-    /// Applies an event; returns false when it must not be forwarded (a `node` that only changed `lastSeen`,
-    /// a `nodeGone` for a node nobody was told about).
+    /// Applies an event; returns false when it must not be forwarded (a `node` that only changed `lastSeen` or the
+    /// NodeReport counter, a `nodeGone` for a node nobody was told about).
     pub fn apply(&mut self, event: &Event) -> bool {
         match event {
             Event::BridgeStatus(status) => {
@@ -52,8 +52,8 @@ impl Mirror {
                 true
             }
             Event::Node { node } => match self.nodes.get_mut(&node.node_id) {
-                Some(old) if old.same_except_last_seen(node) => {
-                    old.last_seen = node.last_seen;
+                Some(old) if old.same_state(node) => {
+                    old.refresh_volatile(node);
                     false
                 }
                 _ => {
@@ -96,7 +96,7 @@ impl Mirror {
             if self
                 .nodes
                 .get(&node.node_id)
-                .is_none_or(|old| !old.same_except_last_seen(node))
+                .is_none_or(|old| !old.same_state(node))
             {
                 events.push(Event::Node { node: node.clone() });
             }
@@ -304,6 +304,21 @@ mod tests {
             "lastSeen-only change is not forwarded"
         );
         assert_eq!(m.nodes[&node.node_id].last_seen, later.last_seen);
+        let mut counted = later.clone();
+        counted.node_report = "#0001 [0002] OK".into();
+        assert!(
+            !m.apply(&Event::Node {
+                node: counted.clone()
+            }),
+            "a NodeReport counter-only change is not forwarded"
+        );
+        assert_eq!(m.nodes[&node.node_id].node_report, "#0001 [0002] OK");
+        let mut report = counted.clone();
+        report.node_report = "#000e [0003] Firmware update failed".into();
+        assert!(
+            m.apply(&Event::Node { node: report }),
+            "a new report text is"
+        );
         let mut renamed = later.clone();
         renamed.short_name = "x".into();
         assert!(m.apply(&Event::Node {
