@@ -242,6 +242,8 @@ mod tests {
             output_style: None,
             protocol: None,
             clear_output: false,
+            failsafe: None,
+            record_failsafe_scene: false,
         }
     }
 
@@ -251,8 +253,6 @@ mod tests {
             short_name: None,
             long_name: None,
             ports,
-            failsafe: None,
-            record_failsafe_scene: false,
             indicator: None,
             cancel_merge: false,
             reset_rx_flags: false,

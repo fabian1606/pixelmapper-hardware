@@ -167,6 +167,12 @@ pub struct ArtAddressPort {
     pub protocol: Option<OutputProtocol>,
     #[serde(default)]
     pub clear_output: bool,
+    /// AcFailHold/Zero/Full/Scene to the port's BindIndex.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failsafe: Option<Failsafe>,
+    /// AcFailRecord to the port's BindIndex.
+    #[serde(default)]
+    pub record_failsafe_scene: bool,
 }
 
 /// `artAddress` (all optional except `nodeId`; contract §6 Semantics).
@@ -181,10 +187,6 @@ pub struct ArtAddressArgs {
     pub long_name: Option<String>,
     #[serde(default)]
     pub ports: Vec<ArtAddressPort>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failsafe: Option<Failsafe>,
-    #[serde(default)]
-    pub record_failsafe_scene: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indicator: Option<SetIndicator>,
     #[serde(default)]

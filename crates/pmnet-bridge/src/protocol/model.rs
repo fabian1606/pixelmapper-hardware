@@ -68,7 +68,7 @@ pub enum PortAddressAuthority {
     Network,
 }
 
-/// Failsafe mode (Status3 bits 7–6, ArtAddress AcFail*).
+/// Failsafe mode of a port (Status3 bits 7–6 of the port's ArtPollReply, ArtAddress AcFail* to its BindIndex).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[allow(missing_docs)]
@@ -113,7 +113,7 @@ pub struct NodeStatus {
     pub squawking: bool,
     pub output_style_switchable: bool,
     pub rdm_switchable: bool,
-    pub failsafe: Failsafe,
+    /// Status3 bit 5 of the root reply (the mode itself is per port: [`PortState::failsafe`]).
     pub failsafe_programmable: bool,
     pub llrp: bool,
     pub port_direction_switchable: bool,
@@ -214,10 +214,12 @@ pub struct PortState {
     pub can_output: bool,
     pub can_input: bool,
     pub direction: PortDirection,
-    /// NetSwitch, SubSwitch, SwOut[i].
+    /// NetSwitch, SubSwitch, SwOut of the port.
     pub output_port_address: u16,
-    /// NetSwitch, SubSwitch, SwIn[i].
+    /// NetSwitch, SubSwitch, SwIn of the port.
     pub input_port_address: u16,
+    /// Failsafe mode (Status3 bits 7–6 of this port's reply); `None` when not known.
+    pub failsafe: Option<Failsafe>,
     pub output: PortOutputState,
     pub input: PortInputState,
 }
@@ -258,11 +260,38 @@ impl NodeState {
         self.ports.iter().find(|p| p.port == port)
     }
 
-    /// True when both states are equal apart from `lastSeen` (no `node` event needed, contract §5).
-    pub fn same_except_last_seen(&self, other: &NodeState) -> bool {
+    /// True when both states are equal apart from the volatile fields `lastSeen` and the ArtPollReply counter in
+    /// `nodeReport` (no `node` event needed, contract §5).
+    pub fn same_state(&self, other: &NodeState) -> bool {
         let mut a = self.clone();
         a.last_seen = other.last_seen;
+        if node_report_without_counter(&a.node_report)
+            == node_report_without_counter(&other.node_report)
+        {
+            a.node_report.clone_from(&other.node_report);
+        }
         &a == other
+    }
+
+    /// Takes over the volatile fields (`lastSeen`, `nodeReport`) of `newer`, a state with [`Self::same_state`].
+    pub fn refresh_volatile(&mut self, newer: &NodeState) {
+        self.last_seen = newer.last_seen;
+        self.node_report.clone_from(&newer.node_report);
+    }
+}
+
+/// A NodeReport without its ArtPollReply counter: `"#0001 [0123] OK"` → `"#0001 [] OK"` (Art-Net 4: the decimal
+/// counter in brackets counts every ArtPollReply of the node). Other texts are returned unchanged.
+pub fn node_report_without_counter(report: &str) -> std::borrow::Cow<'_, str> {
+    let counter = report.find('[').and_then(|open| {
+        let close = open + report[open..].find(']')?;
+        let inner = &report[open + 1..close];
+        (!inner.trim().is_empty() && inner.trim().bytes().all(|b| b.is_ascii_digit()))
+            .then_some((open + 1, close))
+    });
+    match counter {
+        Some((start, end)) => format!("{}{}", &report[..start], &report[end..]).into(),
+        None => report.into(),
     }
 }
 
@@ -638,6 +667,23 @@ mod tests {
         let slots: RdmValue =
             serde_json::from_str(r#"[{"offset":0,"type":0,"labelId":1}]"#).unwrap();
         assert!(matches!(slots, RdmValue::SlotInfo(_)));
+    }
+
+    #[test]
+    fn node_report_counter_is_volatile() {
+        assert_eq!(
+            node_report_without_counter("#0001 [0123] Power On Tests successful"),
+            "#0001 [] Power On Tests successful"
+        );
+        assert_eq!(node_report_without_counter("[x] text"), "[x] text");
+        assert_eq!(node_report_without_counter(""), "");
+        let node = crate::backend::mock::sample_node("7FF0:00000001", Ipv4Addr::LOCALHOST, 1);
+        let mut next = node.clone();
+        next.node_report = "#0001 [0002] OK".into();
+        next.last_seen += 1;
+        assert!(node.same_state(&next));
+        next.node_report = "#000e [0003] Firmware update failed".into();
+        assert!(!node.same_state(&next));
     }
 
     #[test]

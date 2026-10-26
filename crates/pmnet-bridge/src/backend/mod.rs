@@ -5,9 +5,10 @@
 //! event fan-out, argument validation against the node table it mirrors from the backend's events).
 //!
 //! Implementations:
+//! - [`pixelmapper_net::PixelmapperNetBackend`]: the real Art-Net 4 / RDM backend on `crates/pixelmapper-net`;
+//!   what `pmnet-bridge serve` runs by default.
 //! - [`mock::MockBackend`]: scriptable, records every call; used by the tests and by `pmnet-bridge serve --mock`.
-//! - [`offline::OfflineBackend`]: no network; what `serve` runs until the real adapter exists.
-//! - [`pixelmapper_net`]: the adapter onto `crates/pixelmapper-net` (TODO, waits for its final API).
+//! - [`offline::OfflineBackend`]: no network (`pmnet-bridge serve --offline`).
 
 use crate::protocol::{
     ArtAddressArgs, BridgeStatus, CommandError, ErrorCode, Event, FirmwareImageInfo, FlashJob,
@@ -212,7 +213,8 @@ impl From<BackendError> for CommandError {
 /// - **State only from the network** (last-writer-wins, plan D5): `snapshot()` and every [`Event`] report what
 ///   nodes and devices said, never what was requested.
 /// - **Events** go to [`subscribe`](Self::subscribe) receivers in the order they happened. `Event::Node` carries
-///   the full merged node state; it may also be sent when only `lastSeen` changed (the server filters those).
+///   the full merged node state; it may also be sent when only `lastSeen` or the NodeReport reply counter
+///   changed (the server takes those over into its mirror without forwarding them).
 ///   When a command's answer changes a node (`art_address`, `art_input`), emit the `Node` event *before*
 ///   returning. A node that leaves the table gets `Event::NodeGone`; its TODs are implicitly gone with it.
 /// - **Non-blocking sync methods**: the plain `fn`s are called from connection tasks and must return quickly
