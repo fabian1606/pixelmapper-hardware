@@ -1,21 +1,24 @@
-//! One WebSocket connection: upgrade with `Origin` check, `hello`, the ordered read loop (commands, binary DMX,
-//! deadlines), command dispatch and cleanup.
+//! One client session, independent of its transport: the bridge `hello` event, the ordered message loop
+//! (commands, binary DMX, deadlines), command dispatch and cleanup.
 //!
-//! Messages of a connection are processed in order. Commands that only touch session state (`hello`, `nodes`,
+//! Messages of a session are processed in order. Commands that only touch session state (`hello`, `nodes`,
 //! `poll`, poll targets, `dmxRoutes`, `imageInfo`, `flashCancel`, `flashJobs`) complete before the next message
 //! is read, so e.g. `dmxRoutes` applies to every later binary message. Commands that wait for the network run as
-//! tasks (at most `max_inflight` per connection) and answer whenever they finish; `id` correlates.
+//! tasks (at most `max_inflight` per session) and answer whenever they finish; `id` correlates.
+//!
+//! The transport (WebSocket server, Tauri IPC, tests) feeds client messages into a [`ClientSession`] and drains
+//! the session's [`OutgoingRx`].
 
-use super::conn::{
-    spawn_writer, CloseReason, ConnTx, CLOSE_GOING_AWAY, CLOSE_INCOMPATIBLE, CLOSE_NO_HELLO,
-};
 use super::dmx::{interval_for_rate, Batch, DmxRouter};
 use super::hub::HubMsg;
+use super::outbound::{
+    CloseReason, ConnTx, OutgoingRx, CLOSE_GOING_AWAY, CLOSE_INCOMPATIBLE, CLOSE_NO_HELLO,
+};
 use super::validate::{
     check_node_port, check_port, check_rdm_payload, check_sub_device, check_unicast, unknown_node,
     validate_art_address, validate_art_input, validate_routes,
 };
-use super::{Shared, BRIDGE_VERSION};
+use super::{ClientInfo, Shared, BRIDGE_VERSION};
 use crate::backend::{
     BackendError, DmxTarget, FlashRequest, NetBackend, RdmAddress, RdmPayload, RdmRequest,
 };
@@ -28,8 +31,8 @@ use crate::protocol::{
     CommandError, ErrorCode, Event, HelloEvent, HexData, LogEntry, LogLevel, NodeId, NodeState,
     PortRef, RdmUid, PROTOCOL_VERSION,
 };
-use futures_util::stream::SplitStream;
-use futures_util::{FutureExt, StreamExt};
+use bytes::Bytes;
+use futures_util::FutureExt;
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::future::Future;
@@ -37,77 +40,95 @@ use std::net::Ipv4Addr;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::net::TcpStream;
-use tokio::sync::{oneshot, Semaphore};
-use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
-use tokio_tungstenite::tungstenite::http::{header, StatusCode};
-use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
-use tokio_tungstenite::tungstenite::{Bytes, Message};
-use tokio_tungstenite::WebSocketStream;
+use tokio::sync::{mpsc, oneshot, Semaphore};
 
-/// At most one `log` warning per connection and interval (malformed binary messages can arrive at 60/s).
+/// At most one `log` warning per session and interval (malformed binary messages can arrive at 60/s).
 const WARN_INTERVAL: Duration = Duration::from_secs(1);
 
-// ── Upgrade ───────────────────────────────────────────────────────────────────────────────────────────────────────
+/// Client messages buffered per session before `handle_text`/`handle_binary` wait (backpressure on the client).
+const INCOMING_CAPACITY: usize = 16;
 
-/// Performs the WebSocket upgrade; answers 403 when the `Origin` is not allowed (contract §1).
-// The callback's large `Err` type is dictated by tungstenite's handshake API.
-#[allow(clippy::result_large_err)]
-async fn accept<B: NetBackend>(
-    shared: &Shared<B>,
-    stream: TcpStream,
-) -> Option<WebSocketStream<TcpStream>> {
-    let policy = shared.config.origins.clone();
-    let callback = move |req: &Request, resp: Response| -> Result<Response, ErrorResponse> {
-        // A non-UTF-8 Origin never matches.
-        let origin = req
-            .headers()
-            .get(header::ORIGIN)
-            .map(|v| v.to_str().unwrap_or(""));
-        if policy.allows(origin) {
-            Ok(resp)
-        } else {
-            tracing::info!(origin = ?origin, "rejected WebSocket upgrade from a foreign origin");
-            let mut reject = ErrorResponse::new(Some("origin not allowed".into()));
-            *reject.status_mut() = StatusCode::FORBIDDEN;
-            Err(reject)
+// ── ClientSession ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// The session has ended; the message was not accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("bridge session closed")]
+pub struct SessionClosed;
+
+/// A message from the client.
+#[derive(Debug)]
+enum Incoming {
+    /// A JSON command.
+    Text(String),
+    /// A binary DMX frame set.
+    Binary(Bytes),
+}
+
+/// The client end of one bridge session (one app connection), created by
+/// [`Bridge::connect`](super::Bridge::connect).
+///
+/// The transport hands every client message to [`handle_text`](Self::handle_text) (JSON) or
+/// [`handle_binary`](Self::handle_binary) (DMX frame sets) in the order it received them, and delivers what the
+/// paired [`OutgoingRx`] yields. The session's task processes messages in order; the `handle_*` calls only wait
+/// while its small input buffer is full. [`close`](Self::close) ends the session (the client went away); so does
+/// dropping the `ClientSession` while the session is still running.
+#[derive(Debug)]
+pub struct ClientSession {
+    conn: ConnTx,
+    incoming: mpsc::Sender<Incoming>,
+}
+
+impl ClientSession {
+    /// Session number, unique per [`Bridge`](super::Bridge); `id % 256` is the `Physical` of its ArtDmx.
+    pub fn id(&self) -> u64 {
+        self.conn.id()
+    }
+
+    /// Handles one JSON text message of the client (a command, contract §2–§5).
+    pub async fn handle_text(&self, text: &str) -> Result<(), SessionClosed> {
+        self.push(Incoming::Text(text.to_owned())).await
+    }
+
+    /// Handles one binary message of the client (a DMX frame set, contract §7). `Vec<u8>` and [`Bytes`] are
+    /// taken without copying.
+    pub async fn handle_binary(&self, data: impl Into<Bytes>) -> Result<(), SessionClosed> {
+        self.push(Incoming::Binary(data.into())).await
+    }
+
+    /// Ends the session because the client went away. Nothing more is delivered; idempotent.
+    pub fn close(&self) {
+        self.conn.close_now(CloseReason::Gone);
+    }
+
+    /// True once the session has ended or is ending.
+    pub fn is_closed(&self) -> bool {
+        self.conn.is_closed()
+    }
+
+    /// Resolves once the session has ended or is ending (for whatever reason).
+    pub async fn closed(&self) {
+        let mut close = self.conn.closed();
+        let _ = close.wait_for(Option::is_some).await;
+    }
+
+    /// Queues a client message for the session task.
+    async fn push(&self, msg: Incoming) -> Result<(), SessionClosed> {
+        if self.conn.is_closed() {
+            return Err(SessionClosed);
         }
-    };
-    let ws_config = WebSocketConfig::default()
-        .max_message_size(Some(shared.config.max_message_size))
-        .max_frame_size(Some(shared.config.max_message_size));
-    let upgrade =
-        tokio_tungstenite::accept_hdr_async_with_config(stream, callback, Some(ws_config));
-    match tokio::time::timeout(shared.config.handshake_timeout, upgrade).await {
-        Ok(Ok(ws)) => Some(ws),
-        Ok(Err(e)) => {
-            tracing::debug!("WebSocket upgrade failed: {e}");
-            None
-        }
-        Err(_) => {
-            tracing::debug!("WebSocket upgrade timed out");
-            None
-        }
+        self.incoming.send(msg).await.map_err(|_| SessionClosed)
     }
 }
 
-/// Serves one TCP connection until it closes.
-pub(super) async fn run_connection<B: NetBackend>(
+/// Opens a session on `shared`: queues the bridge `hello` event and spawns the session task.
+pub(super) fn open<B: NetBackend>(
     shared: Arc<Shared<B>>,
-    stream: TcpStream,
     id: u64,
-) {
-    let Some(ws) = accept(&shared, stream).await else {
-        return;
-    };
-    let (sink, mut source) = ws.split();
-    let (conn, writer) = spawn_writer(
-        id,
-        sink,
-        shared.config.outbound_capacity,
-        shared.config.ping_interval,
-    );
-    tracing::debug!(conn = id, "connection open");
+    info: ClientInfo,
+) -> (ClientSession, OutgoingRx) {
+    let (conn, outgoing) = super::outbound::channel(id, shared.config.outbound_capacity);
+    let (incoming_tx, incoming_rx) = mpsc::channel(INCOMING_CAPACITY);
+    tracing::debug!(conn = id, transport = %info.transport, origin = ?info.origin, "session open");
 
     let status = shared.mirror.read().status.clone();
     let hello = HelloEvent {
@@ -120,21 +141,24 @@ pub(super) async fn run_connection<B: NetBackend>(
         conn.send_text(text);
     }
 
-    let mut session = Session {
+    let session = Session {
         inflight: Arc::new(Semaphore::new(shared.config.max_inflight.max(1))),
         router: DmxRouter::new(shared.config.dmx_refresh),
         shared,
         physical: (id % 256) as u8,
-        conn,
+        conn: conn.clone(),
         handshaken: false,
         poll_targets: BTreeSet::new(),
         last_warning: None,
     };
-    session.run(&mut source).await;
-    session.cleanup();
-    drop(session);
-    let _ = writer.await;
-    tracing::debug!(conn = id, "connection closed");
+    tokio::spawn(session.serve(incoming_rx));
+    (
+        ClientSession {
+            conn,
+            incoming: incoming_tx,
+        },
+        outgoing,
+    )
 }
 
 // ── Session ───────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -145,16 +169,16 @@ enum Flow {
     Stop,
 }
 
-/// Per-connection state owned by the read loop.
+/// Per-session state owned by the session task.
 struct Session<B: NetBackend> {
     shared: Arc<Shared<B>>,
     conn: ConnTx,
-    /// `Physical` of this connection's ArtDmx (connection number mod 256).
+    /// `Physical` of this session's ArtDmx (session number mod 256).
     physical: u8,
     /// Client `hello` accepted.
     handshaken: bool,
     router: DmxRouter,
-    /// Poll targets added by this connection.
+    /// Poll targets added by this session.
     poll_targets: BTreeSet<Ipv4Addr>,
     /// Limits concurrently running network commands.
     inflight: Arc<Semaphore>,
@@ -162,10 +186,18 @@ struct Session<B: NetBackend> {
 }
 
 impl<B: NetBackend> Session<B> {
-    /// The read loop: messages in order, plus the hello deadline, DMX deadlines, shutdown and close signals.
-    async fn run(&mut self, source: &mut SplitStream<WebSocketStream<TcpStream>>) {
+    /// The session task: runs the message loop, then cleans up.
+    async fn serve(mut self, mut incoming: mpsc::Receiver<Incoming>) {
+        self.run(&mut incoming).await;
+        self.cleanup();
+        tracing::debug!(conn = self.conn.id(), "session closed");
+    }
+
+    /// The message loop: client messages in order, plus the hello deadline, DMX deadlines, shutdown and close
+    /// signals.
+    async fn run(&mut self, incoming: &mut mpsc::Receiver<Incoming>) {
         let mut closed = self.conn.closed();
-        let mut shutdown = self.shared.shutdown.clone();
+        let mut shutdown = self.shared.shutdown.subscribe();
         let hello_deadline = tokio::time::sleep(self.shared.config.hello_timeout);
         tokio::pin!(hello_deadline);
         loop {
@@ -190,25 +222,24 @@ impl<B: NetBackend> Session<B> {
                         self.send_batch(batch);
                     }
                 }
-                msg = source.next() => match msg {
-                    Some(Ok(Message::Text(text))) => {
-                        if let Flow::Stop = self.on_text(text.as_str()).await {
+                msg = incoming.recv() => match msg {
+                    Some(Incoming::Text(text)) => {
+                        if let Flow::Stop = self.on_text(&text).await {
                             break;
                         }
                     }
-                    Some(Ok(Message::Binary(data))) => self.on_binary(data),
-                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
+                    Some(Incoming::Binary(data)) => self.on_binary(data),
+                    // The `ClientSession` was dropped: the client is gone.
+                    None => {
                         self.conn.close_now(CloseReason::Gone);
                         break;
                     }
-                    // Ping/pong are answered by tungstenite.
-                    Some(Ok(_)) => {}
                 },
             }
         }
     }
 
-    /// Drops this connection's poll targets and fan-out registration. Routes die with the session.
+    /// Drops this session's poll targets and fan-out registration. Routes die with the session.
     fn cleanup(&mut self) {
         for ip in std::mem::take(&mut self.poll_targets) {
             self.release_poll_target(ip);
@@ -236,7 +267,7 @@ impl<B: NetBackend> Session<B> {
         }
     }
 
-    /// Sends a rate-limited `log` warning to this connection only.
+    /// Sends a rate-limited `log` warning to this session only.
     fn warn(&mut self, text: String) {
         let now = Instant::now();
         if self.last_warning.is_some_and(|t| now < t + WARN_INTERVAL) {
@@ -249,7 +280,7 @@ impl<B: NetBackend> Session<B> {
         }
     }
 
-    /// Runs a network command as a task (bounded per connection) and replies when it finishes. A panicking
+    /// Runs a network command as a task (bounded per session) and replies when it finishes. A panicking
     /// backend becomes an `internal` error instead of a missing reply.
     async fn spawn_command<T, F>(&self, id: u32, fut: F)
     where

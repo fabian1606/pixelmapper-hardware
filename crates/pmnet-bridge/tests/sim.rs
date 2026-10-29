@@ -2,6 +2,8 @@
 //! simulated tubes and a third-party fixture), the bridge with `PixelmapperNetBackend`, and a WebSocket client.
 //! Every test uses its own ephemeral ports, so they run in parallel.
 
+#![cfg(feature = "server")]
+
 mod common;
 
 use common::{config, eventually, Client};

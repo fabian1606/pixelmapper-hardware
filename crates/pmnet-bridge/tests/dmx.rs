@@ -1,5 +1,7 @@
 //! Binary DMX path: route table, frame sets, ArtSync flag, per-connection Physical, rate limit, refresh.
 
+#![cfg(feature = "server")]
+
 mod common;
 
 use common::{config, eventually, mock_with_node, node, start, Client, NODE};

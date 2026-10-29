@@ -1,9 +1,9 @@
 //! The hub: one task that mirrors the backend's state from its events and fans every event out to the
-//! handshaken connections. Snapshot-like results (`hello`, `nodes`, `artAddress`/`artInput` node results) are
+//! handshaken sessions. Snapshot-like results (`hello`, `nodes`, `artAddress`/`artInput` node results) are
 //! produced inside this task as well, so they are ordered with the events on every connection's queue
 //! (contract §1 Ordering: a result reflects every event sent before it).
 
-use super::conn::ConnTx;
+use super::outbound::{ConnTx, Outgoing};
 use crate::backend::{NetBackend, Snapshot};
 use crate::protocol::messages::{result_json, Empty, NodeResult, NodesResult};
 use crate::protocol::{BridgeStatus, Event, LogEntry, LogLevel, NodeId, NodeState, PortRef, Tod};
@@ -11,7 +11,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{mpsc, oneshot};
-use tokio_tungstenite::tungstenite::Message;
 
 // ── Mirror ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -199,7 +198,7 @@ pub fn start<B: NetBackend>(backend: Arc<B>) -> (HubTx, SharedMirror) {
 }
 
 impl<B: NetBackend> Hub<B> {
-    /// Runs until every `HubTx` is dropped (server shut down).
+    /// Runs until every `HubTx` is dropped (bridge and all its sessions gone).
     async fn run(
         mut self,
         mut events: tokio::sync::broadcast::Receiver<Event>,
@@ -237,7 +236,7 @@ impl<B: NetBackend> Hub<B> {
                 return;
             }
         };
-        let msg = Message::text(text);
+        let msg = Outgoing::Text(text);
         // A full queue closes that connection (slow-client policy); it is dropped from the fan-out list.
         self.conns.retain(|_, conn| conn.send(msg.clone()));
     }

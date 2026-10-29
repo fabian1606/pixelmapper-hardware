@@ -1,5 +1,7 @@
 //! Event fan-out, ordering against results, poll-target reference counting and the slow-client policy.
 
+#![cfg(feature = "server")]
+
 mod common;
 
 use common::{config, eventually, mock_with_node, node, start, Client, Incoming, NODE};

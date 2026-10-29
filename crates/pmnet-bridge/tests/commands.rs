@@ -1,5 +1,7 @@
 //! Command round trips through the server to the mock backend, and error replies.
 
+#![cfg(feature = "server")]
+
 mod common;
 
 use common::{config, mock_with_node, start, Client, NODE, TUBE};

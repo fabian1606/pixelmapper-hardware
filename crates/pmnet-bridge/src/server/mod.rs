@@ -1,37 +1,35 @@
-//! The WebSocket server (`pmnet serve`): loopback listeners, the accept loop, configuration and shutdown.
+//! The WebSocket server (`pmnet-bridge serve`, feature `server`): loopback listeners, the accept loop,
+//! configuration and shutdown.
 //!
-//! Structure: one [`hub`] task mirrors the backend and fans events out; every connection has a reader task
-//! ([`session`]) and a writer task ([`conn`]) joined by a bounded queue; [`dmx`] schedules ArtDmx per connection;
-//! [`validate`] and [`origin`] are pure checks.
+//! A thin transport over the [`bridge`](crate::bridge) core: the server owns one [`Bridge`]; every accepted
+//! connection passes the `Origin` check ([`origin`]), opens a bridge session and runs a reader (WebSocket frames →
+//! [`ClientSession`](crate::bridge::ClientSession)) and a writer task (the session's
+//! [`OutgoingRx`](crate::bridge::OutgoingRx) → frames, plus pings).
 
-pub mod conn;
-pub mod dmx;
-pub mod hub;
 pub mod origin;
-mod session;
-pub mod validate;
+mod ws;
+
+pub use crate::bridge::BRIDGE_VERSION;
 
 use crate::backend::NetBackend;
-use hub::{HubTx, SharedMirror};
+use crate::bridge::{Bridge, BridgeConfig};
 use origin::OriginPolicy;
-use std::collections::BTreeMap;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tokio::task::{JoinHandle, JoinSet};
-
-/// Version reported as `hello.bridge`.
-pub const BRIDGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Default TCP port (contract §1).
 pub const DEFAULT_PORT: u16 = 7777;
 
 // ── Configuration ─────────────────────────────────────────────────────────────────────────────────────────────────
 
-/// Server settings. `Default` is the production configuration of the contract; tests shorten the timers.
+/// Server settings: the WebSocket side plus the session settings of the bridge core
+/// ([`bridge_config`](Self::bridge_config)). `Default` is the production configuration of the contract; tests
+/// shorten the timers.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     /// TCP port on 127.0.0.1 (and ::1); 0 = ephemeral (tests).
@@ -56,18 +54,31 @@ pub struct ServerConfig {
     pub handshake_timeout: Duration,
 }
 
+impl ServerConfig {
+    /// The session settings of the bridge core.
+    pub fn bridge_config(&self) -> BridgeConfig {
+        BridgeConfig {
+            hello_timeout: self.hello_timeout,
+            dmx_refresh: self.dmx_refresh,
+            outbound_capacity: self.outbound_capacity,
+            max_inflight: self.max_inflight,
+        }
+    }
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
+        let bridge = BridgeConfig::default();
         Self {
             port: DEFAULT_PORT,
             bind_ipv6: true,
             origins: OriginPolicy::with_defaults::<&str>(&[])
                 .unwrap_or_else(|_| OriginPolicy::only(Vec::new())),
-            hello_timeout: Duration::from_secs(10),
+            hello_timeout: bridge.hello_timeout,
             ping_interval: Duration::from_secs(10),
-            dmx_refresh: Duration::from_secs(1),
-            outbound_capacity: 1024,
-            max_inflight: 256,
+            dmx_refresh: bridge.dmx_refresh,
+            outbound_capacity: bridge.outbound_capacity,
+            max_inflight: bridge.max_inflight,
             max_message_size: 4 << 20,
             handshake_timeout: Duration::from_secs(5),
         }
@@ -77,15 +88,9 @@ impl Default for ServerConfig {
 // ── Shared state ──────────────────────────────────────────────────────────────────────────────────────────────────
 
 /// State shared by the accept loop and all connections.
-struct Shared<B> {
-    backend: Arc<B>,
+struct Shared<B: NetBackend> {
+    bridge: Bridge<B>,
     config: ServerConfig,
-    hub: HubTx,
-    mirror: SharedMirror,
-    /// Poll targets with the number of connections that added them.
-    poll_targets: Mutex<BTreeMap<Ipv4Addr, usize>>,
-    /// Becomes true on shutdown.
-    shutdown: watch::Receiver<bool>,
 }
 
 // ── Server ────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -137,16 +142,9 @@ pub async fn serve<B: NetBackend>(
     } else {
         None
     };
-    let (hub, mirror) = hub::start(backend.clone());
+    let bridge = Bridge::new(backend, config.bridge_config());
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let shared = Arc::new(Shared {
-        backend,
-        config,
-        hub,
-        mirror,
-        poll_targets: Mutex::new(BTreeMap::new()),
-        shutdown: shutdown_rx.clone(),
-    });
+    let shared = Arc::new(Shared { bridge, config });
     let task = tokio::spawn(accept_loop(shared, v4, v6, shutdown_rx));
     Ok(ServerHandle {
         local_addrs,
@@ -163,7 +161,6 @@ async fn accept_loop<B: NetBackend>(
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut conns = JoinSet::new();
-    let mut next_id: u64 = 0;
     loop {
         let accepted = tokio::select! {
             _ = async { let _ = shutdown.wait_for(|down| *down).await; } => break,
@@ -174,8 +171,7 @@ async fn accept_loop<B: NetBackend>(
         match accepted {
             Ok((stream, _peer)) => {
                 let _ = stream.set_nodelay(true);
-                conns.spawn(session::run_connection(shared.clone(), stream, next_id));
-                next_id += 1;
+                conns.spawn(ws::run_connection(shared.clone(), stream));
             }
             Err(e) => {
                 // E.g. out of file descriptors: back off instead of spinning.
@@ -186,6 +182,8 @@ async fn accept_loop<B: NetBackend>(
     }
     drop(v4);
     drop(v6);
+    // Every session queues 1001 and ends; the connections deliver it and close.
+    shared.bridge.shutdown();
     let drain = async { while conns.join_next().await.is_some() {} };
     if tokio::time::timeout(Duration::from_secs(2), drain)
         .await

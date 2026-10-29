@@ -26,6 +26,8 @@ The bridge owns every Art-Net/RDM packet, timer and procedure (plan D2). Pixelma
   is a `tod`). `artAddress`/`artInput` answer with the ArtPollReply of the addressed BindIndex (no extra wait).
   `flash` job errors: the update flow's error kind gives `deviceMismatch`, `downgrade`, `timeout` or `nack`, other
   kinds `badResponse` (§11).
+  Addendum (2026-10-29, transport independence; **no shape change**): the same messages may travel over an
+  in-process transport (the desktop app embeds the bridge core), see §1 “Other transports”.
 - *Revision 1 (2026-10-24)*: first candidate.
 
 The key words MUST, SHOULD and MAY are used as in RFC 2119. Bit positions of Art-Net fields are given for orientation; the **Art-Net 4 specification and ANSI E1.20 are binding** for positions, polarity and encoding.
@@ -44,6 +46,17 @@ The key words MUST, SHOULD and MAY are used as in RFC 2119. Bit positions of Art
 | Keep-alive | The bridge SHOULD send WebSocket ping frames every 10 s; browsers answer automatically. |
 | Size | Messages up to 4 MiB (Intel HEX images travel as text); larger ones end the connection. |
 | Slow clients | Everything for a connection goes through one bounded, ordered queue (1024 messages in `pmnet-bridge`). The bridge never blocks on one connection and never drops single messages (that would corrupt the app's state): when a connection's queue is full, it is closed with `4003`. The app reconnects and re-reads `nodes`. |
+
+### Other transports (in-process embedding)
+
+The protocol does not depend on WebSocket. `pmnet-bridge`'s core (`pmnet_bridge::bridge`) runs one session per
+client over any transport; the WebSocket server is one thin adapter, and the Pixelmapper desktop app embeds the
+core and carries the **same messages** over its own IPC (Tauri), without a socket or a separate process. On such a
+transport: one text message = one JSON object exactly as in a text frame, one binary message = one frame set
+(§7), and the bridge ends a session with the same close codes (below). Everything else in this contract —
+handshake, ordering, events, commands, errors, slow-client policy, per-session poll targets, DMX routes and
+`Physical` — applies unchanged; “connection” means “session”. What is WebSocket-specific: the URL, `Bind`,
+`Origin` (an in-process client is trusted), keep-alive pings and the frame size limit. No shape change.
 
 ### Handshake
 

@@ -1,6 +1,6 @@
 [package]
 name = "pmnet-bridge"
-description = "WebSocket bridge between the Pixelmapper web app and Art-Net 4 / RDM (`pmnet-bridge serve`)"
+description = "Bridge between the Pixelmapper app and Art-Net 4 / RDM: embeddable session core and WebSocket server (`pmnet-bridge serve`)"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -13,17 +13,30 @@ path = "src/lib.rs"
 [[bin]]
 name = "pmnet-bridge"
 path = "src/main.rs"
+required-features = ["server"]
+
+[features]
+default = ["server"]
+# The WebSocket server, the `serve` CLI and the `pmnet-bridge` binary. Embedders of the bridge core
+# (`pmnet_bridge::bridge`, e.g. the desktop app) use `default-features = false`.
+server = [
+    "dep:clap",
+    "dep:tokio-tungstenite",
+    "dep:tracing-subscriber",
+    "tokio/rt-multi-thread",
+    "tokio/signal",
+]
 
 [dependencies]
 bytes = "1"
-clap.workspace = true
+clap = { workspace = true, optional = true }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 pixelmapper-net = { path = "../pixelmapper-net" }
 serde.workspace = true
 serde_json.workspace = true
 serde_path_to_error = "0.1"
 thiserror.workspace = true
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
-tokio-tungstenite = "0.30"
+tokio = { version = "1", features = ["rt", "macros", "net", "sync", "time"] }
+tokio-tungstenite = { version = "0.30", optional = true }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi", "std"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi", "std"], optional = true }

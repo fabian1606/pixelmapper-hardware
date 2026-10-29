@@ -1,5 +1,7 @@
 //! Connection level: `Origin` allow-list, `hello` in both directions, close codes, shutdown.
 
+#![cfg(feature = "server")]
+
 mod common;
 
 use common::{config, mock_with_node, start, Client, NODE};
