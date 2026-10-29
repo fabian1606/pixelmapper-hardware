@@ -68,3 +68,9 @@ node/firmware/test_host/build/virtual_node --port 16454 --tubes 1:3,2:1 --log
 ```
 
 Conventions for contributors (human or agent): [CLAUDE.md](CLAUDE.md).
+
+## License
+
+GNU Affero General Public License v3.0 ([LICENSE](LICENSE)), the same license as
+[Pixelmapper](https://github.com/fabian1606/pixelmapper). Third-party fonts under
+`node/firmware/components/pm_ui/fonts/` keep their own licenses (see the files there).
